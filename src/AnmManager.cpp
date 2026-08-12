@@ -2215,7 +2215,8 @@ ZunResult AnmManager::LoadSurface(i32 surfaceIdx, const char *path)
         g_Supervisor.gfxDevice->DeleteTexture(this->surfaceTextures[surfaceIdx]);
     }
     this->surfaceTextures[surfaceIdx] = g_Supervisor.gfxDevice->CreateTexture();
-    g_Supervisor.gfxDevice->BindTexture(this->surfaceTextures[surfaceIdx]);
+    this->currentTexture = this->surfaceTextures[surfaceIdx];
+    g_Supervisor.gfxDevice->BindTexture(this->currentTexture);
     g_Supervisor.gfxDevice->SetTextureImage(
         this->surfacesBis[surfaceIdx]->w, this->surfacesBis[surfaceIdx]->h, PIXEL_RGBA,
         PIXEL_UNSIGNED_BYTE, this->surfacesBis[surfaceIdx]->pixels);
@@ -2250,7 +2251,8 @@ void AnmManager::CopySurfaceToBackBuffer(i32 surfaceIdx, i32 left, i32 top, i32 
 
     SDL_Surface *surf = this->surfacesBis[surfaceIdx];
 
-    g_Supervisor.gfxDevice->BindTexture(this->surfaceTextures[surfaceIdx]);
+    this->currentTexture = this->surfaceTextures[surfaceIdx];
+    g_Supervisor.gfxDevice->BindTexture(this->currentTexture);
 
     VertexTex1DiffuseXyzrhw vertices[4];
     f32 width = (f32)this->surfaceSourceInfo[surfaceIdx].width;
