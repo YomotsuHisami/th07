@@ -221,8 +221,8 @@
           case "configure": await installShared(message); await installRuntime(message); await installMusic(message); reply(message.request, true); break;
           case "launch": launch(); reply(message.request, true); break;
           case "touch-controls":
-            if (typeof message.fireEnabled !== "boolean" || !Number.isInteger(message.bombSerial)) throw new Error("invalid touch controls");
-            Module.eaglerControls.fireEnabled = message.fireEnabled; Module.eaglerControls.bombSerial = message.bombSerial;
+            if (typeof message.fireEnabled !== "boolean" || !Number.isInteger(message.bombSerial) || !Number.isInteger(message.escapeSerial)) throw new Error("invalid touch controls");
+            Module.eaglerControls.fireEnabled = message.fireEnabled; Module.eaglerControls.bombSerial = message.bombSerial; Module.eaglerControls.escapeSerial = message.escapeSerial;
             reply(message.request, true); break;
           case "list": reply(message.request, true, { files: walk(saveRoot) }); break;
           case "read": { const bytes = FS.readFile(safePath(message.path)); reply(message.request, true, { path: message.path, bytes: Array.from(bytes) }); break; }
@@ -239,7 +239,7 @@
         locateFile: path => assetVersion ? `${path}?v=${encodeURIComponent(assetVersion)}` : path,
         touhouMusicMode: "",
       eaglerOptions: { thpracEnabled: false, touchEnabled: false, unlimitedTouch: false, touchBombZoneEnabled: true, alwaysHitbox: false, th06FocusHitbox: false, thpracSession: null },
-        eaglerControls: { fireEnabled: true, bombSerial: 0 },
+        eaglerControls: { fireEnabled: true, bombSerial: 0, escapeSerial: 0 },
         preRun: [() => {
           addRunDependency("savesth07-sync");
           try { FS.mkdir(saveRoot); } catch (error) { if (!String(error).includes("File exists")) console.error(error); }
