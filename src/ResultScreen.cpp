@@ -1373,13 +1373,13 @@ ZunResult ResultScreen::HandleReplaySaveKeyboard()
     case 13:
         if (this->frameTimer == 0)
         {
-            std::filesystem::create_directory(FileSystem::GetPrefPath("replay"));
+    std::filesystem::create_directory(std::filesystem::u8path(FileSystem::GetPrefPath("replay")));
 
             for (vmIdx = 0; vmIdx < 15; vmIdx++)
             {
                 char filename[32];
                 snprintf(filename, sizeof(filename), "th7_%.2d.rpy", vmIdx + 1);
-                std::string replayPath = fs::path(FileSystem::GetPrefPath("replay")) / filename;
+        std::string replayPath = FileSystem::GetPrefPath("replay") + "/" + filename;
                 replayFile = (ReplayFile *)FileSystem::OpenFile(replayPath.c_str(), 1);
                 if (!replayFile)
                 {
@@ -1530,7 +1530,7 @@ ZunResult ResultScreen::HandleReplaySaveKeyboard()
             {
                 char filename[32];
                 snprintf(filename, sizeof(filename), "th7_%.2d.rpy", this->chosenReplayIdx + 1);
-                std::string replayPath = fs::path(FileSystem::GetPrefPath("replay")) / filename;
+        std::string replayPath = FileSystem::GetPrefPath("replay") + "/" + filename;
                 ReplayManager::SaveReplay(replayPath.c_str(), this->replayName);
                 this->frameTimer = 0;
                 this->resultScreenState = 2;
@@ -2022,7 +2022,7 @@ ZunResult ResultScreen::DrawFinalStats()
             slowdown = 1.0f;
         }
 
-        slowdown = (1.0f - slowdown) * 100.0f;
+        slowdown = Touch::WasUsedThisRun() ? 100.0f : (1.0f - slowdown) * 100.0f;
 
         pos.y += 22.0f;
         AsciiManager::AddFormatText(&g_AsciiManager, &pos, "    %3.2f%%", slowdown);

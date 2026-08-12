@@ -305,6 +305,7 @@ struct Player
     Float2 velocity;
     i32 unused_9d4;
     Effect *focusEffect;
+    Effect *eaglerHitboxEffect;
     BombProjectile bombDamageBoxes[112];
     BombClearBox bombClearBoxes[96];
     CachedBombClearBox activeBombClearBoxesCache[96];

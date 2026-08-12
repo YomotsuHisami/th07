@@ -12,6 +12,8 @@
 #include "GameWindow.hpp"
 #include "Gui.hpp"
 #include "Player.hpp"
+#include "PracticeRuntime.hpp"
+#include "RuntimeExtension.hpp"
 #include "Rng.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
@@ -491,6 +493,10 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
     u32 size;
 
     Touch::ResetRunUsage();
+    PracticeRuntime::RefreshFromHost();
+    if (arg->replay)
+        PracticeRuntime::LoadReplayMetadata(arg->replayFilename);
+    PracticeRuntime::PrepareStart(*arg);
 
     g_GameWindow.ResetAccumulator();
     g_Supervisor.checkTiming = 0;
@@ -762,6 +768,11 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
         return ZUN_ERROR;
     }
 
+    // Apply sidecar-backed practice state after the original replay loader.
+    // Ordinary replays leave PracticeRuntime inactive and are unchanged.
+    PracticeRuntime::ApplyInitialState(*arg, true);
+    RuntimeExtension::OnGameStarted(arg);
+
     if (!g_GameManager.replay)
     {
         ReplayManager::RegisterChain(0, "replay/th7_00.rpy");
@@ -787,7 +798,8 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
         g_Supervisor.fpsAccumulator = 0.0f;
     }
     arg->isTimeStopped = 0;
-    arg->globals->score = 0;
+    if (!PracticeRuntime::Active())
+        arg->globals->score = 0;
     arg->finished = 0;
     g_AsciiManager.InitializeVms();
     g_GameManager.slowModeSlowActive = 0;

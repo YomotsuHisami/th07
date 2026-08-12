@@ -27,6 +27,9 @@ f64 g_LastFrameTime;
 u64 g_LastPerfCounter;
 f32 g_RenderAlpha = 1.0f;
 bool g_SuppressAnmAdvance;
+#ifdef TH_DEV_TOOLS
+f32 g_DevSpeedMultiplier = 1.0f;
+#endif
 
 static GfxInit g_RenderingBackends[] = {
     GlesGraphics::Init,
@@ -88,6 +91,10 @@ RenderResult GameWindow::Render()
     }
 
     this->accumulator += elapsed;
+#ifdef TH_DEV_TOOLS
+    if (g_DevSpeedMultiplier > 1.0f)
+        this->accumulator += elapsed * (g_DevSpeedMultiplier - 1.0f);
+#endif
 
     i32 chainRes = CHAIN_CALLBACK_RESULT_CONTINUE;
     bool updated = false;
@@ -193,10 +200,12 @@ ZunResult GameWindow::CreateGameWindow()
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING,
                           "東方妖々夢　〜 Perfect Cherry Blossom. ver 1.00b");
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_OPENGL_BOOLEAN, true);
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
-#elif !defined(__EMSCRIPTEN__)
+#elif defined(__EMSCRIPTEN__)
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
+#else
     if (!g_Supervisor.cfg.windowed)
     {
         SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, true);

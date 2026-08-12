@@ -7,6 +7,12 @@
 #include <chrono>
 #include <cstdio>
 
+#ifdef __EMSCRIPTEN__
+static char g_WebMidiPaths[32][256] = {};
+
+#include <emscripten/emscripten.h>
+#endif
+
 #include "AnmIdx.hpp"
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
@@ -38,6 +44,50 @@ u16 g_LastFrameGameInput;
 u16 g_IsEighthFrameOfHeldInput;
 u16 g_NumOfFramesInputsWereHeld;
 Supervisor g_Supervisor;
+#ifdef __EMSCRIPTEN__
+static bool IsWebOggMode()
+{
+    return EM_ASM_INT({ return Module.touhouMusicMode === 'ogg'; }) != 0;
+}
+
+static bool HasWebOggForMidi(const char *midiPath)
+{
+    const char *filename = strrchr(midiPath, '/');
+    if (!filename)
+    {
+        filename = strrchr(midiPath, '\\');
+    }
+    filename = filename ? filename + 1 : midiPath;
+    char oggPath[512];
+    if (snprintf(oggPath, sizeof(oggPath), "bgm-ogg/%s", filename) >= (i32)sizeof(oggPath))
+    {
+        return false;
+    }
+    char *extension = strrchr(oggPath, '.');
+    if (!extension)
+    {
+        return false;
+    }
+    strcpy(extension, ".ogg");
+    SDL_IOStream *stream = SDL_IOFromFile(FileSystem::GetBasePath(oggPath).c_str(), "rb");
+    if (!stream)
+    {
+        return false;
+    }
+    SDL_CloseIO(stream);
+    return true;
+}
+
+static void NotifyWebMidiFallback(const char *path)
+{
+    EM_ASM({
+        if (window.parent !== window) {
+            window.parent.postMessage({ protocol: 'eagler-touhou/1', game: 'th07',
+                event: 'midi-fallback', path: UTF8ToString($0) }, location.origin);
+        }
+    }, path);
+}
+#endif
 u32 g_FpsUpdateCounter;
 char g_ReplayFpsBuffer[256];
 char g_FpsCounterBuffer[256];
@@ -933,6 +983,19 @@ ZunResult Supervisor::LoadConfig(const char *configFilename)
         }
         g_ControllerMapping = g_Supervisor.cfg.controllerMapping;
     }
+#ifdef __EMSCRIPTEN__
+    const int webMusicMode = EM_ASM_INT({
+        return Module.touhouMusicMode === 'midi' ? 2 :
+               (Module.touhouMusicMode === 'wav' || Module.touhouMusicMode === 'ogg' ? 1 : 0);
+    });
+    if (webMusicMode == MUSIC_MIDI || webMusicMode == MUSIC_WAV)
+    {
+        g_Supervisor.cfg.musicMode = webMusicMode;
+        // Dynamic Web resources are installed after the base data package;
+        // stream them instead of retaining a second full in-memory copy.
+        g_Supervisor.cfg.preloadBgm = 0;
+    }
+#endif
     g_Supervisor.cfg.loaded = 1;
     if (this->cfg.noVertexBuffers)
     {
@@ -1011,6 +1074,17 @@ i32 Supervisor::LoadAudio(i32 idx, const char *path)
     char pathbuf[256];
     char *pathext;
 
+    #ifdef __EMSCRIPTEN__
+    if (IsWebOggMode() && g_Supervisor.midiOutput)
+    {
+        if (idx >= 0 && idx < 32)
+        {
+            strncpy(g_WebMidiPaths[idx], path, sizeof(g_WebMidiPaths[idx]) - 1);
+            g_WebMidiPaths[idx][sizeof(g_WebMidiPaths[idx]) - 1] = '\0';
+        }
+        g_Supervisor.midiOutput->ReadFileData(idx, path);
+    }
+    #endif
     if (g_Supervisor.cfg.musicMode == MUSIC_MIDI)
     {
         if (g_Supervisor.midiOutput)
@@ -1042,6 +1116,22 @@ i32 Supervisor::LoadAudio(i32 idx, const char *path)
 
 ZunResult Supervisor::PlayLoadedAudio(i32 idx)
 {
+#ifdef __EMSCRIPTEN__
+    if (IsWebOggMode() && idx >= 0 && idx < 32 && !HasWebOggForMidi(g_WebMidiPaths[idx]))
+    {
+        g_SoundPlayer.PushCommand(AUDIO_STOP, 0, "dummy");
+        if (g_Supervisor.midiOutput)
+        {
+            g_Supervisor.midiOutput->PlayLoaded(idx);
+        }
+        NotifyWebMidiFallback(g_WebMidiPaths[idx]);
+        return ZUN_SUCCESS;
+    }
+    if (IsWebOggMode() && g_Supervisor.midiOutput)
+    {
+        g_Supervisor.midiOutput->StopPlayback();
+    }
+#endif
     if (g_Supervisor.cfg.musicMode == MUSIC_MIDI)
     {
         if (g_Supervisor.midiOutput)
@@ -1066,7 +1156,26 @@ ZunResult Supervisor::PlayAudio(const char *path)
     char local_10c[256];
     char *local_8;
 
-    if (g_Supervisor.cfg.musicMode == MUSIC_MIDI)
+    bool useMidi = g_Supervisor.cfg.musicMode == MUSIC_MIDI;
+#ifdef __EMSCRIPTEN__
+    if (IsWebOggMode() && !HasWebOggForMidi(path))
+    {
+        useMidi = true;
+        NotifyWebMidiFallback(path);
+    }
+    if (IsWebOggMode())
+    {
+        if (useMidi)
+        {
+            g_SoundPlayer.PushCommand(AUDIO_STOP, 0, "dummy");
+        }
+        else if (g_Supervisor.midiOutput)
+        {
+            g_Supervisor.midiOutput->StopPlayback();
+        }
+    }
+#endif
+    if (useMidi)
     {
         if (g_Supervisor.midiOutput)
         {
@@ -1099,6 +1208,17 @@ ZunResult Supervisor::PlayAudio(const char *path)
 
 ZunResult Supervisor::StopAudio()
 {
+#ifdef __EMSCRIPTEN__
+    if (IsWebOggMode())
+    {
+        if (g_Supervisor.midiOutput)
+        {
+            g_Supervisor.midiOutput->StopPlayback();
+        }
+        g_SoundPlayer.PushCommand(AUDIO_STOP, 0, "dummy");
+        return ZUN_SUCCESS;
+    }
+#endif
     if (g_Supervisor.cfg.musicMode == MUSIC_MIDI)
     {
         if (g_Supervisor.midiOutput)
@@ -1130,6 +1250,22 @@ ZunResult Supervisor::StopAudio()
 i32 Supervisor::FadeOutMusic(f32 musicFadeFrames)
 {
     f32 local_8;
+
+#ifdef __EMSCRIPTEN__
+    if (IsWebOggMode())
+    {
+        if (g_Supervisor.midiOutput)
+        {
+            g_Supervisor.midiOutput->SetFadeOut(1000.0f * musicFadeFrames);
+        }
+        local_8 = this->effectiveFramerateMultiplier > 0.0f &&
+                          this->effectiveFramerateMultiplier < 1.0f
+                      ? musicFadeFrames / this->effectiveFramerateMultiplier
+                      : musicFadeFrames;
+        g_SoundPlayer.PushCommand(AUDIO_FADEOUT, local_8, "");
+        return 0;
+    }
+#endif
 
     if (g_Supervisor.cfg.musicMode == MUSIC_MIDI)
     {

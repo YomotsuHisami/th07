@@ -14,6 +14,7 @@ void FingerMotion(const SDL_TouchFingerEvent &f);
 u16 GetButtonBits();
 
 bool IsFocus();
+bool IsUnlimited();
 
 bool GetPlayerDelta(f32 *dx, f32 *dy);
 void SetPlayerDelta(f32 dx, f32 dy);

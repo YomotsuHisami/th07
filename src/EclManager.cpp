@@ -12,6 +12,7 @@
 #include "Gui.hpp"
 #include "Player.hpp"
 #include "Rng.hpp"
+#include "RuntimeExtension.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "Supervisor.hpp"
@@ -62,6 +63,15 @@ ZunResult EclManager::Load(const char *path)
     this->eclFile = (EclRawHeader *)FileSystem::OpenFile(path, 0);
     if (!this->eclFile)
     {
+        g_GameErrorContext.Log(
+            "敵データの読み込みに失敗しました、データが壊れてるか失われています\n");
+        return ZUN_ERROR;
+    }
+
+    if (!RuntimeExtension::OnEclLoaded(path, (u8 *)this->eclFile, g_LastFileSize))
+    {
+        free(this->eclFile);
+        this->eclFile = NULL;
         g_GameErrorContext.Log(
             "敵データの読み込みに失敗しました、データが壊れてるか失われています\n");
         return ZUN_ERROR;

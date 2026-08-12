@@ -7,6 +7,7 @@
 #include "Chain.hpp"
 #include "Controller.hpp"
 #include "EffectManager.hpp"
+#include "EaglerOptions.hpp"
 #include "EnemyManager.hpp"
 #include "FileSystem.hpp"
 #include "GameManager.hpp"
@@ -1337,7 +1338,8 @@ i32 Player::HandlePlayerInputs()
     if (Touch::GetPlayerDelta(&touchDx, &touchDy))
     {
         f32 focusRatio = 1.0f;
-        if (this->isFocus && this->shooterData && this->shooterData->speed != 0.0f)
+        if (!Touch::IsUnlimited() && this->isFocus && this->shooterData &&
+            this->shooterData->speed != 0.0f)
         {
             focusRatio = this->shooterData->speedFocus / this->shooterData->speed;
         }
@@ -1390,8 +1392,12 @@ i32 Player::HandlePlayerInputs()
                              requestedVerticalSpeed * requestedVerticalSpeed;
 
         f32 maxSpeed = this->isFocus ? this->shooterData->speedFocus : this->shooterData->speed;
+        if (Touch::IsUnlimited())
+        {
+            maxSpeed = sqrtf(currentSpeedSq);
+        }
 
-        if (currentSpeedSq > maxSpeed * maxSpeed && currentSpeedSq > 0.0f)
+        if (!Touch::IsUnlimited() && currentSpeedSq > maxSpeed * maxSpeed && currentSpeedSq > 0.0f)
         {
             f32 currentSpeed = sqrtf(currentSpeedSq);
             horizontalSpeed = (requestedHorizontalSpeed / currentSpeed) * maxSpeed;
@@ -1417,7 +1423,8 @@ i32 Player::HandlePlayerInputs()
 
         if (focusRatio != 0.0f)
         {
-            if (currentSpeedSq > maxSpeed * maxSpeed && currentSpeedSq > 0.0f)
+            if (!Touch::IsUnlimited() && currentSpeedSq > maxSpeed * maxSpeed &&
+                currentSpeedSq > 0.0f)
             {
                 f32 consumeX = (hx != 0.0f) ? consumedGameDx / focusRatio : touchDx;
                 f32 consumeY = (vy != 0.0f) ? consumedGameDy / focusRatio : touchDy;
@@ -1533,6 +1540,16 @@ i32 Player::HandlePlayerInputs()
     this->optionsPosition[1] = this->positionCenter;
     optionOffsetX = optionOffsetY = 0.0f;
 
+    // Reuse PCB's own focus marker (effect 24).  eagler-touhou only changes
+    // its lifetime; the sprite, animation and player attachment stay native.
+    if (EaglerOptions::AlwaysShowHitbox() &&
+        (!this->eaglerHitboxEffect || !this->eaglerHitboxEffect->inUseFlag ||
+         this->eaglerHitboxEffect->effectId != 24))
+    {
+        this->eaglerHitboxEffect =
+            g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
+    }
+
     if (g_GameManager.character != CHAR_SAKUYA || g_GameManager.shotType != 1)
     {
         switch (this->optionState)
@@ -1546,8 +1563,9 @@ i32 Player::HandlePlayerInputs()
             if (this->isFocus)
             {
                 this->optionState = OPTION_FOCUSING;
-                this->focusEffect =
-                    g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
+                if (!EaglerOptions::AlwaysShowHitbox())
+                    this->focusEffect =
+                        g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
             }
             else
             {
@@ -1605,8 +1623,9 @@ i32 Player::HandlePlayerInputs()
             {
                 this->optionState = OPTION_FOCUSING;
                 this->focusMovementTimer = 8 - this->focusMovementTimer.GetCurrent();
-                this->focusEffect =
-                    g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
+                if (!EaglerOptions::AlwaysShowHitbox())
+                    this->focusEffect =
+                        g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
                 goto CASE_OPTION_FOCUSING;
             }
         }
@@ -1629,8 +1648,9 @@ i32 Player::HandlePlayerInputs()
             if (this->isFocus)
             {
                 this->optionState = OPTION_FOCUSING;
-                this->focusEffect =
-                    g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
+                if (!EaglerOptions::AlwaysShowHitbox())
+                    this->focusEffect =
+                        g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
                 goto CASE_OPTION_FOCUSING_2;
             }
             this->optionsPosition[0].x -= optionOffsetX;
@@ -1697,8 +1717,9 @@ i32 Player::HandlePlayerInputs()
             {
                 this->optionState = OPTION_FOCUSING;
                 this->focusMovementTimer = 8 - this->focusMovementTimer.GetCurrent();
-                this->focusEffect =
-                    g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
+                if (!EaglerOptions::AlwaysShowHitbox())
+                    this->focusEffect =
+                        g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
                 goto CASE_OPTION_FOCUSING_2;
             }
             this->focusMovementTimer++;

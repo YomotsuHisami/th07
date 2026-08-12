@@ -359,9 +359,10 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
     }
     data->textureIdx = textureIdx;
     data->ownsMemory = ownsMemory;
+    name = (char *)((u8 *)data + data->nameOffset);
+    bool textureWasRuntimeOverride = false;
     if (!data->hasData)
     {
-        name = (char *)((u8 *)data + data->nameOffset);
         if (*name == '@')
         {
             CreateEmptyTexture(data->textureIdx, data->width, data->height);
@@ -374,8 +375,9 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
                     "テクスチャ %s が読み込めません。データが失われてるか壊れています\n", name);
                 return ZUN_ERROR;
             }
+            textureWasRuntimeOverride = g_LastFileWasRuntimeOverride;
         }
-        if (data->mipmapNameOffset != 0)
+        if (data->mipmapNameOffset != 0 && !textureWasRuntimeOverride)
         {
             name = (char *)((u8 *)data + data->mipmapNameOffset);
             if (LoadTextureAlphaChannel(data->textureIdx, name) != ZUN_SUCCESS)
@@ -388,13 +390,22 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
     }
     else
     {
-        if (LoadTextureEmbedded(data->textureIdx,
-                                (ZunImageInfoEmbedded *)((u8 *)data + data->textureOffset)) !=
-            ZUN_SUCCESS)
+        if (*name != '@' && LoadTexture(data->textureIdx, name, data->format) == ZUN_SUCCESS &&
+            g_LastFileWasRuntimeOverride)
         {
-            g_GameErrorContext.Fatal(
-                "テクスチャが読み込めません。データが失われてるか壊れています\n");
-            return ZUN_ERROR;
+            textureWasRuntimeOverride = true;
+        }
+        else
+        {
+            ReleaseTexture(data->textureIdx);
+            if (LoadTextureEmbedded(data->textureIdx,
+                                    (ZunImageInfoEmbedded *)((u8 *)data + data->textureOffset)) !=
+                ZUN_SUCCESS)
+            {
+                g_GameErrorContext.Fatal(
+                    "テクスチャが読み込めません。データが失われてるか壊れています\n");
+                return ZUN_ERROR;
+            }
         }
     }
     this->textureNames[textureIdx] = (char *)((u8 *)data + data->nameOffset);

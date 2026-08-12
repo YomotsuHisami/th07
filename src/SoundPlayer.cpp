@@ -10,6 +10,8 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 
+#include "thirdparty/stb_vorbis.c"
+
 SoundBufferIdxVolume SOUND_BUFFER_IDX_VOL[38] = {
     {0, -2000, 0},   {0, -2500, 0},   {1, -1200, 5},   {1, -1500, 5},   {2, -1000, 100},
     {3, -400, 100},  {4, -400, 100},  {5, -1500, 50},  {6, -1700, 50},  {7, -1900, 50},
@@ -524,6 +526,10 @@ ZunResult SoundPlayer::StartBGM(const char *path)
 ZunResult SoundPlayer::ReopenBGM(const char *name)
 {
     i32 fmtIdx = GetFmtIndexByName(name);
+    if (OpenOggBGM(name) == ZUN_SUCCESS)
+    {
+        return ZUN_SUCCESS;
+    }
     StopBGM();
 
     this->bgmDataSource = new ThBgmDataSource;
@@ -548,6 +554,77 @@ ZunResult SoundPlayer::ReopenBGM(const char *name)
         return ZUN_ERROR;
     }
     Supervisor::DebugPrint("Streming BGM Reopen %d\n", fmtIdx);
+    return ZUN_SUCCESS;
+}
+
+ZunResult SoundPlayer::OpenOggBGM(const char *name)
+{
+    const char *filename = strrchr(name, '/');
+    if (!filename)
+    {
+        filename = strrchr(name, '\\');
+    }
+    filename = filename ? filename + 1 : name;
+
+    char oggPath[512];
+    if (snprintf(oggPath, sizeof(oggPath), "bgm-ogg/%s", filename) >= (i32)sizeof(oggPath))
+    {
+        return ZUN_ERROR;
+    }
+    char *extension = strrchr(oggPath, '.');
+    if (!extension)
+    {
+        return ZUN_ERROR;
+    }
+    strcpy(extension, ".ogg");
+
+    int channels = 0;
+    int sampleRate = 0;
+    short *decoded = NULL;
+    std::string fullPath = FileSystem::GetBasePath(oggPath);
+    const int frames = stb_vorbis_decode_filename(fullPath.c_str(), &channels, &sampleRate, &decoded);
+    if (frames <= 0 || !decoded || channels != 2 || sampleRate != 44100 ||
+        static_cast<u64>(frames) * 4 > UINT32_MAX)
+    {
+        free(decoded);
+        return ZUN_ERROR;
+    }
+
+    const i32 fmtIdx = GetFmtIndexByName(name);
+    ThBgmFormat format = this->bgmFmtData[fmtIdx];
+    format.startOffset = 0;
+    format.preloadAllocSize = static_cast<u32>(frames) * 4;
+    format.totalLength = static_cast<i32>(static_cast<u32>(frames) * 4);
+    if (format.introLength < 0 || format.introLength >= format.totalLength)
+    {
+        free(decoded);
+        return ZUN_ERROR;
+    }
+
+    StopBGM();
+    this->oggPcmData = decoded;
+    this->oggFormat = format;
+    this->bgmDataSource = new ThBgmDataSource;
+    if (!ThBgmDataSource_init_memory(this->bgmDataSource, reinterpret_cast<const u8 *>(decoded),
+                                     static_cast<u32>(frames) * 4, &this->oggFormat))
+    {
+        SAFE_DELETE(this->bgmDataSource);
+        free(this->oggPcmData);
+        this->oggPcmData = NULL;
+        return ZUN_ERROR;
+    }
+
+    this->backgroundMusic = new ma_sound;
+    if (ma_sound_init_from_data_source(this->engine, &this->bgmDataSource->base, 0, NULL,
+                                       this->backgroundMusic) != MA_SUCCESS)
+    {
+        SAFE_DELETE(this->backgroundMusic);
+        ma_data_source_uninit(&this->bgmDataSource->base);
+        SAFE_DELETE(this->bgmDataSource);
+        free(this->oggPcmData);
+        this->oggPcmData = NULL;
+        return ZUN_ERROR;
+    }
     return ZUN_SUCCESS;
 }
 
@@ -615,6 +692,12 @@ ZunResult SoundPlayer::LoadBGM(i32 idx)
         return ZUN_ERROR;
     }
 
+    if (OpenOggBGM(this->bgmFileNames[idx]) == ZUN_SUCCESS)
+    {
+        this->curBgmIdx = idx;
+        return ZUN_SUCCESS;
+    }
+
     if (!g_Supervisor.cfg.preloadBgm)
     {
         return ReopenBGM(this->bgmFileNames[idx]);
@@ -668,6 +751,8 @@ void SoundPlayer::StopBGM()
         ma_data_source_uninit(&this->bgmDataSource->base);
         SAFE_DELETE(this->bgmDataSource);
     }
+    free(this->oggPcmData);
+    this->oggPcmData = NULL;
 }
 
 ZunResult SoundPlayer::InitSoundBuffers()

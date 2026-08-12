@@ -113,6 +113,7 @@ struct SoundPlayer
     void PushCommand(AudioOpcode opcode, i32 arg1, const char *arg2);
     ZunResult Release();
     ZunResult ReopenBGM(const char *name);
+    ZunResult OpenOggBGM(const char *name);
     ZunResult StartBGM(const char *path);
     void StopBGM();
 
@@ -146,6 +147,8 @@ struct SoundPlayer
     char bgmArchivePath[512];
     ThBgmDataSource *bgmDataSource;
     ma_sound *backgroundMusic;
+    i16 *oggPcmData;
+    ThBgmFormat oggFormat;
     i32 bgmSeekOffset;
 };
 

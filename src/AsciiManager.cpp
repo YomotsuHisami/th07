@@ -12,6 +12,7 @@
 #include "GameWindow.hpp"
 #include "Gui.hpp"
 #include "Player.hpp"
+#include "PracticeRuntime.hpp"
 #include "SoundPlayer.hpp"
 #include "Supervisor.hpp"
 #include "ZunResult.hpp"
@@ -83,7 +84,8 @@ u32 AsciiManager::OnUpdate(AsciiManager *arg)
     }
     else if (g_GameManager.isInPauseMenu)
     {
-        arg->pauseMenu.OnUpdate();
+        if (!PracticeRuntime::UpdatePauseMenu())
+            arg->pauseMenu.OnUpdate();
     }
     if (g_GameManager.isInRetryMenu)
     {
@@ -107,6 +109,12 @@ u32 AsciiManager::OnUpdate(AsciiManager *arg)
 
 u32 AsciiManager::OnDrawMenus(AsciiManager *arg)
 {
+    if (PracticeRuntime::Active() && g_GameManager.isInPauseMenu)
+    {
+        PracticeRuntime::DrawPauseMenuPanel();
+        arg->DrawStrings();
+        return CHAIN_CALLBACK_RESULT_CONTINUE;
+    }
     arg->DrawStrings();
     arg->numStrings = 0;
     arg->pauseMenu.OnDraw();

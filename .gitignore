@@ -5,6 +5,9 @@
 .venv*
 assets
 build
+build-*/
+assets-ogg/
+*.log
 thirdparty/*
 resources/custom.exe
 resources/th07.exe

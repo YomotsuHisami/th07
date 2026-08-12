@@ -15,6 +15,7 @@
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
 #include "ReplayManager.hpp"
+#include "PracticeRuntime.hpp"
 #include "ScreenEffect.hpp"
 #include "SoundPlayer.hpp"
 #include "Supervisor.hpp"
@@ -86,6 +87,8 @@ const char *g_MainMenuStrings[8] = {
     "各種設定できます",
     "いろいろと終了します",
 };
+
+MainMenu *g_MainMenuForDebug = nullptr;
 
 void InitializeTimingVars(Supervisor *arg)
 {
@@ -1715,6 +1718,37 @@ u32 MainMenu::OnUpdateSelectPracticeStage()
 {
     i32 local_8;
 
+    if (PracticeRuntime::Enabled())
+    {
+        if (this->stateTimer == 0)
+            PracticeRuntime::OpenPracticeMenu(g_Supervisor.cfg.defaultDifficulty,
+                                              g_GameManager.character * 2 + g_GameManager.shotType);
+
+        switch (PracticeRuntime::PollPracticeMenu())
+        {
+        case PracticeRuntime::MenuResult::Waiting:
+            this->idleFrames++;
+            this->inputDelayTimer++;
+            this->stateTimer++;
+            return CHAIN_CALLBACK_RESULT_CONTINUE;
+        case PracticeRuntime::MenuResult::Accepted:
+            g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
+            g_GameManager.difficulty = g_Supervisor.cfg.defaultDifficulty;
+            g_GameManager.currentStage = PracticeRuntime::GetConfig().stage;
+            g_Supervisor.curState = 2;
+            g_GameManager.replay = 0;
+            g_Supervisor.StopAudio();
+            while (g_SoundPlayer.ProcessQueues())
+                ;
+            return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
+        case PracticeRuntime::MenuResult::Cancelled:
+            g_SoundPlayer.PlaySoundByIdx(SOUND_BACK, 0);
+            this->cursor = g_GameManager.shotType;
+            SetGameState(STATE_NORMAL_SELECT_SHOTTYPE);
+            return CHAIN_CALLBACK_RESULT_EXECUTE_AGAIN;
+        }
+    }
+
     switch (this->menuSubState)
     {
     case 0:
@@ -1855,7 +1889,7 @@ u32 MainMenu::OnUpdateSelectReplay()
             {
                 char filename[32];
                 snprintf(filename, sizeof(filename), "th7_%.2d.rpy", i + 1);
-                std::string replayPath = fs::path(FileSystem::GetPrefPath("replay")) / filename;
+                std::string replayPath = FileSystem::GetPrefPath("replay") + "/" + filename;
                 file = (ReplayFile *)FileSystem::OpenFile(replayPath.c_str(), 1);
                 if (!file)
                 {
@@ -1874,7 +1908,7 @@ u32 MainMenu::OnUpdateSelectReplay()
                 }
             }
 
-            const fs::path replay = FileSystem::GetPrefPath("replay");
+            const fs::path replay = fs::u8path(FileSystem::GetPrefPath("replay"));
             fs::create_directory(replay);
 
             std::vector<fs::directory_entry> entries(fs::directory_iterator(replay),
@@ -2189,6 +2223,11 @@ i32 MainMenu::DrawReplayMenu()
 
 i32 MainMenu::DrawPracticeMenu()
 {
+    if (PracticeRuntime::Enabled())
+    {
+        PracticeRuntime::DrawPracticeMenu();
+        return 1;
+    }
     ZunVec3 local_1c;
     i32 local_10;
     i32 i;
@@ -2316,6 +2355,8 @@ u32 MainMenu::OnDraw(MainMenu *arg)
         break;
     case STATE_SELECT_PRACTICE_STAGE:
         arg->DrawPracticeMenu();
+        if (PracticeRuntime::Enabled())
+            return CHAIN_CALLBACK_RESULT_CONTINUE;
         break;
     }
     local_c = arg->vmHead;
@@ -2516,6 +2557,8 @@ ZunResult MainMenu::Release()
 
 ZunResult MainMenu::DeletedCallback(MainMenu *arg)
 {
+    if (g_MainMenuForDebug == arg)
+        g_MainMenuForDebug = nullptr;
     for (i32 i = 32; i <= 41; i++)
     {
         g_AnmManager->ReleaseAnm(i);
@@ -2533,6 +2576,7 @@ ZunResult MainMenu::DeletedCallback(MainMenu *arg)
 ZunResult MainMenu::RegisterChain()
 {
     MainMenu *mgr = new MainMenu;
+    g_MainMenuForDebug = mgr;
 
     g_GameManager.isInPauseMenu = 0;
     mgr->calcChain = g_Chain.CreateElem((ChainCallback)OnUpdate);

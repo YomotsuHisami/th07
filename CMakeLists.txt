@@ -7,6 +7,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(TH_EXTERNAL_ASSETS "Do not bundle assets (on platforms that bundle them) and use the user/executable directories instead" OFF)
+option(TH_WEB_SHARED_FONT "Let the Web host install msgothic.ttc instead of embedding it" OFF)
+option(TH_ENABLE_THPRAC "Build the archived thprac integration" OFF)
+option(TH_ENABLE_THCRAP "Build the archived thcrap localization integration" OFF)
+option(TH_DEV_TOOLS "Enable developer-only tools such as F5 fast-forward" OFF)
+set(TH_WEB_MUSIC "BASE" CACHE STRING "Bundled Web music payload: BASE, MIDI, WAV, or OGG")
+set_property(CACHE TH_WEB_MUSIC PROPERTY STRINGS BASE MIDI WAV OGG)
+set(TH07_ASSET_ROOT "${CMAKE_SOURCE_DIR}/assets" CACHE PATH "TH07 original asset directory")
+set(TH07_OGG_ROOT "${CMAKE_SOURCE_DIR}/assets-ogg" CACHE PATH "TH07 generated OGG asset directory")
 
 set(SOURCES
     src/AnmManager.cpp
@@ -17,6 +25,7 @@ set(SOURCES
     src/Chain.cpp
     src/Controller.cpp
     src/EclManager.cpp
+    src/RuntimeExtension.cpp
     src/EffectManager.cpp
     src/Ending.cpp
     src/EnemyEclInstr.cpp
@@ -49,6 +58,37 @@ set(SOURCES
     src/utils.cpp
 )
 
+if(TH_ENABLE_THPRAC)
+    list(APPEND SOURCES src/PracticeRuntime.cpp)
+else()
+    list(APPEND SOURCES src/PracticeRuntimeStub.cpp)
+endif()
+
+if(TH_ENABLE_THCRAP)
+    list(APPEND SOURCES src/Localization.cpp)
+else()
+    list(APPEND SOURCES src/LocalizationStub.cpp)
+endif()
+
+if(EMSCRIPTEN)
+    list(APPEND SOURCES src/midi/MidiWeb.cpp)
+elseif(WIN32)
+    list(APPEND SOURCES src/midi/MidiWin32.cpp)
+elseif(APPLE)
+    list(APPEND SOURCES src/midi/MidiCoreAudio.cpp)
+    set(TH07_MIDI_COREAUDIO ON)
+elseif(UNIX)
+    find_package(ALSA QUIET)
+    if(ALSA_FOUND)
+        list(APPEND SOURCES src/midi/MidiAlsa.cpp)
+        set(TH07_MIDI_ALSA ON)
+    else()
+        list(APPEND SOURCES src/midi/MidiDefault.cpp)
+    endif()
+else()
+    list(APPEND SOURCES src/midi/MidiDefault.cpp)
+endif()
+
 if(ANDROID)
     add_library(main SHARED ${SOURCES})
     set(TH_EXEC_NAME "main")
@@ -58,6 +98,23 @@ else()
 endif()
 
 target_include_directories(${TH_EXEC_NAME} PRIVATE src src/pbg4)
+if(TH_ENABLE_THPRAC)
+    target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_ENABLE_THPRAC)
+endif()
+if(TH_ENABLE_THCRAP)
+    target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_ENABLE_THCRAP)
+endif()
+if(TH_DEV_TOOLS)
+    target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_DEV_TOOLS)
+endif()
+
+# Optional, generic out-of-tree runtime extension. Ordinary builds leave this
+# empty and retain no dependency on the extension implementation.
+set(TH_RUNTIME_EXTENSION_CMAKE "" CACHE FILEPATH "Optional runtime extension CMake integration")
+if(TH_ENABLE_THPRAC AND TH_RUNTIME_EXTENSION_CMAKE)
+    include("${TH_RUNTIME_EXTENSION_CMAKE}")
+    thprac_portable_attach(${TH_EXEC_NAME} th07 "${CMAKE_CURRENT_SOURCE_DIR}/src")
+endif()
 
 if(TH_EXTERNAL_ASSETS)
     target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_EXTERNAL_ASSETS)
@@ -71,8 +128,6 @@ if(EMSCRIPTEN)
         "-O2"
     )
     target_link_options(th07 PRIVATE
-        "--preload-file"
-        "${CMAKE_SOURCE_DIR}/assets@/"
         "-sALLOW_MEMORY_GROWTH"
         "-sMAX_WEBGL_VERSION=2"
         "--use-preload-cache"
@@ -83,10 +138,50 @@ if(EMSCRIPTEN)
         "--shell-file"
         "${CMAKE_SOURCE_DIR}/resources/shell.html"
     )
+    if(NOT TH_EXTERNAL_ASSETS)
+        set(TH07_WEB_ASSET_STAGE "${CMAKE_BINARY_DIR}/web-assets-${TH_WEB_MUSIC}")
+        file(REMOVE_RECURSE "${TH07_WEB_ASSET_STAGE}")
+        file(MAKE_DIRECTORY "${TH07_WEB_ASSET_STAGE}")
+        set(TH07_WEB_BASE_ASSETS th07.dat)
+        if(NOT TH_WEB_SHARED_FONT)
+            list(APPEND TH07_WEB_BASE_ASSETS msgothic.ttc)
+        endif()
+        foreach(asset IN LISTS TH07_WEB_BASE_ASSETS)
+            if(NOT EXISTS "${TH07_ASSET_ROOT}/${asset}")
+                message(FATAL_ERROR "Missing Web asset: ${TH07_ASSET_ROOT}/${asset}")
+            endif()
+            file(COPY_FILE "${TH07_ASSET_ROOT}/${asset}" "${TH07_WEB_ASSET_STAGE}/${asset}")
+        endforeach()
+        if(TH_WEB_MUSIC STREQUAL "WAV")
+            file(COPY_FILE "${TH07_ASSET_ROOT}/thbgm.dat" "${TH07_WEB_ASSET_STAGE}/thbgm.dat")
+        elseif(TH_WEB_MUSIC STREQUAL "OGG")
+            if(NOT EXISTS "${TH07_OGG_ROOT}/bgm-ogg")
+                message(FATAL_ERROR "TH_WEB_MUSIC=OGG requires generated ${TH07_OGG_ROOT}/bgm-ogg")
+            endif()
+            file(COPY "${TH07_OGG_ROOT}/bgm-ogg" DESTINATION "${TH07_WEB_ASSET_STAGE}")
+        elseif(TH_WEB_MUSIC STREQUAL "MIDI" OR TH_WEB_MUSIC STREQUAL "BASE")
+            # The original MIDI is in th07.dat. BASE leaves streamed BGM to
+            # the Web host, which installs WAV/OGG resources before callMain.
+        else()
+            message(FATAL_ERROR "Unsupported TH_WEB_MUSIC=${TH_WEB_MUSIC}; expected BASE, MIDI, WAV, or OGG")
+        endif()
+        target_link_options(th07 PRIVATE "--preload-file" "${TH07_WEB_ASSET_STAGE}@/")
+    endif()
     set(CMAKE_EXECUTABLE_SUFFIX ".html")
 endif()
 
-if(NOT ANDROID AND NOT EMSCRIPTEN AND NOT APPLE)
+if(TH07_MIDI_ALSA)
+    target_compile_definitions(${TH_EXEC_NAME} PRIVATE LIBASOUND_MIDI_SUPPORT)
+    target_link_libraries(${TH_EXEC_NAME} PRIVATE ALSA::ALSA)
+elseif(TH07_MIDI_COREAUDIO)
+    target_compile_definitions(${TH_EXEC_NAME} PRIVATE COREAUDIO_MIDI_SUPPORT)
+    target_link_libraries(${TH_EXEC_NAME} PRIVATE
+        "-framework AudioToolbox"
+        "-framework AudioUnit"
+    )
+endif()
+
+if(NOT ANDROID AND NOT EMSCRIPTEN AND NOT APPLE AND NOT WIN32)
     find_package(OpenGL COMPONENTS GLES3 REQUIRED)
 endif()
 
@@ -206,6 +301,14 @@ target_link_libraries(${TH_EXEC_NAME} PRIVATE
 
 if(ANDROID)
     target_link_libraries(${TH_EXEC_NAME} PRIVATE GLESv3)
+elseif(WIN32 AND NOT EMSCRIPTEN)
+    set(TH_MESA_ROOT "${CMAKE_SOURCE_DIR}/../dependencies")
+    target_include_directories(${TH_EXEC_NAME} PRIVATE "${TH_MESA_ROOT}/mesa-devel/include")
+    target_link_libraries(${TH_EXEC_NAME} PRIVATE
+        "${TH_MESA_ROOT}/mesa-devel/lib/x64/libEGL.dll.a"
+        "${TH_MESA_ROOT}/mesa-devel/lib/x64/libGLESv2.dll.a"
+        winmm
+    )
 elseif(NOT EMSCRIPTEN AND NOT APPLE)
     target_link_libraries(${TH_EXEC_NAME} PRIVATE OpenGL::GLES3)
 endif()

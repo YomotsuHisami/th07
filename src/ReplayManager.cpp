@@ -7,6 +7,7 @@
 #include "GameManager.hpp"
 #include "Gui.hpp"
 #include "Player.hpp"
+#include "PracticeRuntime.hpp"
 #include "Rng.hpp"
 #include "Supervisor.hpp"
 #include "dxutil.hpp"
@@ -679,6 +680,7 @@ void ReplayManager::SaveReplay(const char *filename, char *replayName)
                     SDL_WriteIO(file, &replayCopy, sizeof(ReplayHeader));
                     SDL_WriteIO(file, lpBuffer, compressedSize);
                     SDL_CloseIO(file);
+                    PracticeRuntime::SaveReplayMetadata(filename);
                     Supervisor::DebugPrint("info : Size %d -> %d\n", replaySize,
                                            compressedSize + sizeof(ReplayHeader));
                     free(lpBuffer);

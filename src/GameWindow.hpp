@@ -49,3 +49,6 @@ extern GameWindow g_GameWindow;
 
 extern f32 g_RenderAlpha;
 extern bool g_SuppressAnmAdvance;
+#ifdef TH_DEV_TOOLS
+extern f32 g_DevSpeedMultiplier;
+#endif

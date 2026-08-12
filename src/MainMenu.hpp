@@ -121,3 +121,5 @@ struct MainMenu
     // pad 2
     GameConfiguration cfg;
 };
+
+extern MainMenu *g_MainMenuForDebug;

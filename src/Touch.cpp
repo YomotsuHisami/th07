@@ -3,7 +3,12 @@
 #include <SDL3/SDL_events.h>
 #include <cmath>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
+
 #include "Controller.hpp"
+#include "EaglerOptions.hpp"
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
 #include "Gui.hpp"
@@ -47,6 +52,7 @@ i32 g_NumActiveGameplayFingers = 0;
 bool g_BombPending = false;
 bool g_PausePending = false;
 bool g_BombedWithTouch = false;
+i32 g_LastHostBombSerial = 0;
 
 bool IsGameplayTouchMode()
 {
@@ -217,6 +223,10 @@ void Touch::CancelTouches()
 
 void Touch::FingerDown(const SDL_TouchFingerEvent &f)
 {
+    if (!EaglerOptions::TouchEnabled())
+    {
+        return;
+    }
     f32 px, py;
     FingerToWindowPx(f, &px, &py);
 
@@ -287,6 +297,10 @@ void Touch::FingerDown(const SDL_TouchFingerEvent &f)
 
 void Touch::FingerUp(const SDL_TouchFingerEvent &f)
 {
+    if (!EaglerOptions::TouchEnabled())
+    {
+        return;
+    }
     f32 px, py;
     FingerToWindowPx(f, &px, &py);
 
@@ -334,6 +348,10 @@ void Touch::FingerUp(const SDL_TouchFingerEvent &f)
 
 void Touch::FingerMotion(const SDL_TouchFingerEvent &f)
 {
+    if (!EaglerOptions::TouchEnabled())
+    {
+        return;
+    }
     f32 px, py;
     FingerToWindowPx(f, &px, &py);
 
@@ -380,9 +398,24 @@ void Touch::FingerMotion(const SDL_TouchFingerEvent &f)
 
 u16 Touch::GetButtonBits()
 {
+    if (!EaglerOptions::TouchEnabled())
+    {
+        return 0;
+    }
     u16 buttons = 0;
 
     g_BombedWithTouch = false;
+
+    const i32 hostBombSerial = EaglerOptions::TouchBombSerial();
+    if (hostBombSerial != g_LastHostBombSerial)
+    {
+        g_LastHostBombSerial = hostBombSerial;
+        if (IsGameplayTouchMode())
+        {
+            g_BombPending = true;
+            g_UsedThisRun = true;
+        }
+    }
 
     if (!IsGameplayTouchMode())
     {
@@ -432,9 +465,10 @@ u16 Touch::GetButtonBits()
     }
 
     // keep firing for a bit after release
-    if (g_MoveFinger.active || SDL_GetTicks() - g_MoveFinger.end < 200)
+    if (EaglerOptions::TouchFireEnabled() && IsGameplayTouchMode())
     {
         buttons |= TH_BUTTON_SHOOT;
+        g_UsedThisRun = true;
     }
 
     if (g_FocusFinger.active)
@@ -460,12 +494,17 @@ u16 Touch::GetButtonBits()
 
 bool Touch::IsFocus()
 {
-    return g_FocusFinger.active;
+    return EaglerOptions::TouchEnabled() && g_FocusFinger.active;
+}
+
+bool Touch::IsUnlimited()
+{
+    return EaglerOptions::TouchEnabled() && EaglerOptions::UnlimitedTouch();
 }
 
 bool Touch::GetPlayerDelta(f32 *dx, f32 *dy)
 {
-    if (!g_MoveFinger.active)
+    if (!EaglerOptions::TouchEnabled() || !g_MoveFinger.active)
     {
         *dx = 0.0f;
         *dy = 0.0f;
@@ -489,3 +528,37 @@ void Touch::ConsumePlayerDelta(f32 dx, f32 dy)
     g_AccumDx -= dx;
     g_AccumDy -= dy;
 }
+
+#ifdef __EMSCRIPTEN__
+// SDL only reports touches that begin on its canvas. eagler-touhou uses these
+// entry points for additional fingers that land in the surrounding letterbox.
+// A letterbox touch can extend an existing gesture, but can never start one.
+extern "C" EMSCRIPTEN_KEEPALIVE void TouhouAuxTouchDown(i32 id)
+{
+    if (!EaglerOptions::TouchEnabled())
+    {
+        return;
+    }
+
+    if ((IsGameplayTouchMode() && !g_MoveFinger.active) ||
+        (!IsGameplayTouchMode() && !g_MenuGesture.active))
+    {
+        return;
+    }
+
+    SDL_TouchFingerEvent event = {};
+    event.fingerID = static_cast<SDL_FingerID>(id);
+    event.x = 0.5f;
+    event.y = 0.5f;
+    Touch::FingerDown(event);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void TouhouAuxTouchUp(i32 id)
+{
+    SDL_TouchFingerEvent event = {};
+    event.fingerID = static_cast<SDL_FingerID>(id);
+    event.x = 0.5f;
+    event.y = 0.5f;
+    Touch::FingerUp(event);
+}
+#endif

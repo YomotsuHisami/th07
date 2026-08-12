@@ -1,12 +1,68 @@
 #include "FileSystem.hpp"
 
 #include <cstdio>
+#include <limits>
 
 #include "GameErrorContext.hpp"
 #include "Supervisor.hpp"
 #include "pbg4/Pbg4Archive.hpp"
 
 u32 g_LastFileSize;
+bool g_LastFileWasRuntimeOverride;
+
+static u8 *ReadRuntimeOverrideFile(const std::string &path)
+{
+    SDL_IOStream *file = SDL_IOFromFile(path.c_str(), "rb");
+    if (!file)
+        return NULL;
+    const Sint64 length = SDL_GetIOSize(file);
+    if (length < 0 || static_cast<Uint64>(length) > std::numeric_limits<u32>::max() ||
+        SDL_SeekIO(file, 0, SDL_IO_SEEK_SET) < 0)
+    {
+        SDL_CloseIO(file);
+        return NULL;
+    }
+    const size_t size = static_cast<size_t>(length);
+    u8 *data = static_cast<u8 *>(malloc(size == 0 ? 1 : size));
+    if (!data || (size != 0 && SDL_ReadIO(file, data, size) != size))
+    {
+        free(data);
+        SDL_CloseIO(file);
+        return NULL;
+    }
+    SDL_CloseIO(file);
+    g_LastFileSize = static_cast<u32>(size);
+    g_LastFileWasRuntimeOverride = true;
+    return data;
+}
+
+u8 *FileSystem::OpenRuntimeOverride(const char *filepath)
+{
+    g_LastFileWasRuntimeOverride = false;
+    if (!filepath || !*filepath)
+        return NULL;
+    std::string relative(filepath);
+    for (char &character : relative)
+        if (character == '\\')
+            character = '/';
+    while (relative.rfind("./", 0) == 0)
+        relative.erase(0, 2);
+    if (relative.empty() || relative.front() == '/' || relative.find(':') != std::string::npos ||
+        relative == ".." || relative.rfind("../", 0) == 0 || relative.find("/../") != std::string::npos ||
+        (relative.size() >= 3 && relative.compare(relative.size() - 3, 3, "/..") == 0))
+        return NULL;
+#ifdef __EMSCRIPTEN__
+    const std::string root = "/thcrap/th07/";
+#else
+    const std::string root = "thcrap/th07/";
+#endif
+    if (u8 *data = ReadRuntimeOverrideFile(root + relative))
+        return data;
+    const size_t separator = relative.find_last_of('/');
+    if (separator != std::string::npos)
+        return ReadRuntimeOverrideFile(root + relative.substr(separator + 1));
+    return NULL;
+}
 
 u8 *FileSystem::OpenFile(const char *filepath, i32 isExternalResource)
 {
@@ -14,6 +70,10 @@ u8 *FileSystem::OpenFile(const char *filepath, i32 isExternalResource)
     u8 *buf;
     i64 fsize;
     const char *filename;
+
+    g_LastFileWasRuntimeOverride = false;
+    if (u8 *overrideData = OpenRuntimeOverride(filepath))
+        return overrideData;
 
     if (!isExternalResource)
     {
