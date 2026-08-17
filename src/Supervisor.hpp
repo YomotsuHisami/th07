@@ -121,6 +121,9 @@ struct Supervisor
     ZunResult PlayLoadedAudio(i32 idx);
     ZunResult SetupInput();
     i32 SnapshotScreen(const char *param_1);
+#ifdef TH_ENABLE_THCRAP
+    i32 SnapshotPng(const char *param_1);
+#endif
     ZunResult StopAudio();
     void TickTimer(i32 *frames, f32 *subFrames);
     void UpdateStartupTime();

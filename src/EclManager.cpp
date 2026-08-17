@@ -10,7 +10,9 @@
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
 #include "Gui.hpp"
+#include "Localization.hpp"
 #include "Player.hpp"
+#include "PracticeRuntime.hpp"
 #include "Rng.hpp"
 #include "RuntimeExtension.hpp"
 #include "SoundPlayer.hpp"
@@ -151,7 +153,7 @@ i32 EclManager::GetVarValue(Enemy *enemy, i32 eclVar)
     case ECL_VAR_LIFE:
         return enemy->life;
     case ECL_VAR_PLAYER_SHOTTYPE:
-        return g_GameManager.shotTypeAndCharacter;
+        return PracticeRuntime::EffectivePlayerShot(g_GameManager.shotTypeAndCharacter);
     case ECL_VAR_LOCAL_FLOAT2_1:
         return enemy->currentContext.eclContextArgs.floatVars2[0];
     case ECL_VAR_LOCAL_FLOAT2_2:
@@ -652,7 +654,18 @@ void EclManager::BeginSpellcard(Enemy *enemy, EclRawInstr *instr)
     {
         spellcardName[i] = (u8)spellcardName[i] ^ 0xaa;
     }
-    g_Gui.ShowSpellcard(instr->args[0].s[0], spellcardName);
+    // base_tsa/th07.v1.00b hooks spell_name at 0x40fce1, after the ECL name
+    // has been decrypted and immediately before ShowSpellcard.  The hook
+    // replaces the display pointer only; keep the local Japanese buffer for
+    // the game's CATK/history bookkeeping below.
+    const u32 spellcardId = instr->args[0].us[1];
+    const char *displaySpellName = Localization::SpellName(spellcardId, spellcardName);
+#ifdef TH_DEV_TOOLS
+    if (displaySpellName != spellcardName)
+        Supervisor::DebugPrint("th07 thcrap spell display: id=%u original=%s localized=%s\n",
+                               spellcardId, spellcardName, displaySpellName);
+#endif
+    g_Gui.ShowSpellcard(instr->args[0].s[0], displaySpellName);
     g_BulletManager.RemoveAllBullets(1);
     g_Stage.spellCardState = 1;
     g_Stage.ticksSinceSpellcardStarted = 0;
@@ -1764,6 +1777,15 @@ restart:
                 g_GameManager.playTimeAll += 1800;
                 break;
             case ECL_SPAWN_ENEMY_ABS:
+                // th07_rb @ 0x4157F3 is armed only by Stage 6 Boss 10
+                // (Resurrection Butterfly). It intercepts this exact
+                // ECL_SPAWN_ENEMY_ABS branch once, sets current ECL time to
+                // 0x1e0, skips the spawn, then self-disables.
+                if (PracticeRuntime::ConsumeResurrectionButterflySpawnSkip())
+                {
+                    enemy->currentContext.time.current = 0x1e0;
+                    break;
+                }
                 if (enemy->life > 0)
                 {
                     memcpy(absSpawnInstrArgs, instr->args, sizeof(absSpawnInstrArgs));
@@ -2169,7 +2191,7 @@ restart:
             if (enemy->isBoss && enemy->bossId == 0 &&
                 (g_EnemyManager.spellcardInfo.isActive && g_EnemyManager.spellcardInfo.isCapturing))
             {
-                if (!enemy->isSurvivalSpellcard)
+                if (!PracticeRuntime::OverlayTimeLock() && !enemy->isSurvivalSpellcard)
                 {
                     g_EnemyManager.spellcardInfo.captureScore =
                         (i32)((f32)(i32)

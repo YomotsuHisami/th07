@@ -152,6 +152,11 @@ struct ScoreListNode
 
 struct ScoreDat
 {
+    ScoreDat()
+    {
+        memset(this, 0, sizeof(ScoreDat));
+    }
+
     ScoreDatRaw raw;
     ScoreListNode *scores;
     u8 *decodedData;

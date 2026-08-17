@@ -8,6 +8,7 @@
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
+#include "Localization.hpp"
 #include "ScreenEffect.hpp"
 #include "Supervisor.hpp"
 
@@ -16,6 +17,50 @@ const char *g_BadEndingPaths[3] = {
     "data/end10b.end",
     "data/end20b.end",
 };
+
+#ifdef TH_DEV_TOOLS
+static bool g_DebugEndingFastForward = false;
+#endif
+
+static const char *FindTranslatedEndingLine(char *cursor, char *&lineEnd)
+{
+    if (!Localization::Active() || cursor == nullptr)
+        return nullptr;
+
+    char *scan = cursor;
+    while (*scan != '\0' && *scan != '\n' && *scan != '\r')
+        ++scan;
+    if (*scan != '\0')
+        return nullptr;
+
+    lineEnd = scan;
+    return cursor;
+}
+
+#if defined(TH_DEV_TOOLS) && defined(TH_ENABLE_THCRAP)
+bool Ending::DebugTranslatedLineSelfTest()
+{
+    char translated[] = "A translated ending line that is deliberately much longer than sixty-eight bytes to prove direct-pointer handling.\0\n@w";
+    char *lineEnd = nullptr;
+    const char *line = FindTranslatedEndingLine(translated, lineEnd);
+    if (line != translated || lineEnd == nullptr || *lineEnd != '\0' ||
+        lineEnd - line <= 68)
+        return false;
+
+    char originalStyle[] = "Original line without an inserted terminator\n@w";
+    lineEnd = nullptr;
+    if (FindTranslatedEndingLine(originalStyle, lineEnd) != nullptr || lineEnd != nullptr)
+        return false;
+    return true;
+}
+#endif
+
+#ifdef TH_DEV_TOOLS
+void Ending::DebugSetFastForward(bool enabled)
+{
+    g_DebugEndingFastForward = enabled;
+}
+#endif
 
 const char *g_NormalEndingPaths[6] = {
     "data/end00.end", "data/end01.end", "data/end10.end",
@@ -28,8 +73,15 @@ u32 Ending::OnUpdate(Ending *arg)
     i32 framesSkipPressed;
     u32 color;
 
-    arg->UpdatePrev();
-    arg->prevEndingFadeRectColor = arg->endingFadeRectColor;
+#ifdef TH_DEV_TOOLS
+    if (g_DebugEndingFastForward)
+    {
+        arg->timer2 = 0;
+        arg->timer3 = 0;
+        arg->minWaitFrames = 0;
+        arg->minWaitResetFrames = 0;
+    }
+#endif
 
     framesSkipPressed = 0;
     for (;;)
@@ -43,7 +95,13 @@ u32 Ending::OnUpdate(Ending *arg)
             g_AnmManager->ExecuteScript(&arg->sprites[i]);
         }
 
-        if (arg->hasSeenEnding && IS_PRESSED_RAW(TH_BUTTON_SKIP) && framesSkipPressed < 4)
+        if (arg->hasSeenEnding &&
+            (IS_PRESSED_RAW(TH_BUTTON_SKIP)
+#ifdef TH_DEV_TOOLS
+             || g_DebugEndingFastForward
+#endif
+             ) &&
+            framesSkipPressed < 4)
         {
             framesSkipPressed++;
             continue;
@@ -108,13 +166,11 @@ u32 Ending::OnUpdate(Ending *arg)
 
 u32 Ending::OnDraw(Ending *arg)
 {
-    f32 drawX = utils::Lerp(arg->prevBackgroundPos.x, arg->backgroundPos.x, g_RenderAlpha);
-    f32 drawY = utils::Lerp(arg->prevBackgroundPos.y, arg->backgroundPos.y, g_RenderAlpha);
-
-    g_AnmManager->DrawEndingRect(0, 0, 0, drawX, drawY, 640, 480);
+    g_AnmManager->DrawEndingRect(0, 0, 0, static_cast<i32>(arg->backgroundPos.x),
+                                 static_cast<i32>(arg->backgroundPos.y), 640, 480);
     for (i32 i = 0; i < 15; i++)
     {
-        g_AnmManager->DrawInterp(&arg->sprites[i]);
+        g_AnmManager->DrawCurrent(&arg->sprites[i]);
     }
     arg->FadingEffect();
     return CHAIN_CALLBACK_RESULT_CONTINUE;
@@ -142,12 +198,9 @@ void Ending::FadingEffect()
     rect.top = 0.0f;
     rect.right = 640.0f;
     rect.bottom = 480.0f;
-    if ((this->endingFadeRectColor.color & 0xff000000) != 0 ||
-        (this->prevEndingFadeRectColor.color & 0xff000000) != 0)
+    if ((this->endingFadeRectColor.color & 0xff000000) != 0)
     {
-        ScreenEffect::DrawSquare(&rect, ZunColor::Lerp(this->prevEndingFadeRectColor,
-                                                       this->endingFadeRectColor, g_RenderAlpha)
-                                            .color);
+        ScreenEffect::DrawSquare(&rect, this->endingFadeRectColor.color);
     }
 }
 
@@ -165,6 +218,7 @@ ZunResult Ending::ParseEndFile()
     i32 i;
     i32 local_58;
     char local_54[68];
+    const char *translatedLine = nullptr;
 
     local_58 = 0;
     memset(local_54, 0, sizeof(local_54));
@@ -359,7 +413,8 @@ ZunResult Ending::ParseEndFile()
             if (local_58 != 0)
             {
                 AnmManager::DrawVmTextFmt(g_AnmManager, &this->sprites[this->timesFileParsed],
-                                          this->textColor.color, 0xffffffff, local_54);
+                                          this->textColor.color, 0xffffffff,
+                                          translatedLine != nullptr ? translatedLine : local_54);
                 this->sprites[this->timesFileParsed].SetInterrupt(1);
             }
             while (*this->endFileDataPtr == '\n' || *this->endFileDataPtr == '\0' ||
@@ -380,11 +435,51 @@ ZunResult Ending::ParseEndFile()
             this->timesFileParsed++;
             goto stop;
         default:
+        {
+            char *translatedLineEnd = nullptr;
+            translatedLine = FindTranslatedEndingLine(this->endFileDataPtr, translatedLineEnd);
+            if (translatedLine != nullptr)
+            {
+                // base_tsa ending_copy_rem remembers the line start and scans
+                // directly to the NUL inserted by the ending patcher;
+                // ending_copy_rep then passes that original pointer to the
+                // text renderer. This removes the 68-byte temporary copy and
+                // its CP932 two-byte assumption for translated UTF-8 lines.
+                local_58 = static_cast<i32>(translatedLineEnd - translatedLine);
+                this->endFileDataPtr = translatedLineEnd;
+#ifdef TH_DEV_TOOLS
+                static bool loggedTranslatedEndingLine = false;
+                static bool loggedLongTranslatedEndingLine = false;
+                static bool loggedMarkupTranslatedEndingLine = false;
+                if (!loggedTranslatedEndingLine)
+                {
+                    SDL_Log("th07 thcrap ending line: bytes=%d text=%s", local_58,
+                            translatedLine);
+                    loggedTranslatedEndingLine = true;
+                }
+                if (!loggedLongTranslatedEndingLine && local_58 > 68)
+                {
+                    SDL_Log("th07 thcrap ending long line: bytes=%d text=%s", local_58,
+                            translatedLine);
+                    loggedLongTranslatedEndingLine = true;
+                }
+                if (!loggedMarkupTranslatedEndingLine &&
+                    std::strchr(translatedLine, '<') != nullptr &&
+                    std::strchr(translatedLine, '$') != nullptr)
+                {
+                    SDL_Log("th07 thcrap ending markup line: bytes=%d text=%s", local_58,
+                            translatedLine);
+                    loggedMarkupTranslatedEndingLine = true;
+                }
+#endif
+                break;
+            }
             local_54[local_58] = *this->endFileDataPtr;
             local_54[local_58 + 1] = this->endFileDataPtr[1];
             local_58 += 2;
             this->endFileDataPtr = this->endFileDataPtr + 2;
             break;
+        }
         }
     }
 
@@ -477,6 +572,9 @@ ZunResult Ending::AddedCallback(Ending *arg)
 
 ZunResult Ending::DeletedCallback(Ending *arg)
 {
+#ifdef TH_DEV_TOOLS
+    g_DebugEndingFastForward = false;
+#endif
     g_AnmManager->ReleaseAnm(49);
     g_Supervisor.curState = 6;
     g_AnmManager->ReleaseSurface(0);

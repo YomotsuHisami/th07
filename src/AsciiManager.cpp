@@ -1,7 +1,11 @@
 #include "AsciiManager.hpp"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 #include "AnmIdx.hpp"
 #include "AnmManager.hpp"
@@ -11,6 +15,7 @@
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
 #include "Gui.hpp"
+#include "Localization.hpp"
 #include "Player.hpp"
 #include "PracticeRuntime.hpp"
 #include "SoundPlayer.hpp"
@@ -24,6 +29,178 @@ AsciiManager g_AsciiManager;
 ChainElem g_AsciiManagerCalcChain;
 
 ChainElem g_AsciiManagerOnDrawPopupsChain;
+
+namespace
+{
+bool IsSingleByteSpriteTranslation(const char *text)
+{
+    if (text == nullptr)
+        return false;
+    for (const unsigned char *cursor = reinterpret_cast<const unsigned char *>(text); *cursor; ++cursor)
+    {
+        if (*cursor >= 0x80)
+            return false;
+    }
+    return true;
+}
+
+template <typename T>
+bool AppendPrintfPiece(std::string &output, const std::string &specifier, T value)
+{
+    const int length = std::snprintf(nullptr, 0, specifier.c_str(), value);
+    if (length < 0 || length > 4096)
+        return false;
+    std::vector<char> buffer(static_cast<std::size_t>(length) + 1);
+    if (std::snprintf(buffer.data(), buffer.size(), specifier.c_str(), value) != length)
+        return false;
+    output.append(buffer.data(), static_cast<std::size_t>(length));
+    return true;
+}
+
+bool FormatLegacyAscii(std::string &output, const char *format, va_list args, bool translateStrings)
+{
+    if (format == nullptr)
+        return false;
+    output.clear();
+    for (std::size_t index = 0; format[index] != '\0'; ++index)
+    {
+        if (format[index] != '%')
+        {
+            output.push_back(format[index]);
+            continue;
+        }
+
+        const std::size_t start = index++;
+        if (format[index] == '\0')
+            return false;
+        if (format[index] == '%')
+        {
+            output.push_back('%');
+            continue;
+        }
+        while (std::strchr("-+ #0'", format[index]) != nullptr)
+            ++index;
+        if (format[index] == '*')
+            return false;
+        while (format[index] >= '0' && format[index] <= '9')
+            ++index;
+        if (format[index] == '$')
+            return false;
+        if (format[index] == '.')
+        {
+            ++index;
+            if (format[index] == '*')
+                return false;
+            while (format[index] >= '0' && format[index] <= '9')
+                ++index;
+        }
+        if (format[index] == '\0' || std::strchr("hljztLI", format[index]) != nullptr)
+            return false;
+
+        const char conversion = format[index];
+        const std::string specifier(format + start, index - start + 1);
+        if (conversion == 'd' || conversion == 'i' || conversion == 'c')
+        {
+            if (!AppendPrintfPiece(output, specifier, va_arg(args, int)))
+                return false;
+        }
+        else if (std::strchr("uoxX", conversion) != nullptr)
+        {
+            if (!AppendPrintfPiece(output, specifier, va_arg(args, unsigned int)))
+                return false;
+        }
+        else if (std::strchr("fFeEgGaA", conversion) != nullptr)
+        {
+            if (!AppendPrintfPiece(output, specifier, va_arg(args, double)))
+                return false;
+        }
+        else if (conversion == 's')
+        {
+            const char *value = va_arg(args, const char *);
+            if (value == nullptr)
+                value = "(null)";
+            const char *translated = translateStrings ? Localization::AsciiString(value) : value;
+            if (translated != value && !IsSingleByteSpriteTranslation(translated))
+                translated = value;
+            if (!AppendPrintfPiece(output, specifier, translated))
+                return false;
+        }
+        else if (conversion == 'p')
+        {
+            if (!AppendPrintfPiece(output, specifier, va_arg(args, void *)))
+                return false;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool FormatLocalizedAscii(AsciiManager *manager, const ZunVec3 &sourcePos, ZunVec3 &outputPos,
+                          char *output, std::size_t outputSize, const char *format, va_list args)
+{
+    outputPos = sourcePos;
+    Localization::AsciiEntryView entry{};
+    const bool active = Localization::Active();
+    const bool known = active && Localization::LookupAscii(format, entry);
+    const char *selectedFormat = known && entry.hasTranslation &&
+                                         IsSingleByteSpriteTranslation(entry.text)
+                                     ? entry.text
+                                     : format;
+
+    std::string formatted;
+    va_list localizedArgs;
+    va_copy(localizedArgs, args);
+    const bool formattedOk = FormatLegacyAscii(formatted, selectedFormat, localizedArgs, active);
+    va_end(localizedArgs);
+    if (!formattedOk || formatted.size() >= outputSize)
+    {
+        va_list fallbackArgs;
+        va_copy(fallbackArgs, args);
+        const int written = std::vsnprintf(output, outputSize, format, fallbackArgs);
+        va_end(fallbackArgs);
+        return written >= 0 && static_cast<std::size_t>(written) < outputSize;
+    }
+
+    std::memcpy(output, formatted.c_str(), formatted.size() + 1);
+    if (known && entry.hasAlignment && manager != nullptr)
+    {
+        const float charWidth = static_cast<float>(manager->fontSpacing) * manager->scale.x;
+        const float baselineExtent = std::strlen(entry.baseline) * charWidth;
+        const float outputExtent = formatted.size() * charWidth;
+        const float center = sourcePos.x + baselineExtent * 0.5f + entry.extraX;
+        outputPos.x = center - outputExtent * 0.5f;
+    }
+#ifdef TH_DEV_TOOLS
+    if (known)
+    {
+        static std::unordered_set<std::string> loggedIds;
+        if (loggedIds.emplace(entry.id).second)
+        {
+            Supervisor::DebugPrint(
+                "th07 thcrap ASCII display: id=%s fmt=%s text=%s x=%.3f->%.3f align=%d\n",
+                entry.id, format, output, sourcePos.x, outputPos.x, entry.hasAlignment ? 1 : 0);
+        }
+    }
+#endif
+    return true;
+}
+
+#if defined(TH_DEV_TOOLS) && defined(TH_ENABLE_THCRAP)
+bool DebugFormatLocalizedAscii(AsciiManager *manager, const ZunVec3 &sourcePos, ZunVec3 &outputPos,
+                               char *output, std::size_t outputSize, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    const bool result = FormatLocalizedAscii(manager, sourcePos, outputPos, output, outputSize,
+                                             format, args);
+    va_end(args);
+    return result;
+}
+#endif
+} // namespace
 
 void AsciiManager::UpdateScripts()
 {
@@ -84,8 +261,7 @@ u32 AsciiManager::OnUpdate(AsciiManager *arg)
     }
     else if (g_GameManager.isInPauseMenu)
     {
-        if (!PracticeRuntime::UpdatePauseMenu())
-            arg->pauseMenu.OnUpdate();
+        arg->pauseMenu.OnUpdate();
     }
     if (g_GameManager.isInRetryMenu)
     {
@@ -109,12 +285,6 @@ u32 AsciiManager::OnUpdate(AsciiManager *arg)
 
 u32 AsciiManager::OnDrawMenus(AsciiManager *arg)
 {
-    if (PracticeRuntime::Active() && g_GameManager.isInPauseMenu)
-    {
-        PracticeRuntime::DrawPauseMenuPanel();
-        arg->DrawStrings();
-        return CHAIN_CALLBACK_RESULT_CONTINUE;
-    }
     arg->DrawStrings();
     arg->numStrings = 0;
     arg->pauseMenu.OnDraw();
@@ -272,11 +442,70 @@ void AsciiManager::AddFormatText(AsciiManager *manager, ZunVec3 *pos, const char
     va_list args;
 
     va_start(args, fmt);
-    vsprintf(str, fmt, args);
-    manager->AddString(pos, str);
-
+    ZunVec3 localizedPos = *pos;
+    if (FormatLocalizedAscii(manager, *pos, localizedPos, str, sizeof(str), fmt, args))
+        manager->AddString(&localizedPos, str);
     va_end(args);
 }
+
+#if defined(TH_DEV_TOOLS) && defined(TH_ENABLE_THCRAP)
+bool AsciiManager::DebugLocalizedFormatSelfTest()
+{
+    if (!Localization::Active())
+        return false;
+    AsciiManager manager;
+    manager.fontSpacing = 14;
+    manager.scale.x = 1.0f;
+    manager.scale.y = 1.0f;
+    ZunVec3 sourcePos{};
+    sourcePos.x = 100.0f;
+    sourcePos.y = 40.0f;
+    ZunVec3 outputPos{};
+    char output[508];
+
+    Localization::AsciiEntryView fullPower{};
+    if (!Localization::LookupAscii("Full Power Mode!", fullPower))
+        return false;
+    const char *expectedFullPower =
+        fullPower.hasTranslation && IsSingleByteSpriteTranslation(fullPower.text)
+            ? fullPower.text
+            : "Full Power Mode!";
+
+    if (!DebugFormatLocalizedAscii(&manager, sourcePos, outputPos, output, sizeof(output),
+                                   "Full Power Mode!") ||
+        std::strcmp(output, expectedFullPower) != 0)
+        return false;
+    const float expectedFullPowerX =
+        sourcePos.x + std::strlen("Full Power Mode!") * 14.0f * 0.5f + 8.5f -
+        std::strlen(expectedFullPower) * 14.0f * 0.5f;
+    if (outputPos.x != expectedFullPowerX || outputPos.y != sourcePos.y)
+        return false;
+
+    const char *stage1Source = "Stage1  ";
+    const char *expectedStage1 = Localization::AsciiString(stage1Source);
+    if (!IsSingleByteSpriteTranslation(expectedStage1))
+        expectedStage1 = stage1Source;
+    if (!DebugFormatLocalizedAscii(&manager, sourcePos, outputPos, output, sizeof(output),
+                                   "%s %8s  %6s %7s  %8s",
+                                   "Stage1  ", "NAME", "DATE", "PLAYER", "RANK") ||
+        std::strstr(output, expectedStage1) == nullptr ||
+        outputPos.x != sourcePos.x)
+        return false;
+
+    const char *expectedMax = Localization::AsciiString("MAX");
+    if (!IsSingleByteSpriteTranslation(expectedMax))
+        expectedMax = "MAX";
+    if (!DebugFormatLocalizedAscii(&manager, sourcePos, outputPos, output, sizeof(output), "MAX") ||
+        std::strcmp(output, expectedMax) != 0 || outputPos.x != sourcePos.x)
+        return false;
+
+    if (!DebugFormatLocalizedAscii(&manager, sourcePos, outputPos, output, sizeof(output),
+                                   "Unknown %d", 42) ||
+        std::strcmp(output, "Unknown 42") != 0 || outputPos.x != sourcePos.x)
+        return false;
+    return true;
+}
+#endif
 
 void AsciiManager::DrawStrings()
 {
@@ -695,13 +924,18 @@ i32 PauseMenu::OnUpdate()
     case 4:
         if (this->numFrames >= 20)
         {
+            PracticeRuntime::FilterUnpauseInput();
             this->curState = 0;
             g_GameManager.isInPauseMenu = 0;
             for (i = 0; i < 10; i++)
             {
                 this->menuSprites[i].SetInvisible();
             }
-            if (g_GameManager.currentStage != 6 || g_Gui.frameCounter >= 300)
+            // th07_bgm_st6_3: direct advanced-section starts already have a
+            // live BGM, so unlike vanilla Stage6's 300-frame intro delay they
+            // must always receive AUDIO_UNPAUSE here.
+            if (PracticeRuntime::AdvancedSectionActive() ||
+                g_GameManager.currentStage != 6 || g_Gui.frameCounter >= 300)
             {
                 g_SoundPlayer.PushCommand(AUDIO_UNPAUSE, 0, (char *)"UnPause");
             }

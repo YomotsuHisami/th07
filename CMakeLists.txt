@@ -7,14 +7,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(TH_EXTERNAL_ASSETS "Do not bundle assets (on platforms that bundle them) and use the user/executable directories instead" OFF)
-option(TH_WEB_SHARED_FONT "Let the Web host install msgothic.ttc instead of embedding it" OFF)
+option(TH_WEB_SHARED_FONT "Let the Web host install runtime fonts instead of embedding them" OFF)
 option(TH_ENABLE_THPRAC "Build the archived thprac integration" OFF)
 option(TH_ENABLE_THCRAP "Build the archived thcrap localization integration" OFF)
 option(TH_DEV_TOOLS "Enable developer-only tools such as F5 fast-forward" OFF)
+set(THPRAC_IMGUI_ROOT "${CMAKE_SOURCE_DIR}/../thprac-reallyportable/thprac/src/3rdParties/ImGui" CACHE PATH "Dear ImGui 1.82 source used by the desktop thprac integration")
 set(TH_WEB_MUSIC "BASE" CACHE STRING "Bundled Web music payload: BASE, MIDI, WAV, or OGG")
 set_property(CACHE TH_WEB_MUSIC PROPERTY STRINGS BASE MIDI WAV OGG)
 set(TH07_ASSET_ROOT "${CMAKE_SOURCE_DIR}/assets" CACHE PATH "TH07 original asset directory")
 set(TH07_OGG_ROOT "${CMAKE_SOURCE_DIR}/assets-ogg" CACHE PATH "TH07 generated OGG asset directory")
+set(TH_UNIFONT_FILE "${CMAKE_SOURCE_DIR}/../dependencies/unifont-15.1.05/unifont-15.1.05.otf" CACHE FILEPATH "GNU Unifont OTF used by localized text and thprac")
+if((TH_ENABLE_THCRAP OR TH_ENABLE_THPRAC) AND NOT EXISTS "${TH_UNIFONT_FILE}")
+    message(FATAL_ERROR "GNU Unifont is required: ${TH_UNIFONT_FILE}")
+endif()
 
 set(SOURCES
     src/AnmManager.cpp
@@ -60,6 +65,17 @@ set(SOURCES
 
 if(TH_ENABLE_THPRAC)
     list(APPEND SOURCES src/PracticeRuntime.cpp)
+    if(NOT EXISTS "${THPRAC_IMGUI_ROOT}/imgui.cpp" OR NOT EXISTS "${THPRAC_IMGUI_ROOT}/imgui.h")
+        message(FATAL_ERROR "TH_ENABLE_THPRAC requires Dear ImGui sources at ${THPRAC_IMGUI_ROOT}")
+    endif()
+    list(APPEND SOURCES
+        src/ThpracImGui.cpp
+        "${THPRAC_IMGUI_ROOT}/imgui.cpp"
+        "${THPRAC_IMGUI_ROOT}/imgui_draw.cpp"
+        "${THPRAC_IMGUI_ROOT}/imgui_freetype.cpp"
+        "${THPRAC_IMGUI_ROOT}/imgui_tables.cpp"
+        "${THPRAC_IMGUI_ROOT}/imgui_widgets.cpp"
+    )
 else()
     list(APPEND SOURCES src/PracticeRuntimeStub.cpp)
 endif()
@@ -96,10 +112,24 @@ else()
     add_executable(th07 ${SOURCES})
     set(TH_EXEC_NAME "th07")
 endif()
+if(NOT EMSCRIPTEN AND NOT ANDROID AND NOT APPLE)
+    add_custom_command(TARGET ${TH_EXEC_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${TH07_ASSET_ROOT}/msgothic.ttc" "$<TARGET_FILE_DIR:${TH_EXEC_NAME}>/msgothic.ttc"
+        VERBATIM)
+    if(TH_ENABLE_THCRAP OR TH_ENABLE_THPRAC)
+        add_custom_command(TARGET ${TH_EXEC_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${TH_UNIFONT_FILE}" "$<TARGET_FILE_DIR:${TH_EXEC_NAME}>/unifont.otf"
+            VERBATIM)
+    endif()
+endif()
 
 target_include_directories(${TH_EXEC_NAME} PRIVATE src src/pbg4)
 if(TH_ENABLE_THPRAC)
     target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_ENABLE_THPRAC)
+    target_compile_definitions(${TH_EXEC_NAME} PRIVATE IMGUI_DISABLE_WIN32_FUNCTIONS)
+    target_include_directories(${TH_EXEC_NAME} PRIVATE "${THPRAC_IMGUI_ROOT}")
 endif()
 if(TH_ENABLE_THCRAP)
     target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_ENABLE_THCRAP)
@@ -138,20 +168,24 @@ if(EMSCRIPTEN)
         "--shell-file"
         "${CMAKE_SOURCE_DIR}/resources/shell.html"
     )
+    set_property(TARGET th07 APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/resources/shell.html")
     if(NOT TH_EXTERNAL_ASSETS)
         set(TH07_WEB_ASSET_STAGE "${CMAKE_BINARY_DIR}/web-assets-${TH_WEB_MUSIC}")
         file(REMOVE_RECURSE "${TH07_WEB_ASSET_STAGE}")
         file(MAKE_DIRECTORY "${TH07_WEB_ASSET_STAGE}")
         set(TH07_WEB_BASE_ASSETS th07.dat)
-        if(NOT TH_WEB_SHARED_FONT)
-            list(APPEND TH07_WEB_BASE_ASSETS msgothic.ttc)
-        endif()
         foreach(asset IN LISTS TH07_WEB_BASE_ASSETS)
             if(NOT EXISTS "${TH07_ASSET_ROOT}/${asset}")
                 message(FATAL_ERROR "Missing Web asset: ${TH07_ASSET_ROOT}/${asset}")
             endif()
             file(COPY_FILE "${TH07_ASSET_ROOT}/${asset}" "${TH07_WEB_ASSET_STAGE}/${asset}")
         endforeach()
+        if(NOT TH_WEB_SHARED_FONT)
+            file(COPY_FILE "${TH07_ASSET_ROOT}/msgothic.ttc" "${TH07_WEB_ASSET_STAGE}/msgothic.ttc")
+            if(TH_ENABLE_THCRAP OR TH_ENABLE_THPRAC)
+                file(COPY_FILE "${TH_UNIFONT_FILE}" "${TH07_WEB_ASSET_STAGE}/unifont.otf")
+            endif()
+        endif()
         if(TH_WEB_MUSIC STREQUAL "WAV")
             file(COPY_FILE "${TH07_ASSET_ROOT}/thbgm.dat" "${TH07_WEB_ASSET_STAGE}/thbgm.dat")
         elseif(TH_WEB_MUSIC STREQUAL "OGG")
@@ -195,6 +229,9 @@ if(APPLE)
         "${CMAKE_SOURCE_DIR}/assets/thbgm.dat"
         "${CMAKE_SOURCE_DIR}/assets/msgothic.ttc"
     )
+    if(TH_ENABLE_THCRAP OR TH_ENABLE_THPRAC)
+        list(APPEND APP_RESOURCES "${TH_UNIFONT_FILE}")
+    endif()
 
 if(NOT TH_EXTERNAL_ASSETS)
     target_sources(${TH_EXEC_NAME} PRIVATE ${APP_RESOURCES})
@@ -274,7 +311,7 @@ if(USE_VENDORED_SDL)
     set(SDLIMAGE_JXL OFF)
     set(SDLIMAGE_LBM OFF)
     set(SDLIMAGE_PCX OFF)
-    set(SDLIMAGE_PNG OFF)
+    set(SDLIMAGE_PNG ON) # thcrap localization supplies PNG text and title assets
     set(SDLIMAGE_PNM OFF)
     set(SDLIMAGE_QOI OFF)
     set(SDLIMAGE_SVG OFF)
@@ -291,6 +328,16 @@ if(USE_VENDORED_SDL)
     add_subdirectory(vendored/SDL EXCLUDE_FROM_ALL)
     add_subdirectory(vendored/SDL_image EXCLUDE_FROM_ALL)
     add_subdirectory(vendored/SDL_ttf EXCLUDE_FROM_ALL)
+endif()
+
+if(TH_ENABLE_THPRAC AND USE_VENDORED_SDL)
+    if(NOT TARGET Freetype::Freetype)
+        message(FATAL_ERROR "TH_ENABLE_THPRAC requires the vendored Freetype target for ImGui's pinned FreeType atlas builder")
+    endif()
+    target_include_directories(${TH_EXEC_NAME} PRIVATE
+        $<TARGET_PROPERTY:Freetype::Freetype,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    target_link_libraries(${TH_EXEC_NAME} PRIVATE Freetype::Freetype)
 endif()
 
 target_link_libraries(${TH_EXEC_NAME} PRIVATE

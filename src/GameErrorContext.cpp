@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "Localization.hpp"
+
 GameErrorContext g_GameErrorContext;
 
 const char *GameErrorContext::Log(const char *fmt, ...)
@@ -12,8 +14,9 @@ const char *GameErrorContext::Log(const char *fmt, ...)
     size_t tmpSize;
     va_list args;
 
+    const char *localizedFmt = Localization::LogString(fmt);
     va_start(args, fmt);
-    vsnprintf(tmp, sizeof(tmp), fmt, args);
+    vsnprintf(tmp, sizeof(tmp), localizedFmt, args);
     tmpSize = strlen(tmp);
     if (this->m_BufferEnd + tmpSize < this->m_Buffer + 0x1fff)
     {
@@ -23,7 +26,7 @@ const char *GameErrorContext::Log(const char *fmt, ...)
         *this->m_BufferEnd = '\0';
     }
     va_end(args);
-    return fmt;
+    return localizedFmt;
 }
 
 const char *GameErrorContext::Fatal(const char *fmt, ...)
@@ -32,8 +35,9 @@ const char *GameErrorContext::Fatal(const char *fmt, ...)
     size_t tmpSize;
     va_list args;
 
+    const char *localizedFmt = Localization::LogString(fmt);
     va_start(args, fmt);
-    vsnprintf(tmp, sizeof(tmp), fmt, args);
+    vsnprintf(tmp, sizeof(tmp), localizedFmt, args);
     tmpSize = strlen(tmp);
     if (this->m_BufferEnd + tmpSize < this->m_Buffer + 0x1fff)
     {
@@ -43,5 +47,5 @@ const char *GameErrorContext::Fatal(const char *fmt, ...)
     }
     va_end(args);
     this->m_ShowMessageBox = true;
-    return fmt;
+    return localizedFmt;
 }

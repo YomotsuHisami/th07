@@ -1,6 +1,7 @@
 #include "Gui.hpp"
 
 #include <cstdio>
+#include <cstring>
 
 #include "AnmIdx.hpp"
 #include "AnmManager.hpp"
@@ -14,7 +15,9 @@
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
 #include "ItemManager.hpp"
+#include "Localization.hpp"
 #include "Player.hpp"
+#include "PracticeRuntime.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "Supervisor.hpp"
@@ -125,7 +128,11 @@ u32 Gui::OnUpdate(Gui *arg)
     arg->UpdateGui();
     arg->impl->RunMsg();
     arg->frameCounter = arg->frameCounter + 1;
-    if (g_GameManager.currentStage == 6 && arg->frameCounter == 300)
+    // th07_bgm_st6_1: direct advanced-section starts select/play their BGM in
+    // GameManager::AddedCallback, so the vanilla delayed Stage6 road start
+    // must not fire again at frame 300.
+    if (!PracticeRuntime::AdvancedSectionActive() &&
+        g_GameManager.currentStage == 6 && arg->frameCounter == 300)
     {
         g_Supervisor.PlayLoadedAudio(0);
     }
@@ -149,6 +156,37 @@ u32 Gui::OnDraw(Gui *arg)
         stringPos.x = 144.0f;
         stringPos.y = 128.0f;
         stringPos.z = 0.0f;
+        if (Localization::Active())
+        {
+            // base_tsa/th07.v1.00b stage_result_align calls strings_lookup()
+            // for the Clear row format, measures its byte length, multiplies
+            // by the fixed 8px sprite-ASCII advance, and writes
+            //   stringPos.x = 200 - translatedLength * 8.
+            // This moves the whole Stage Result block, not just one row.
+            const char *clearFormat = Localization::AsciiString("Clear  = %8d");
+            stringPos.x = 200.0f - static_cast<f32>(std::strlen(clearFormat) * 8u);
+#ifdef TH_DEV_TOOLS
+            static bool loggedLocalizedStageResultAlign = false;
+            if (!loggedLocalizedStageResultAlign)
+            {
+                SDL_Log("th07 thcrap stage result align: localization=1 basis=%s bytes=%zu x=%.3f",
+                        clearFormat, std::strlen(clearFormat), stringPos.x);
+                loggedLocalizedStageResultAlign = true;
+            }
+#endif
+        }
+#ifdef TH_DEV_TOOLS
+        else
+        {
+            static bool loggedJapaneseStageResultAlign = false;
+            if (!loggedJapaneseStageResultAlign)
+            {
+                SDL_Log("th07 thcrap stage result align: localization=0 basis=Clear  = %%8d bytes=12 x=%.3f",
+                        stringPos.x);
+                loggedJapaneseStageResultAlign = true;
+            }
+        }
+#endif
         g_AsciiManager.color = 0xffffff40;
         if (g_GameManager.currentStage < 6)
         {
@@ -175,7 +213,8 @@ u32 Gui::OnDraw(Gui *arg)
         AsciiManager::AddFormatText(&g_AsciiManager, &stringPos, "Cherry = %8d",
                                     arg->impl->clearCherryMax * 10);
         if (g_GameManager.currentStage >= 7 ||
-            (g_GameManager.currentStage == 6 && !g_GameManager.practice &&
+            (g_GameManager.currentStage == 6 &&
+             (!g_GameManager.practice || PracticeRuntime::AdvancedAllClearBonus()) &&
              (!g_GameManager.replay || g_ReplayManager->data->stageReplayData[4] != NULL)))
         {
             stringPos.y = stringPos.y + 16.0f;
@@ -607,7 +646,12 @@ ZunResult Gui::ActualAddedCallback()
     g_AnmManager->SetAnmIdxAndExecuteScript(&this->impl->enemySpellcardPortrait, 1187);
     g_AnmManager->SetAnmIdxAndExecuteScript(&this->impl->bombSpellcardName, 1796);
     g_AnmManager->SetAnmIdxAndExecuteScript(&this->impl->enemySpellcardName, 1797);
-    g_AnmManager->ExecuteVmsAnms(this->impl->vms1, 2048, 5);
+    // th07_disable_title @ 0x42956b skips this exact three-argument call
+    // (the hook compensates Esp by 0x0c) for custom section/frame starts.
+    // These five VMs own the stage/music-title presentation; skipping their
+    // initialization matches upstream without suppressing unrelated HUD VMs.
+    if (!PracticeRuntime::SuppressStageIntroTitles())
+        g_AnmManager->ExecuteVmsAnms(this->impl->vms1, 2048, 5);
     g_AnmManager->SetAnmIdxAndExecuteScript(&this->impl->bombSpellcardNameBg, 1);
     g_AnmManager->SetAnmIdxAndExecuteScript(&this->impl->enemySpellcardNameBg, 0);
     g_AnmManager->SetAnmIdxAndExecuteScript(&this->impl->spellcardBonusIndicator, 2);
@@ -868,15 +912,35 @@ ZunResult GuiImpl::RunMsg()
             }
             break;
         case MSG_TEXT_INTRODUCE:
+        {
             args = &this->msg.curInstr->args;
+#ifdef TH_DEV_TOOLS
+            Supervisor::DebugPrint("th07 thcrap msg intro: stage=%d msg=%d line=%d text=%s\n",
+                                   g_GameManager.currentStage, this->msg.currentMsgIdx,
+                                   args->dialogue.textLine, args->dialogue.text);
+#endif
             g_AnmManager->SetAnmIdxAndExecuteScript(&this->msg.introLines[args->dialogue.textLine],
                                                     args->dialogue.textLine + 1794);
-            g_AnmManager->DrawStringFormat(this->msg.introLines + args->dialogue.textLine,
-                                           this->msg.textColorsA[args->dialogue.textColor],
-                                           this->msg.textColorsB[args->dialogue.textColor],
-                                           args->dialogue.text);
+            const bool bossImageApplied =
+                args->dialogue.textLine == 0
+                    ? Localization::ApplyBossTitleImage(
+                          this->msg.introLines + args->dialogue.textLine,
+                          static_cast<std::uint32_t>(g_GameManager.currentStage),
+                          this->msg.portraits[1].activeSpriteIdx)
+                    : Localization::ApplyBossNameImage(
+                          this->msg.introLines + args->dialogue.textLine,
+                          static_cast<std::uint32_t>(g_GameManager.currentStage),
+                          this->msg.portraits[1].activeSpriteIdx);
+            if (!bossImageApplied)
+            {
+                g_AnmManager->DrawStringFormat(this->msg.introLines + args->dialogue.textLine,
+                                               this->msg.textColorsA[args->dialogue.textColor],
+                                               this->msg.textColorsB[args->dialogue.textColor],
+                                               args->dialogue.text);
+            }
             this->msg.framesElapsedDuringPause = 0;
             break;
+        }
         case MSG_STAGERESULTS:
             this->clearPower = g_GameManager.globals->currentPower;
             this->clearPointItems = g_GameManager.globals->pointItemsCollectedThisStage;
@@ -1051,8 +1115,38 @@ ZunResult GuiImpl::DrawDialogue()
     g_Supervisor.gfxDevice->SetColorOp(COMPONENT_ALPHA, COLOR_OP_MODULATE);
     g_AnmManager->DrawInterpNoRotation(&this->msg.dialogueLines[0]);
     g_AnmManager->DrawInterpNoRotation(&this->msg.dialogueLines[1]);
-    g_AnmManager->DrawInterpNoRotation(&this->msg.introLines[0]);
-    g_AnmManager->DrawInterpNoRotation(&this->msg.introLines[1]);
+    if (Localization::Active())
+    {
+        // base_tsa/th07 swaps the original two immediate VM offsets at
+        // Rx2acfc/Rx2ad13: Name (introLines[1]) must render before Title
+        // (introLines[0]) so the translated boss-title layers composite in
+        // the same order as thcrap.
+        g_AnmManager->DrawInterpNoRotation(&this->msg.introLines[1]);
+        g_AnmManager->DrawInterpNoRotation(&this->msg.introLines[0]);
+#ifdef TH_DEV_TOOLS
+        static bool loggedLocalizedBossIntroOrder = false;
+        if (!loggedLocalizedBossIntroOrder &&
+            (this->msg.introLines[0].visible || this->msg.introLines[1].visible))
+        {
+            SDL_Log("th07 thcrap boss intro draw order: localization=1 order=1,0");
+            loggedLocalizedBossIntroOrder = true;
+        }
+#endif
+    }
+    else
+    {
+        g_AnmManager->DrawInterpNoRotation(&this->msg.introLines[0]);
+        g_AnmManager->DrawInterpNoRotation(&this->msg.introLines[1]);
+#ifdef TH_DEV_TOOLS
+        static bool loggedJapaneseBossIntroOrder = false;
+        if (!loggedJapaneseBossIntroOrder &&
+            (this->msg.introLines[0].visible || this->msg.introLines[1].visible))
+        {
+            SDL_Log("th07 thcrap boss intro draw order: localization=0 order=0,1");
+            loggedJapaneseBossIntroOrder = true;
+        }
+#endif
+    }
     return ZUN_SUCCESS;
 }
 
@@ -1246,7 +1340,8 @@ void Gui::UpdateGui()
         scoreBonus += this->impl->clearPointItems * 5000;
         scoreBonus += this->impl->clearCherryMax;
         if (g_GameManager.currentStage >= 7 ||
-            (g_GameManager.currentStage == 6 && !g_GameManager.practice &&
+            (g_GameManager.currentStage == 6 &&
+             (!g_GameManager.practice || PracticeRuntime::AdvancedAllClearBonus()) &&
              (!g_GameManager.replay || g_ReplayManager->data->stageReplayData[4])))
         {
             scoreBonus += (i32)g_GameManager.globals->livesRemaining * 2000000;
@@ -1578,7 +1673,8 @@ void Gui::DrawStageElements()
         g_AnmManager->DrawNoRotation(&this->impl->spellcardBonusIndicator);
         remainingBonus = g_EnemyManager.spellcardInfo.captureScore +
                          g_EnemyManager.spellcardInfo.grazeBonusScore;
-        digitDivisor = 10000000;
+        const bool fixSpellBonusDisplay = PracticeRuntime::AdvancedFixSpellBonusDisplay();
+        digitDivisor = fixSpellBonusDisplay ? 100000000 : 10000000;
         leadingZeroSkipped = 0;
         catk = &g_GameManager.catk[g_EnemyManager.spellcardInfo.spellcardIdx];
         if (!g_EnemyManager.spellcardInfo.isCapturing)
@@ -1587,7 +1683,9 @@ void Gui::DrawStageElements()
         }
         this->impl->captureBonusVm.pos = this->impl->spellcardBonusIndicator.pos;
         this->impl->captureBonusVm.pos.x -= 40.0f;
-        for (i = 0; i < 8; i++)
+        if (fixSpellBonusDisplay)
+            this->impl->captureBonusVm.pos.x -= 7.0f;
+        for (i = 0; i < (fixSpellBonusDisplay ? 9 : 8); i++)
         {
             digit = remainingBonus / digitDivisor;
             if (digit != 0)

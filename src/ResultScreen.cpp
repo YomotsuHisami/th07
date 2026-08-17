@@ -12,6 +12,7 @@
 #include "FileSystem.hpp"
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
+#include "Localization.hpp"
 #include "Rng.hpp"
 #include "SoundPlayer.hpp"
 #include "Touch.hpp"
@@ -20,6 +21,11 @@
 #include "pbg4/Lzss.hpp"
 
 namespace fs = std::filesystem;
+
+#ifdef TH_DEV_TOOLS
+static ResultScreen *g_ReadOnlyResultAuditScreen = nullptr;
+static bool g_ReadOnlyResultAuditForcePhantasm = false;
+#endif
 
 static const f32 g_DifficultyWeightsList[] = {-30.0f, -10.0f, 20.0f, 30.0f, 30.0f};
 
@@ -32,6 +38,23 @@ const char *g_CharacterList[6] = {
 };
 
 const char *g_TotalForAllProtagonists = "全主人公合計  　";
+
+static const char *LocalizedStatsCharacterName(i32 index)
+{
+    static const char *const ids[6] = {
+        "th06 Stats ReimuA", "th06 Stats ReimuB", "th06 Stats MarisaA",
+        "th06 Stats MarisaB", "th07 Stats SakuyaA", "th07 Stats SakuyaB",
+    };
+    if (index < 0 || index >= 6)
+        return "";
+    return Localization::StringById(ids[index], g_CharacterList[index]);
+}
+
+static const char *LocalizedStatsTotalName()
+{
+    return Localization::StringById("th07 Stats Total (All Characters)",
+                                    g_TotalForAllProtagonists);
+}
 
 const char *g_CharactersAndShotTypesStrings[6] = {
     "ReimuA ", "ReimuB ", "MarisaA", "MarisaB", "SakuyaA", "SakuyaB",
@@ -942,8 +965,8 @@ u32 ResultScreen::OnUpdate(ResultScreen *arg)
         if (arg->charUsed != arg->cursor && arg->frameTimer == 20)
         {
             arg->charUsed = arg->cursor;
-            g_AnmManager->DrawStringFormat2(arg->spellcardListVms, 0xffffff, 0,
-                                            g_CharacterList[arg->charUsed]);
+            g_AnmManager->DrawStringFormat2(arg->spellcardListVms, 0xffffff, 0, "%s",
+                                            LocalizedStatsCharacterName(arg->charUsed));
             arg->spellcardListVms[0].color.bytes.a = 255;
         }
         if (arg->frameTimer < 30)
@@ -995,15 +1018,27 @@ u32 ResultScreen::OnUpdate(ResultScreen *arg)
                 }
                 else
                 {
+                    const char *spellName = Localization::SpellName(
+                        static_cast<u32>(vmIdx), g_GameManager.catk[vmIdx].name);
+#ifdef TH_DEV_TOOLS
+                    if (spellName != g_GameManager.catk[vmIdx].name)
+                        Supervisor::DebugPrint(
+                            "th07 thcrap result spell display: id=%d original=%s localized=%s\n",
+                            vmIdx, g_GameManager.catk[vmIdx].name, spellName);
+#endif
                     AnmManager::DrawVmTextFmt(g_AnmManager, arg->spellcardListVms + vmIdx % 10,
-                                              0xffffff, 0, g_GameManager.catk[vmIdx].name);
+                                              0xffffff, 0, spellName);
                 }
                 arg->spellcardListVms[vmIdx % 10].color.bytes.a = 255;
             }
-            AnmManager::DrawVmTextFmt(g_AnmManager, arg->spellcardListVms + 10, 0xffffff, 0,
-                                      "%s %3d枚中%3d枚取得（キャラ切り替え↓↑）",
-                                      g_CharacterList[arg->prevSpellcardListPage], 141,
-                                      arg->totalPlayCountPerCharacter[arg->spellcardListPage]);
+            static const char spellResultFallback[] =
+                "%s %3d枚中%3d枚取得（キャラ切り替え↓↑）";
+            AnmManager::DrawVmTextFmt(
+                g_AnmManager, arg->spellcardListVms + 10, 0xffffff, 0,
+                Localization::FormatStringById("th07 Spell Result Character Select",
+                                               spellResultFallback),
+                LocalizedStatsCharacterName(arg->prevSpellcardListPage), 141,
+                arg->totalPlayCountPerCharacter[arg->spellcardListPage]);
             arg->spellcardListVms[10].color.bytes.a = 255;
         }
         if (arg->frameTimer < 30)
@@ -1095,8 +1130,8 @@ ZunResult ResultScreen::HandleResultKeyboard()
         {
             vm->pendingInterrupt = this->diffPlayed + 3;
         }
-        g_AnmManager->DrawStringFormat2(this->spellcardListVms, 0xffffff, 0,
-                                        g_CharacterList[this->charUsed]);
+        g_AnmManager->DrawStringFormat2(this->spellcardListVms, 0xffffff, 0, "%s",
+                                        LocalizedStatsCharacterName(this->charUsed));
         this->spellcardListVms[0].color.bytes.a = 255;
         this->curScore.character = (u8)this->charUsed;
         this->curScore.difficulty = (u8)this->diffPlayed;
@@ -1660,7 +1695,10 @@ i32 ResultScreen::DrawStats()
             vm = this->spellcardListVms;
             vm->pos = pos;
             g_Supervisor.UpdateStartupTime();
-            AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0, "総起動時間   %.2d:%.2d:%.2d",
+            static const char startupFallback[] = "総起動時間   %.2d:%.2d:%.2d";
+            AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
+                                      Localization::FormatStringById(
+                                          "th07 Stats Time Since Startup", startupFallback),
                                       g_GameManager.plst.totalHours,
                                       g_GameManager.plst.totalMinutes,
                                       g_GameManager.plst.totalSeconds);
@@ -1670,7 +1708,10 @@ i32 ResultScreen::DrawStats()
             vm++;
             pos.y += 17.0f;
             vm->pos = pos;
-            AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0, "総プレイ時間 %.2d:%.2d:%.2d",
+            static const char playtimeFallback[] = "総プレイ時間 %.2d:%.2d:%.2d";
+            AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
+                                      Localization::FormatStringById(
+                                          "th07 Stats Total Playtime", playtimeFallback),
                                       g_GameManager.plst.gameHours, g_GameManager.plst.gameMinutes,
                                       g_GameManager.plst.gameSeconds);
 
@@ -1680,14 +1721,18 @@ i32 ResultScreen::DrawStats()
             if (g_GameManager.HasUnlockedPhantomAndMaxClears())
             {
                 AnmManager::DrawVmTextFmt(
-                    g_AnmManager, vm, 0xffffff, 0,
-                    "プレイ回数　　　 　Easy 　Norm 　Hard 　Luna  Extra Phants  Total");
+                    g_AnmManager, vm, 0xffffff, 0, "%s",
+                    Localization::StringById(
+                        "th07 Stats Play Count +Phantasm",
+                        "プレイ回数　　　 　Easy 　Norm 　Hard 　Luna  Extra Phants  Total"));
             }
             else
             {
                 AnmManager::DrawVmTextFmt(
-                    g_AnmManager, vm, 0xffffff, 0,
-                    "プレイ回数　　　 　Easy 　Norm 　Hard 　Luna  Extra  Total");
+                    g_AnmManager, vm, 0xffffff, 0, "%s",
+                    Localization::StringById(
+                        "th07 Stats Play Count",
+                        "プレイ回数　　　 　Easy 　Norm 　Hard 　Luna  Extra  Total"));
             }
 
             for (i32 i = 0; i < 6; i++)
@@ -1697,9 +1742,13 @@ i32 ResultScreen::DrawStats()
                 vm->pos = pos;
                 if (g_GameManager.HasUnlockedPhantomAndMaxClears())
                 {
+                    static const char characterPhantasmFallback[] =
+                        "%s %6d %6d %6d %6d %6d %6d %6d";
                     AnmManager::DrawVmTextFmt(
-                        g_AnmManager, vm, 0xffffff, 0, "%s %6d %6d %6d %6d %6d %6d %6d",
-                        g_CharacterList[i],
+                        g_AnmManager, vm, 0xffffff, 0,
+                        Localization::FormatStringById(
+                            "th07 Stats Character Format +Phantasm", characterPhantasmFallback),
+                        LocalizedStatsCharacterName(i),
                         g_GameManager.plst.playDataByDifficulty[0].playCountPerShotType[i],
                         g_GameManager.plst.playDataByDifficulty[1].playCountPerShotType[i],
                         g_GameManager.plst.playDataByDifficulty[2].playCountPerShotType[i],
@@ -1710,9 +1759,12 @@ i32 ResultScreen::DrawStats()
                 }
                 else
                 {
+                    static const char characterFallback[] = "%s %6d %6d %6d %6d %6d %6d";
                     AnmManager::DrawVmTextFmt(
-                        g_AnmManager, vm, 0xffffff, 0, "%s %6d %6d %6d %6d %6d %6d",
-                        g_CharacterList[i],
+                        g_AnmManager, vm, 0xffffff, 0,
+                        Localization::FormatStringById("th07 Stats Character Format",
+                                                       characterFallback),
+                        LocalizedStatsCharacterName(i),
                         g_GameManager.plst.playDataByDifficulty[0].playCountPerShotType[i],
                         g_GameManager.plst.playDataByDifficulty[1].playCountPerShotType[i],
                         g_GameManager.plst.playDataByDifficulty[2].playCountPerShotType[i],
@@ -1727,9 +1779,13 @@ i32 ResultScreen::DrawStats()
             vm->pos = pos;
             if (g_GameManager.HasUnlockedPhantomAndMaxClears())
             {
+                static const char characterPhantasmFallback[] =
+                    "%s %6d %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(
-                    g_AnmManager, vm, 0xffffff, 0, "%s %6d %6d %6d %6d %6d %6d %6d",
-                    g_TotalForAllProtagonists, g_GameManager.plst.playDataByDifficulty[0].playCount,
+                    g_AnmManager, vm, 0xffffff, 0,
+                    Localization::FormatStringById("th07 Stats Character Format +Phantasm",
+                                                   characterPhantasmFallback),
+                    LocalizedStatsTotalName(), g_GameManager.plst.playDataByDifficulty[0].playCount,
                     g_GameManager.plst.playDataByDifficulty[1].playCount,
                     g_GameManager.plst.playDataByDifficulty[2].playCount,
                     g_GameManager.plst.playDataByDifficulty[3].playCount,
@@ -1739,8 +1795,11 @@ i32 ResultScreen::DrawStats()
             }
             else
             {
+                static const char characterFallback[] = "%s %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
-                                          "%s %6d %6d %6d %6d %6d %6d", g_TotalForAllProtagonists,
+                                          Localization::FormatStringById(
+                                              "th07 Stats Character Format", characterFallback),
+                                          LocalizedStatsTotalName(),
                                           g_GameManager.plst.playDataByDifficulty[0].playCount,
                                           g_GameManager.plst.playDataByDifficulty[1].playCount,
                                           g_GameManager.plst.playDataByDifficulty[2].playCount,
@@ -1762,8 +1821,12 @@ i32 ResultScreen::DrawStats()
 
             if (g_GameManager.HasUnlockedPhantomAndMaxClears())
             {
+                static const char clearPhantasmFallback[] =
+                    "クリア回数  　　 %6d %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(
-                    g_AnmManager, vm, 0xffffff, 0, "クリア回数  　　 %6d %6d %6d %6d %6d %6d %6d",
+                    g_AnmManager, vm, 0xffffff, 0,
+                    Localization::FormatStringById("th07 Stats Clear Count +Phantasm",
+                                                   clearPhantasmFallback),
                     g_GameManager.plst.playDataByDifficulty[0].noContinueClearCount,
                     g_GameManager.plst.playDataByDifficulty[1].noContinueClearCount,
                     g_GameManager.plst.playDataByDifficulty[2].noContinueClearCount,
@@ -1774,8 +1837,11 @@ i32 ResultScreen::DrawStats()
             }
             else
             {
+                static const char clearFallback[] =
+                    "クリア回数  　　 %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(
-                    g_AnmManager, vm, 0xffffff, 0, "クリア回数  　　 %6d %6d %6d %6d %6d %6d",
+                    g_AnmManager, vm, 0xffffff, 0,
+                    Localization::FormatStringById("th07 Stats Clear Count", clearFallback),
                     g_GameManager.plst.playDataByDifficulty[0].noContinueClearCount,
                     g_GameManager.plst.playDataByDifficulty[1].noContinueClearCount,
                     g_GameManager.plst.playDataByDifficulty[2].noContinueClearCount,
@@ -1789,8 +1855,12 @@ i32 ResultScreen::DrawStats()
             vm->pos = pos;
             if (g_GameManager.HasUnlockedPhantomAndMaxClears())
             {
+                static const char continuePhantasmFallback[] =
+                    "コンティニュー   %6d %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
-                                          "コンティニュー   %6d %6d %6d %6d %6d %6d %6d",
+                                          Localization::FormatStringById(
+                                              "th07 Stats Continue +Phantasm",
+                                              continuePhantasmFallback),
                                           g_GameManager.plst.playDataByDifficulty[0].retryCount,
                                           g_GameManager.plst.playDataByDifficulty[1].retryCount,
                                           g_GameManager.plst.playDataByDifficulty[2].retryCount,
@@ -1801,8 +1871,11 @@ i32 ResultScreen::DrawStats()
             }
             else
             {
+                static const char continueFallback[] =
+                    "コンティニュー   %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
-                                          "コンティニュー   %6d %6d %6d %6d %6d %6d",
+                                          Localization::FormatStringById(
+                                              "th07 Stats Continue", continueFallback),
                                           g_GameManager.plst.playDataByDifficulty[0].retryCount,
                                           g_GameManager.plst.playDataByDifficulty[1].retryCount,
                                           g_GameManager.plst.playDataByDifficulty[2].retryCount,
@@ -1816,8 +1889,12 @@ i32 ResultScreen::DrawStats()
             vm->pos = pos;
             if (g_GameManager.HasUnlockedPhantomAndMaxClears())
             {
+                static const char practicePhantasmFallback[] =
+                    "プラクティス　   %6d %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(
-                    g_AnmManager, vm, 0xffffff, 0, "プラクティス　   %6d %6d %6d %6d %6d %6d %6d",
+                    g_AnmManager, vm, 0xffffff, 0,
+                    Localization::FormatStringById("th07 Stats Practice +Phantasm",
+                                                   practicePhantasmFallback),
                     g_GameManager.plst.playDataByDifficulty[0].extraClearCount,
                     g_GameManager.plst.playDataByDifficulty[1].extraClearCount,
                     g_GameManager.plst.playDataByDifficulty[2].extraClearCount,
@@ -1828,8 +1905,11 @@ i32 ResultScreen::DrawStats()
             }
             else
             {
+                static const char practiceFallback[] =
+                    "プラクティス　   %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(
-                    g_AnmManager, vm, 0xffffff, 0, "プラクティス　   %6d %6d %6d %6d %6d %6d",
+                    g_AnmManager, vm, 0xffffff, 0,
+                    Localization::FormatStringById("th07 Stats Practice", practiceFallback),
                     g_GameManager.plst.playDataByDifficulty[0].extraClearCount,
                     g_GameManager.plst.playDataByDifficulty[1].extraClearCount,
                     g_GameManager.plst.playDataByDifficulty[2].extraClearCount,
@@ -1843,8 +1923,12 @@ i32 ResultScreen::DrawStats()
             vm->pos = pos;
             if (g_GameManager.HasUnlockedPhantomAndMaxClears())
             {
+                static const char retriesPhantasmFallback[] =
+                    "リトライ回数  　 %6d %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
-                                          "リトライ回数  　 %6d %6d %6d %6d %6d %6d %6d",
+                                          Localization::FormatStringById(
+                                              "th07 Stats Retries +Phantasm",
+                                              retriesPhantasmFallback),
                                           g_GameManager.plst.playDataByDifficulty[0].clearCount,
                                           g_GameManager.plst.playDataByDifficulty[1].clearCount,
                                           g_GameManager.plst.playDataByDifficulty[2].clearCount,
@@ -1855,8 +1939,11 @@ i32 ResultScreen::DrawStats()
             }
             else
             {
+                static const char retriesFallback[] =
+                    "リトライ回数  　 %6d %6d %6d %6d %6d %6d";
                 AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
-                                          "リトライ回数  　 %6d %6d %6d %6d %6d %6d",
+                                          Localization::FormatStringById(
+                                              "th07 Stats Retries", retriesFallback),
                                           g_GameManager.plst.playDataByDifficulty[0].clearCount,
                                           g_GameManager.plst.playDataByDifficulty[1].clearCount,
                                           g_GameManager.plst.playDataByDifficulty[2].clearCount,
@@ -1864,6 +1951,14 @@ i32 ResultScreen::DrawStats()
                                           g_GameManager.plst.playDataByDifficulty[4].clearCount,
                                           g_GameManager.plst.playDataByDifficulty[6].clearCount);
             }
+#ifdef TH_DEV_TOOLS
+            for (i32 statsRow = 0; statsRow < 14; ++statsRow)
+            {
+                SDL_Log("th07 Stats row geometry: index=%d x=%.3f y=%.3f",
+                        statsRow, this->spellcardListVms[statsRow].pos.x,
+                        this->spellcardListVms[statsRow].pos.y);
+            }
+#endif
         }
 
         if (this->frameTimer < 40)
@@ -1886,7 +1981,10 @@ i32 ResultScreen::DrawStats()
              g_GameManager.plst.totalSeconds != this->lastTotalSeconds))
         {
             vm = this->spellcardListVms;
-            AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0, "総起動時間   %.2d:%.2d:%.2d",
+            static const char startupFallback[] = "総起動時間   %.2d:%.2d:%.2d";
+            AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
+                                      Localization::FormatStringById(
+                                          "th07 Stats Time Since Startup", startupFallback),
                                       g_GameManager.plst.totalHours,
                                       g_GameManager.plst.totalMinutes,
                                       g_GameManager.plst.totalSeconds);
@@ -2461,8 +2559,55 @@ ZunResult ResultScreen::AddedCallback(ResultScreen *arg)
     {
         ParseCatk(arg->scoreDat, g_GameManager.catk);
         ParseClrd(arg->scoreDat, g_GameManager.clrd);
+#ifdef TH_DEV_TOOLS
+        if (arg == g_ReadOnlyResultAuditScreen && g_ReadOnlyResultAuditForcePhantasm)
+        {
+            // Read-only runtime fixture: satisfy the original game's actual
+            // HasUnlockedPhantomAndMaxClears() predicate in memory so the
+            // +Phantasm Stats formats execute through production DrawStats().
+            g_GameManager.clrd[0].difficultyClearedWithRetries[5] = 99;
+            SDL_Log("th07 dev: Result Stats Phantasm read-only fixture enabled");
+        }
+#endif
         g_GameManager.HasUnlockedPhantomAndMaxClears();
         ParsePscr(arg->scoreDat, &g_GameManager.pscr[0][0][0]);
+#ifdef TH_DEV_TOOLS
+        if (arg->resultScreenState == 9)
+        {
+            bool foundKnownSpell = false;
+            for (i32 spellId = 0; spellId < 141; ++spellId)
+            {
+                if (g_GameManager.catk[spellId].numAttemptsPerShot[6] != 0)
+                {
+                    arg->cursor = spellId / 10;
+                    arg->lastSpellcardSelected = -1;
+                    foundKnownSpell = true;
+                    Supervisor::DebugPrint(
+                        "th07 dev: Result spell-history first known id=%d page=%d attempts=%u\n",
+                        spellId, arg->cursor,
+                        g_GameManager.catk[spellId].numAttemptsPerShot[6]);
+                    break;
+                }
+            }
+            if (!foundKnownSpell)
+            {
+                // The audit package's score.dat can legitimately contain no
+                // CATK history.  Exercise the original state-9 display path
+                // with a runtime-only record; the type=3 audit screen is
+                // explicitly read-only and never writes this fixture back.
+                constexpr i32 fixtureId = 3;
+                g_GameManager.catk[fixtureId].numAttemptsPerShot[6] = 1;
+                std::snprintf(g_GameManager.catk[fixtureId].name,
+                              sizeof(g_GameManager.catk[fixtureId].name),
+                              "Result spell audit fallback");
+                arg->cursor = fixtureId / 10;
+                arg->lastSpellcardSelected = -1;
+                Supervisor::DebugPrint(
+                    "th07 dev: Result spell-history CATK empty; using read-only fixture id=%d\n",
+                    fixtureId);
+            }
+        }
+#endif
     }
     if (arg->resultScreenState == 18)
     {
@@ -2512,10 +2657,18 @@ ZunResult ResultScreen::DeletedCallback(ResultScreen *arg)
 {
     i32 i;
     i32 j;
+#ifdef TH_DEV_TOOLS
+    const bool isReadOnlyAudit = arg == g_ReadOnlyResultAuditScreen;
+#endif
 
     if (arg->scoreDat)
     {
+#ifdef TH_DEV_TOOLS
+        if (!isReadOnlyAudit)
+            arg->WriteScore();
+#else
         arg->WriteScore();
+#endif
         ReleaseScoreDat(arg->scoreDat);
     }
     arg->scoreDat = NULL;
@@ -2537,6 +2690,14 @@ ZunResult ResultScreen::DeletedCallback(ResultScreen *arg)
     delete arg;
     arg = NULL;
 
+#ifdef TH_DEV_TOOLS
+    if (isReadOnlyAudit)
+    {
+        g_ReadOnlyResultAuditScreen = nullptr;
+        g_ReadOnlyResultAuditForcePhantasm = false;
+    }
+#endif
+
     return ZUN_SUCCESS;
 }
 
@@ -2544,6 +2705,35 @@ ZunResult ResultScreen::RegisterChain(u32 type)
 {
     ResultScreen *resultScreen = new ResultScreen;
     Supervisor::DebugPrint("Stg.PlayTimeAll = %d\r\n", g_GameManager.playTimeAll);
+#ifdef TH_DEV_TOOLS
+    if (type == 3)
+    {
+        // Developer audit path only: enter the original spell-history state
+        // while still using AddedCallback's real score.dat/CATK parsing and
+        // the normal state-9 draw/update code.
+        resultScreen->resultScreenState = 9;
+        resultScreen->cursor = 0;
+        resultScreen->lastSpellcardSelected = -1;
+        g_ReadOnlyResultAuditScreen = resultScreen;
+    }
+    else if (type == 4)
+    {
+        // Developer audit path only: start the original Result Stats state.
+        // AddedCallback still loads the real Result ANM and score.dat, while
+        // DeletedCallback keeps this audit instance read-only.
+        resultScreen->resultScreenState = 20;
+        resultScreen->frameTimer = 0;
+        g_ReadOnlyResultAuditScreen = resultScreen;
+    }
+    else if (type == 5)
+    {
+        resultScreen->resultScreenState = 20;
+        resultScreen->frameTimer = 0;
+        g_ReadOnlyResultAuditScreen = resultScreen;
+        g_ReadOnlyResultAuditForcePhantasm = true;
+    }
+    else
+#endif
     if (type == 1)
     {
         if (!g_GameManager.practice)

@@ -14,6 +14,7 @@
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
+#include "Localization.hpp"
 #include "ReplayManager.hpp"
 #include "PracticeRuntime.hpp"
 #include "ScreenEffect.hpp"
@@ -28,6 +29,24 @@ const char *g_DemoReplayPaths[3] = {
     "data/demo/demorpy0.rpy",
     "data/demo/demorpy1.rpy",
     "data/demo/demorpy2.rpy",
+};
+
+const char *g_MainMenuStringIds[8] = {
+    "th07 Menu Start", "th07 Menu Extra Start", "th07 Menu Practice Start",
+    "th07 Menu Replay", "th07 Menu Result", "th07 Menu Music Room",
+    "th07 Menu Option", "th07 Menu Quit",
+};
+
+const char *g_OptionsStringIds[9] = {
+    "th07 Option Player", "th07 Option Graphic", "th07 Option BGM",
+    "th07 Option Sound", "th07 Option Window Mode", "th07 Option Slow Mode",
+    "th07 Option Reset", "th07 Option Key Config", "th07 Option Quit",
+};
+
+const char *g_KeyConfigStringIds[12] = {
+    "th07 Key Shot", "th07 Key Bomb", "th07 Key Slow", "th07 Key Skip",
+    "th07 Key Pause", "th07 Key Up", "th07 Key Down", "th07 Key Left",
+    "th07 Key Right", "th07 Key ShotSlow", "th07 Key Reset", "th07 Key Quit",
 };
 
 const char *g_StagePracticeStrings[6] = {
@@ -221,7 +240,8 @@ u32 MainMenu::OnUpdatePreInput()
         for (i = 0; (u32)i < 8; i++)
         {
             g_AnmManager->DrawStringFormat2(&this->vms[i], 0xfff0e0, 0x300000,
-                                            g_MainMenuStrings[i]);
+                                            "%s", Localization::StringById(g_MainMenuStringIds[i],
+                                                                            g_MainMenuStrings[i]));
         }
     case 1: {
         i = MoveCursorVertical(8);
@@ -244,7 +264,14 @@ u32 MainMenu::OnUpdatePreInput()
         {
             this->demoFramesCount = 0;
         }
+#ifdef TH_ENABLE_THPRAC
+        // th07_disable_demo patches the original title idle threshold to
+        // INT_MAX. Keep the same comparison/overflow behavior instead of
+        // deleting the demo code from the baseline build.
+        if (0x7fffffff < this->demoFramesCount)
+#else
         if (900 < this->demoFramesCount)
+#endif
         {
             g_GameManager.demoIdx++;
             g_GameManager.demoIdx %= 3;
@@ -456,7 +483,9 @@ u32 MainMenu::OnUpdateOptionsMenu()
         this->menuSubState = 1;
         for (i = 0; (u32)i < 9; i++)
         {
-            g_AnmManager->DrawStringFormat2(&this->vms[i], 0xfff0e0, 0x300000, g_OptionsStrings[i]);
+            g_AnmManager->DrawStringFormat2(&this->vms[i], 0xfff0e0, 0x300000, "%s",
+                                            Localization::StringById(g_OptionsStringIds[i],
+                                                                     g_OptionsStrings[i]));
         }
     case 1:
         break;
@@ -843,7 +872,8 @@ u32 MainMenu::OnUpdateKeyConfig()
         for (i = 0; (u32)i < 12; i++)
         {
             g_AnmManager->DrawStringFormat2(&this->vms[i], 0xfff0e0, 0x300000,
-                                            g_KeyConfigStrings[i]);
+                                            "%s", Localization::StringById(g_KeyConfigStringIds[i],
+                                                                            g_KeyConfigStrings[i]));
         }
     case 1:
         if (MoveCursorVertical(12))
@@ -1351,6 +1381,10 @@ u32 MainMenu::OnUpdateSelectCharacter()
         if (this->stateTimer == 30)
         {
             this->menuSubState = 1;
+#ifdef TH_DEV_TOOLS
+            SDL_Log("th07 character-select audit: ready character=%d cursor=%d",
+                    g_GameManager.character, this->cursor);
+#endif
         }
         break;
     case 1:
@@ -1721,8 +1755,22 @@ u32 MainMenu::OnUpdateSelectPracticeStage()
     if (PracticeRuntime::Enabled())
     {
         if (this->stateTimer == 0)
+        {
             PracticeRuntime::OpenPracticeMenu(g_Supervisor.cfg.defaultDifficulty,
                                               g_GameManager.character * 2 + g_GameManager.shotType);
+
+            // The Practice shot-type selector transitions here with
+            // CHAIN_CALLBACK_RESULT_EXECUTE_AGAIN.  That means the Z press
+            // which selected the shot type is still the current raw input on
+            // this very same simulation tick.  Upstream THGuiPrac opens at
+            // the stage-select hook, but it must not consume the selector's
+            // confirmation as an immediate State(3) accept.  Give the newly
+            // opened trainer one real tick before polling its X/Z ownership.
+            this->idleFrames++;
+            this->inputDelayTimer++;
+            this->stateTimer++;
+            return CHAIN_CALLBACK_RESULT_CONTINUE;
+        }
 
         switch (PracticeRuntime::PollPracticeMenu())
         {
@@ -1874,6 +1922,8 @@ u32 MainMenu::OnUpdateSelectReplay()
     case 0:
         if (this->stateTimer == 0)
         {
+            // th07_rep_menu_1 / THGuiRep::State(1).
+            PracticeRuntime::ReplayMenuReset();
             if (this->prevGameState != STATE_SELECT_REPLAY &&
                 g_AnmManager->LoadSurface(0, "data/title/select00.jpg") != ZUN_SUCCESS)
             {
@@ -1998,6 +2048,9 @@ u32 MainMenu::OnUpdateSelectReplay()
                 (ReplayFile *)FileSystem::OpenFile(this->replayFilenames[this->chosenReplay], 1);
             this->currentReplay =
                 ReplayManager::ValidateReplayData(this->currentReplay, g_LastFileSize);
+            // th07_rep_menu_2 / THGuiRep::State(2): inspect PRAC metadata but
+            // do not activate its parameters until playback is accepted.
+            PracticeRuntime::ReplayMenuCheck(this->replayFilenames[this->chosenReplay]);
             this->cursor = 0;
             while (!this->currentReplay->head.stageReplayDataOffsets[this->cursor])
             {
@@ -2077,6 +2130,8 @@ u32 MainMenu::OnUpdateSelectReplay()
         }
         if (WAS_PRESSED_RAW(TH_BUTTON_SELECTMENU))
         {
+            // th07_rep_menu_3 / THGuiRep::State(3).
+            PracticeRuntime::ReplayMenuActivate();
             g_GameManager.SetReplay(1);
             SDL_strlcpy(g_GameManager.replayFilename, this->replayFilenames[this->chosenReplay],
                         sizeof(g_GameManager.replayFilename));
@@ -2354,6 +2409,10 @@ u32 MainMenu::OnDraw(MainMenu *arg)
         arg->DrawReplayMenu();
         break;
     case STATE_SELECT_PRACTICE_STAGE:
+        // c4c945f2's original portable THGuiPrac ownership: build the ImGui
+        // practice window first, then skip the vanilla practice-stage VMs.
+        // Returning before DrawPracticeMenu() makes the trainer completely
+        // invisible while its update state machine continues to run.
         arg->DrawPracticeMenu();
         if (PracticeRuntime::Enabled())
             return CHAIN_CALLBACK_RESULT_CONTINUE;

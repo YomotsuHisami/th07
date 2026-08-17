@@ -6,20 +6,92 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "AnmManager.hpp"
 #include "Chain.hpp"
 #include "Controller.hpp"
+#include "EaglerOptions.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
+#include "PracticeRuntime.hpp"
 #include "ScreenEffect.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "Supervisor.hpp"
 #include "graphics/Gles.hpp"
 #include "graphics/ZunGraphics.hpp"
+#ifdef TH_ENABLE_THPRAC
+#include "ThpracImGui.hpp"
+#endif
+
+#if !defined(__EMSCRIPTEN__)
+static f64 GetNativePresentationHz()
+{
+    SDL_DisplayID display = SDL_GetDisplayForWindow(g_GameWindow.window);
+    const SDL_DisplayMode *mode = display ? SDL_GetCurrentDisplayMode(display) : nullptr;
+    f64 hz = mode ? (f64)mode->refresh_rate : 0.0;
+    if (hz < 30.0 || hz > 1000.0)
+        hz = 60.0;
+    return hz;
+}
+
+struct NativePerfTelemetryState
+{
+    bool initialized;
+    bool enabled;
+    u64 windowStartNs;
+    u32 callbacks;
+    u32 updates;
+    u32 draws;
+    u64 calcNs;
+    u64 drawNs;
+    u64 maxDrawNs;
+};
+
+static NativePerfTelemetryState g_NativePerfTelemetry;
+
+static void ReportNativePerfTelemetry(u64 nowNs)
+{
+    auto &perf = g_NativePerfTelemetry;
+    if (!perf.initialized)
+    {
+        perf.initialized = true;
+        const char *value = std::getenv("EAGLER_NATIVE_PERF");
+        perf.enabled = value && value[0] == '1';
+        perf.windowStartNs = nowNs;
+    }
+    if (!perf.enabled || nowNs - perf.windowStartNs < 1000000000ULL)
+        return;
+
+    const GlesNativePerfCounters glPerf = GlesTakeNativePerfCounters();
+    Supervisor::DebugPrint(
+        "native-perf callbacks=%u updates=%u draws=%u calc_ms=%.3f draw_ms=%.3f max_draw_ms=%.3f vsync=%d display_hz=%.3f gl_draws=%llu gl_vertices=%llu subdata=%llu subdata_bytes=%llu bufferdata=%llu binds=%llu uniforms=%llu swaps=%llu\n",
+        perf.callbacks, perf.updates, perf.draws,
+        (double)perf.calcNs / 1000000.0, (double)perf.drawNs / 1000000.0,
+        (double)perf.maxDrawNs / 1000000.0, g_Supervisor.vsyncEnabled,
+        (double)GetNativePresentationHz(),
+        (unsigned long long)glPerf.drawCalls, (unsigned long long)glPerf.drawVertices,
+        (unsigned long long)glPerf.bufferSubDataCalls,
+        (unsigned long long)glPerf.bufferSubDataBytes,
+        (unsigned long long)glPerf.bufferDataCalls,
+        (unsigned long long)glPerf.bindTextureCalls,
+        (unsigned long long)glPerf.uniformCalls,
+        (unsigned long long)glPerf.swapCalls);
+
+    const bool enabled = perf.enabled;
+    perf = {};
+    perf.initialized = true;
+    perf.enabled = enabled;
+    perf.windowStartNs = nowNs;
+}
+#endif
 
 GameWindow g_GameWindow;
 i32 g_FrameCount;
@@ -31,6 +103,18 @@ bool g_SuppressAnmAdvance;
 f32 g_DevSpeedMultiplier = 1.0f;
 #endif
 
+#ifdef TH_ENABLE_THCRAP
+static i32 g_ThcrapSnapshotRequests = 0;
+#endif
+
+#ifdef _WIN32
+static RECT g_WindowedRect;
+static int g_WindowedClientW;
+static int g_WindowedClientH;
+static LONG g_WindowedStyle;
+static bool g_InBorderlessFullscreen = false;
+#endif
+
 static GfxInit g_RenderingBackends[] = {
     GlesGraphics::Init,
 };
@@ -39,6 +123,22 @@ void GameWindow::Present()
 {
     char snapshotPath[252];
     i32 i;
+
+#ifdef TH_ENABLE_THCRAP
+    if (g_ThcrapSnapshotRequests > 0)
+    {
+        --g_ThcrapSnapshotRequests;
+        std::filesystem::create_directory(FileSystem::GetPrefPath("snapshot"));
+        for (i = 0; i < 1000; i++)
+        {
+            sprintf(snapshotPath, "snapshot/th%.3d.png", i);
+            if (FileSystem::CheckFileExists(snapshotPath) == 0)
+                break;
+        }
+        if (i < 1000)
+            g_Supervisor.SnapshotPng(snapshotPath);
+    }
+#endif
 
     g_Supervisor.gfxDevice->SwapBuffers();
 
@@ -62,6 +162,13 @@ void GameWindow::Present()
 
 RenderResult GameWindow::Render()
 {
+#if !defined(__EMSCRIPTEN__)
+    const u64 nativePerfNowNs = SDL_GetTicksNS();
+    ReportNativePerfTelemetry(nativePerfNowNs);
+    if (g_NativePerfTelemetry.enabled)
+        g_NativePerfTelemetry.callbacks++;
+#endif
+
     if (!this->isAppActive)
     {
 #ifndef __EMSCRIPTEN__
@@ -69,6 +176,8 @@ RenderResult GameWindow::Render()
 #endif
         return RENDER_RESULT_KEEP_RUNNING;
     }
+
+    GameWindow::RememberWindowedState();
 
     const f64 targetDt = 1.0 / 60.0;
 
@@ -91,6 +200,11 @@ RenderResult GameWindow::Render()
     }
 
     this->accumulator += elapsed;
+#ifdef __EMSCRIPTEN__
+    const bool limitPresentationTo60 = EaglerOptions::LimitPresentationTo60();
+#else
+    constexpr bool limitPresentationTo60 = false;
+#endif
 #ifdef TH_DEV_TOOLS
     if (g_DevSpeedMultiplier > 1.0f)
         this->accumulator += elapsed * (g_DevSpeedMultiplier - 1.0f);
@@ -101,29 +215,102 @@ RenderResult GameWindow::Render()
 
     u64 timeToRender = SDL_GetTicksNS();
 
-    while (this->accumulator >= targetDt)
+    const auto runSimulationTick = [&]() -> i32
     {
+#ifndef __EMSCRIPTEN__
+        const u64 calcStartNs = g_NativePerfTelemetry.enabled ? SDL_GetTicksNS() : 0;
+#endif
+#ifdef TH_ENABLE_THPRAC
+        // Upstream THOverlay hotkeys are sampled from the 60 Hz update hook.
+        // Keep their ownership on simulation ticks rather than presentation-only
+        // frames so Backspace/F1-F7/F12 timing matches the game clock.
+        PracticeRuntime::UpdateOverlay();
+#endif
         chainRes = g_Chain.RunCalcChain();
+#ifdef TH_ENABLE_THCRAP
+        const bool *keyboard = SDL_GetKeyboardState(NULL);
+        if (keyboard != nullptr && keyboard[SDL_SCANCODE_P] && g_ThcrapSnapshotRequests < 1000)
+            ++g_ThcrapSnapshotRequests;
+#endif
         g_SoundPlayer.ProcessQueues();
 
-        if (chainRes == 0)
+#ifndef __EMSCRIPTEN__
+        if (g_NativePerfTelemetry.enabled)
         {
-            return RENDER_RESULT_EXIT_SUCCESS;
+            g_NativePerfTelemetry.calcNs += SDL_GetTicksNS() - calcStartNs;
+            g_NativePerfTelemetry.updates++;
         }
-        if (chainRes == -1)
-        {
-            return RENDER_RESULT_EXIT_ERROR;
-        }
+#endif
+        return chainRes;
+    };
 
-        this->accumulator -= targetDt;
-        updated = true;
+    if (limitPresentationTo60)
+    {
+        if (this->accumulator >= targetDt)
+        {
+            // Original TH07 does the same thing as TH06 here: advance its
+            // timing baseline past every overdue 1/60 interval, then run the
+            // game chains only once. Catching up multiple simulation ticks in
+            // one visible frame is a portable-only behavior and is especially
+            // obvious on fast bullets.
+            do
+            {
+                this->accumulator -= targetDt;
+            } while (this->accumulator >= targetDt);
+
+            const i32 res = runSimulationTick();
+            if (res == 0)
+                return RENDER_RESULT_EXIT_SUCCESS;
+            if (res == -1)
+                return RENDER_RESULT_EXIT_ERROR;
+            updated = true;
+        }
+    }
+    else
+    {
+        while (this->accumulator >= targetDt)
+        {
+            const i32 res = runSimulationTick();
+            if (res == 0)
+                return RENDER_RESULT_EXIT_SUCCESS;
+            if (res == -1)
+                return RENDER_RESULT_EXIT_ERROR;
+            this->accumulator -= targetDt;
+            updated = true;
+        }
     }
 
+#ifdef __EMSCRIPTEN__
+    // Simulation stays fixed at 60 Hz, while Web presentation normally follows
+    // requestAnimationFrame at the display refresh rate. The optional 60 FPS
+    // mode follows the original one-tick-per-picture behavior above and skips
+    // callbacks with no new simulation tick; with it disabled, high-refresh
+    // catch-up + interpolation/presentation remains available.
+    if (limitPresentationTo60 && !updated)
+    {
+        return RENDER_RESULT_KEEP_RUNNING;
+    }
+#endif
+
     g_RenderAlpha = std::clamp((f32)(this->accumulator / targetDt), 0.0f, 1.0f);
+#ifdef __EMSCRIPTEN__
+    // A 60 Hz presentation cap draws only on simulation ticks, so there is no
+    // intermediate frame to interpolate. Using the residual accumulator alpha
+    // on those retained frames produces uneven visual step sizes whenever RAF
+    // is not phase-locked to 60 Hz. Draw the current simulation state instead.
+    if (limitPresentationTo60)
+    {
+        g_RenderAlpha = 1.0f;
+    }
+#endif
     if (g_GameManager.isInPauseMenu || g_GameManager.isInRetryMenu)
     {
         g_RenderAlpha = 1.0f;
     }
+
+#ifndef __EMSCRIPTEN__
+    const u64 drawStartNs = g_NativePerfTelemetry.enabled ? SDL_GetTicksNS() : 0;
+#endif
 
     g_Supervisor.gfxDevice->BeginFrame();
     g_AnmManager->ResetVertexBuffer();
@@ -131,6 +318,11 @@ RenderResult GameWindow::Render()
     g_Supervisor.DisableFog();
 
     g_SuppressAnmAdvance = !updated;
+#ifdef TH_ENABLE_THPRAC
+    ThpracImGui::SetGameInput(g_CurFrameRawInput, updated);
+    if (updated)
+        ThpracImGui::BeginFrame(static_cast<f32>(targetDt));
+#endif
     if (g_AnmManager)
     {
         g_AnmManager->offset =
@@ -140,10 +332,30 @@ RenderResult GameWindow::Render()
     g_SuppressAnmAdvance = false;
 
     g_AnmManager->Flush();
+#ifdef TH_ENABLE_THPRAC
+    // THOverlay / Tracker / THAdvOptWnd are not owned by any vanilla draw-chain
+    // element. Build them into the same ImGui frame after the game scene, then
+    // submit that frame once through the GLES backend.
+    PracticeRuntime::DrawOverlay();
+    if (ThpracImGui::IsFrameOpen())
+        ThpracImGui::EndFrame();
+    if (g_Supervisor.gfxDevice && g_Supervisor.gfxDevice->GetType() == RENDERER_OPENGLES)
+        static_cast<GlesGraphics *>(g_Supervisor.gfxDevice)->RenderImGui(ThpracImGui::GetDrawData());
+#endif
     g_Supervisor.gfxDevice->BindTexture({0});
     g_Supervisor.gfxDevice->EndFrame();
 
     Present();
+
+#ifndef __EMSCRIPTEN__
+    if (g_NativePerfTelemetry.enabled)
+    {
+        const u64 drawNs = SDL_GetTicksNS() - drawStartNs;
+        g_NativePerfTelemetry.draws++;
+        g_NativePerfTelemetry.drawNs += drawNs;
+        g_NativePerfTelemetry.maxDrawNs = std::max(g_NativePerfTelemetry.maxDrawNs, drawNs);
+    }
+#endif
 
     if (updated)
     {
@@ -153,10 +365,25 @@ RenderResult GameWindow::Render()
     timeToRender = SDL_GetTicksNS() - timeToRender;
 
     constexpr u64 nsPerFrame = 1000000000 / 60;
+#ifdef __EMSCRIPTEN__
     if (g_Supervisor.vsyncEnabled && timeToRender < nsPerFrame)
+#else
+    // Keep the original 60 Hz simulation, but pace presentation to the actual
+    // display refresh rate. SDL_GL_GetSwapInterval(1) is only a request: some
+    // GLES translation layers report it as enabled while returning from swap
+    // hundreds of times per second. If swap already consumed the display-frame
+    // budget, this adds no delay; otherwise it prevents runaway duplicate draws
+    // while preserving high-refresh interpolation/presentation.
+    const f64 presentationHz = GetNativePresentationHz();
+    const u64 presentationFrameNs = (u64)(1000000000.0 / presentationHz);
+    if (timeToRender < presentationFrameNs)
+#endif
     {
-        // should have gotten ACTUAL vsync then
+#ifdef __EMSCRIPTEN__
         SDL_DelayNS(nsPerFrame - timeToRender);
+#else
+        SDL_DelayPrecise(presentationFrameNs - timeToRender);
+#endif
     }
 
     return RENDER_RESULT_KEEP_RUNNING;
@@ -206,15 +433,11 @@ ZunResult GameWindow::CreateGameWindow()
 #elif defined(__EMSCRIPTEN__)
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
 #else
-    if (!g_Supervisor.cfg.windowed)
-    {
-        SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, true);
-    }
-    else
-    {
-        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, 640);
-        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, 480);
-    }
+    // Create a normal desktop window first. Saved fullscreen mode is applied
+    // after SDL has created and synchronized the native window, using the same
+    // borderless path as the runtime Alt+Enter toggle.
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, 640);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, 480);
 #endif
 
     g_GameWindow.isAppActive = 1;
@@ -242,9 +465,170 @@ ZunResult GameWindow::CreateGameWindow()
 
     SDL_ShowWindow(g_GameWindow.window);
     SDL_SyncWindow(g_GameWindow.window);
+    GameWindow::RememberWindowedState();
+
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE) && !defined(__EMSCRIPTEN__)
+    if (!g_Supervisor.cfg.windowed)
+    {
+        GameWindow::ToggleFullscreen();
+    }
+#endif
 
     SDL_RaiseWindow(g_GameWindow.window);
     return ZUN_SUCCESS;
+}
+
+void GameWindow::RememberWindowedState()
+{
+#ifdef _WIN32
+    if (!g_GameWindow.window || g_InBorderlessFullscreen)
+    {
+        return;
+    }
+
+    HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(g_GameWindow.window),
+                                             SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    if (!hwnd)
+    {
+        return;
+    }
+
+    RECT wr;
+    RECT clientRect;
+    const LONG style = GetWindowLong(hwnd, GWL_STYLE);
+    // Mesa/DXGI can process Alt+Enter before SDL delivers the key event to the
+    // application and temporarily strip the caption. Never let that transient
+    // state overwrite the last authoritative captioned-window geometry.
+    if ((style & WS_CAPTION) == 0 || !GetWindowRect(hwnd, &wr) || !GetClientRect(hwnd, &clientRect))
+    {
+        return;
+    }
+
+    g_WindowedRect = wr;
+    g_WindowedClientW = clientRect.right - clientRect.left;
+    g_WindowedClientH = clientRect.bottom - clientRect.top;
+    g_WindowedStyle = style;
+#endif
+}
+
+void GameWindow::ToggleFullscreen()
+{
+    if (!g_GameWindow.window)
+    {
+#ifdef TH_DEV_TOOLS
+        SDL_Log("th07 window: toggle aborted (no SDL window)");
+#endif
+        return;
+    }
+
+#ifdef _WIN32
+    HWND hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(g_GameWindow.window),
+                                             SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    if (!hwnd)
+    {
+#ifdef TH_DEV_TOOLS
+        SDL_Log("th07 window: toggle aborted (no Win32 HWND)");
+#endif
+        return;
+    }
+
+    if (!g_InBorderlessFullscreen)
+    {
+        // Refresh only if the native window is still captioned. On Mesa/DXGI,
+        // Alt+Enter may already have stripped the style before our SDL event is
+        // dispatched, in which case RememberWindowedState intentionally keeps
+        // the pre-key cached geometry from create/focus/render time.
+        GameWindow::RememberWindowedState();
+#ifdef TH_DEV_TOOLS
+        SDL_Log("th07 window: pre-toggle style=0x%08lx "
+                "cachedOuter=(%ld,%ld)-(%ld,%ld)",
+                static_cast<unsigned long>(GetWindowLong(hwnd, GWL_STYLE)), g_WindowedRect.left, g_WindowedRect.top,
+                g_WindowedRect.right, g_WindowedRect.bottom);
+#endif
+        if (g_WindowedRect.right == 0 && g_WindowedRect.bottom == 0)
+        {
+#ifdef TH_DEV_TOOLS
+            SDL_Log("th07 window: toggle aborted (no valid windowed geometry)");
+#endif
+            return;
+        }
+
+        SDL_DisplayID disp = SDL_GetDisplayForWindow(g_GameWindow.window);
+        SDL_Rect dispBounds;
+        if (!disp || !SDL_GetDisplayBounds(disp, &dispBounds))
+        {
+#ifdef TH_DEV_TOOLS
+            SDL_Log("th07 window: toggle aborted (display lookup failed: id=%u error=%s)",
+                    static_cast<unsigned>(disp), SDL_GetError());
+#endif
+            return;
+        }
+        const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(disp);
+        const int fsW = (dm && dm->w > 0) ? dm->w : dispBounds.w;
+        const int fsH = (dm && dm->h > 0) ? dm->h : dispBounds.h;
+
+        SetWindowLong(hwnd, GWL_STYLE,
+                      (g_WindowedStyle & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+                                           WS_MAXIMIZEBOX | WS_SYSMENU)) |
+                          WS_POPUP);
+        SDL_SetWindowSize(g_GameWindow.window, fsW, fsH);
+        SDL_SetWindowPosition(g_GameWindow.window, dispBounds.x, dispBounds.y);
+        g_InBorderlessFullscreen = true;
+        SDL_HideCursor();
+#ifdef TH_DEV_TOOLS
+        SDL_Log("th07 window: entered borderless fullscreen %dx%d at %d,%d", fsW, fsH,
+                dispBounds.x, dispBounds.y);
+#endif
+    }
+    else
+    {
+        SetWindowLong(hwnd, GWL_STYLE, g_WindowedStyle);
+        // Apply the caption/frame before asking SDL to restore the client
+        // size. If style restoration and resize are combined, Windows can
+        // apply the non-client frame asynchronously afterwards and preserve
+        // the temporary borderless client size instead (e.g. 646x526), which
+        // leaves the game larger than its authoritative 640x480 client area.
+        SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                         SWP_NOACTIVATE);
+        SDL_SyncWindow(g_GameWindow.window);
+        SDL_SetWindowSize(g_GameWindow.window, g_WindowedClientW, g_WindowedClientH);
+        SDL_SetWindowPosition(g_GameWindow.window, g_WindowedRect.left, g_WindowedRect.top);
+        SDL_SyncWindow(g_GameWindow.window);
+        SetWindowPos(hwnd, HWND_TOP, g_WindowedRect.left, g_WindowedRect.top,
+                     g_WindowedRect.right - g_WindowedRect.left,
+                     g_WindowedRect.bottom - g_WindowedRect.top,
+                     SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SDL_SyncWindow(g_GameWindow.window);
+        g_InBorderlessFullscreen = false;
+        SDL_ShowCursor();
+#ifdef TH_DEV_TOOLS
+        SDL_Log("th07 window: restored windowed client %dx%d outer=(%ld,%ld)-(%ld,%ld)",
+                g_WindowedClientW, g_WindowedClientH, g_WindowedRect.left, g_WindowedRect.top,
+                g_WindowedRect.right, g_WindowedRect.bottom);
+#endif
+    }
+#else
+    const bool fullscreen = (SDL_GetWindowFlags(g_GameWindow.window) & SDL_WINDOW_FULLSCREEN) != 0;
+    SDL_SetWindowFullscreen(g_GameWindow.window, !fullscreen);
+    if (fullscreen)
+        SDL_ShowCursor();
+    else
+        SDL_HideCursor();
+#endif
+}
+
+bool GameWindow::IsFullscreen()
+{
+    if (!g_GameWindow.window)
+    {
+        return false;
+    }
+#ifdef _WIN32
+    return g_InBorderlessFullscreen;
+#else
+    return (SDL_GetWindowFlags(g_GameWindow.window) & SDL_WINDOW_FULLSCREEN) != 0;
+#endif
 }
 
 ZunResult GameWindow::InitRendering()

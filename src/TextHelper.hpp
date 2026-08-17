@@ -23,7 +23,12 @@ struct TextHelper
     static void RenderTextToTextureBold(i32 xPos, i32 yPos, i32 spriteWidth, i32 spriteHeight,
                                         i32 fontHeight, i32 fontWidth, u32 textColor,
                                         u32 outlineType, char *string, GfxTextureHandle outTexture);
+    static float MeasureTextWidth(const char *string, i32 fontId);
     static i32 GetLogicalStringWidth(const char* str);
+#if defined(TH_DEV_TOOLS) && defined(TH_ENABLE_THCRAP)
+    static bool DebugLocalizedFontMetricsSelfTest();
+    static bool DebugLayoutSelfTest();
+#endif
 
     SDL_Surface *buffer;
     i32 width;

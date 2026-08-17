@@ -362,6 +362,19 @@ struct AnmManager
         return result;
     }
 
+    ZunResult DrawCurrent(AnmVm *vm)
+    {
+        // `Draw()` is presentation-aware in the portable renderer and lerps
+        // scale/color/UV using g_RenderAlpha. Some original TH07 callsites,
+        // notably Ending, explicitly draw the current 60 Hz state instead.
+        // Scope the presentation alpha to 1 only for that semantic boundary.
+        const f32 savedRenderAlpha = g_RenderAlpha;
+        g_RenderAlpha = 1.0f;
+        const ZunResult result = Draw(vm);
+        g_RenderAlpha = savedRenderAlpha;
+        return result;
+    }
+
     void DrawInterpAndFlush(AnmVm *vm)
     {
         DrawInterp(vm);

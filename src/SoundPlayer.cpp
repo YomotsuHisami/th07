@@ -4,6 +4,7 @@
 
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
+#include "PracticeRuntime.hpp"
 #include "Supervisor.hpp"
 #include "dxutil.hpp"
 
@@ -1056,6 +1057,12 @@ loop_breakout:
 
 void SoundPlayer::PushCommand(AudioOpcode opcode, i32 arg1, const char *arg2)
 {
+    // Upstream th07_soundplayer_queue_command hooks the exact function entry
+    // (0x44D2F0), before the command reaches the queue. F7 uses this boundary
+    // both to track START and to suppress selected commands/duplicate STARTs.
+    if (PracticeRuntime::FilterAudioCommand(static_cast<i32>(opcode), arg1))
+        return;
+
     for (i32 i = 0; i < 31; i++)
     {
         if (this->commandQueue[i].opcode != 0)

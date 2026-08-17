@@ -10,6 +10,7 @@
 #include "utils.hpp"
 
 static u16 g_AutoFocusTimer;
+static bool g_EnterSuppressed;
 
 #define KEY_PRESSED(scancode, thButton) (keys[scancode] ? thButton : 0)
 #define JOYSTICK_MIDPOINT(min, max) ((min + max) / 2)
@@ -180,9 +181,17 @@ u16 Controller::GetInput()
     buttons |= KEY_PRESSED(SDL_SCANCODE_Q, TH_BUTTON_Q);
     buttons |= KEY_PRESSED(SDL_SCANCODE_S, TH_BUTTON_S);
     buttons |= KEY_PRESSED(SDL_SCANCODE_R, TH_BUTTON_RESET);
-    buttons |= KEY_PRESSED(SDL_SCANCODE_RETURN, TH_BUTTON_ENTER);
+    if (!g_EnterSuppressed)
+    {
+        buttons |= KEY_PRESSED(SDL_SCANCODE_RETURN, TH_BUTTON_ENTER);
+    }
 
     return GetControllerInput(buttons) | Touch::GetButtonBits();
+}
+
+void Controller::SetEnterSuppressed(bool suppressed)
+{
+    g_EnterSuppressed = suppressed;
 }
 
 void Controller::ResetKeyboard()

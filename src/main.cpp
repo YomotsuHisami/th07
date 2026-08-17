@@ -11,23 +11,31 @@
 
 // pull in gameerrorcontext::flush before anmmanager::releasesurfaces
 #include "AnmManager.hpp"
+#include "AsciiManager.hpp"
 #include "Chain.hpp"
 #include "Controller.hpp"
+#include "Ending.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
+#include "Localization.hpp"
 #include "MainMenu.hpp"
 #include "PracticeRuntime.hpp"
 #include "ResultScreen.hpp"
 #include "SoundPlayer.hpp"
 #include "Supervisor.hpp"
+#include "TextHelper.hpp"
 #include "Touch.hpp"
 #include "ZunResult.hpp"
 #include "dxutil.hpp"
+#ifdef TH_ENABLE_THPRAC
+#include "ThpracImGui.hpp"
+#endif
 
 static i32 renderRes = RENDER_RESULT_KEEP_RUNNING;
 static bool g_AudioSuspendedByFocus = false;
+static bool g_ToggleFullscreenRequested = false;
 #ifdef TH_ENABLE_THPRAC
 static bool g_OpenThpracMenuForVisualTest = false;
 static bool g_ThpracMenuVisualTestDispatched = false;
@@ -38,9 +46,34 @@ static int g_ThpracVisualTestFrames = 0;
 #endif
 static bool g_OpenMusicRoomForVisualTest = false;
 static bool g_MusicRoomVisualTestDispatched = false;
+#ifdef TH_DEV_TOOLS
+static i32 g_StageVisualTestIndex = -1;
+static bool g_Stage1VisualTestDispatched = false;
+static bool g_Stage1VisualTestPrepared = false;
+static bool g_OpenResultSpellsForVisualTest = false;
+static bool g_ResultSpellsVisualTestDispatched = false;
+static bool g_OpenResultStatsForVisualTest = false;
+static bool g_ResultStatsVisualTestDispatched = false;
+static bool g_OpenResultStatsPhantasmForVisualTest = false;
+static bool g_OpenEndingForVisualTest = false;
+static bool g_EndingVisualTestDispatched = false;
+static i32 g_CharacterSelectVisualTestIndex = -1;
+static bool g_CharacterSelectVisualTestDispatched = false;
+static i32 g_MenuStringVisualTestState = -1;
+static bool g_MenuStringVisualTestDispatched = false;
+static bool g_TouchStateSelfTest = false;
+#ifdef TH_ENABLE_THCRAP
+static bool g_ThcrapFontMetricsSelfTest = false;
+static bool g_ThcrapTextImageSelfTest = false;
+static bool g_ThcrapAsciiSelfTest = false;
+static bool g_ThcrapStringSelfTest = false;
+static bool g_ThcrapAsciiFormatSelfTest = false;
+static bool g_ThcrapLayoutSelfTest = false;
+static bool g_ThcrapEndingSelfTest = false;
+#endif
+#endif
 #ifdef TH_ENABLE_THPRAC
 static bool g_ThpracReplaySelfTest = false;
-static bool g_ThpracRestartSelfTest = false;
 #endif
 
 static void SuspendAudioForInactiveWindow()
@@ -95,6 +128,48 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
     for (int index = 1; index < argc; index++)
         if (std::strcmp(argv[index], "--music-room") == 0)
             g_OpenMusicRoomForVisualTest = true;
+#ifdef TH_DEV_TOOLS
+        else if (std::strcmp(argv[index], "--stage1") == 0)
+            g_StageVisualTestIndex = 0;
+        else if (std::strcmp(argv[index], "--stage4") == 0)
+            g_StageVisualTestIndex = 3;
+        else if (std::strcmp(argv[index], "--result-spells") == 0)
+            g_OpenResultSpellsForVisualTest = true;
+        else if (std::strcmp(argv[index], "--result-stats") == 0)
+            g_OpenResultStatsForVisualTest = true;
+        else if (std::strcmp(argv[index], "--result-stats-phantasm") == 0)
+            g_OpenResultStatsPhantasmForVisualTest = true;
+        else if (std::strcmp(argv[index], "--ending-reimu-a") == 0)
+            g_OpenEndingForVisualTest = true;
+        else if (std::strcmp(argv[index], "--character-select-reimu") == 0)
+            g_CharacterSelectVisualTestIndex = CHAR_REIMU;
+        else if (std::strcmp(argv[index], "--character-select-marisa") == 0)
+            g_CharacterSelectVisualTestIndex = CHAR_MARISA;
+        else if (std::strcmp(argv[index], "--character-select-sakuya") == 0)
+            g_CharacterSelectVisualTestIndex = CHAR_SAKUYA;
+        else if (std::strcmp(argv[index], "--options-menu-audit") == 0)
+            g_MenuStringVisualTestState = STATE_OPTIONS;
+        else if (std::strcmp(argv[index], "--key-config-menu-audit") == 0)
+            g_MenuStringVisualTestState = STATE_KEY_CONFIG;
+        else if (std::strcmp(argv[index], "--touch-selftest") == 0)
+            g_TouchStateSelfTest = true;
+#ifdef TH_ENABLE_THCRAP
+        else if (std::strcmp(argv[index], "--thcrap-font-selftest") == 0)
+            g_ThcrapFontMetricsSelfTest = true;
+        else if (std::strcmp(argv[index], "--thcrap-textimage-selftest") == 0)
+            g_ThcrapTextImageSelfTest = true;
+        else if (std::strcmp(argv[index], "--thcrap-ascii-selftest") == 0)
+            g_ThcrapAsciiSelfTest = true;
+        else if (std::strcmp(argv[index], "--thcrap-string-selftest") == 0)
+            g_ThcrapStringSelfTest = true;
+        else if (std::strcmp(argv[index], "--thcrap-ascii-format-selftest") == 0)
+            g_ThcrapAsciiFormatSelfTest = true;
+        else if (std::strcmp(argv[index], "--thcrap-layout-selftest") == 0)
+            g_ThcrapLayoutSelfTest = true;
+        else if (std::strcmp(argv[index], "--thcrap-ending-selftest") == 0)
+            g_ThcrapEndingSelfTest = true;
+#endif
+#endif
 #ifdef TH_ENABLE_THPRAC
         else if (std::strcmp(argv[index], "--thprac-menu") == 0)
             g_OpenThpracMenuForVisualTest = true;
@@ -104,8 +179,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
             g_OpenThpracMenuForVisualTest = g_AutoStartThpracVisualTest = g_AutoPauseThpracVisualTest = true;
         else if (std::strcmp(argv[index], "--thprac-replay-selftest") == 0)
             g_ThpracReplaySelfTest = true;
-        else if (std::strcmp(argv[index], "--thprac-restart-selftest") == 0)
-            g_ThpracRestartSelfTest = true;
 #endif
 #ifdef __EMSCRIPTEN__
     g_OpenMusicRoomForVisualTest = EM_ASM_INT({ return Module.eaglerOptions?.debugHarness === 'music-room'; }) != 0;
@@ -114,10 +187,60 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
 #endif
 #endif
 
-    if (g_Supervisor.LoadConfig("th07.cfg") != ZUN_SUCCESS)
+#if defined(TH_DEV_TOOLS) && defined(TH_ENABLE_THCRAP)
+    if (g_ThcrapAsciiFormatSelfTest)
     {
-        return SDL_APP_FAILURE;
+        const bool passed = AsciiManager::DebugLocalizedFormatSelfTest();
+        SDL_Log("th07 thcrap legacy ASCII formatter self-test: %s", passed ? "PASS" : "FAIL");
+        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
+    if (g_ThcrapEndingSelfTest)
+    {
+        const bool passed = Ending::DebugTranslatedLineSelfTest();
+        SDL_Log("th07 thcrap ending direct-line self-test: %s", passed ? "PASS" : "FAIL");
+        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+    if (g_ThcrapLayoutSelfTest)
+    {
+        const bool passed = TextHelper::DebugLayoutSelfTest();
+        SDL_Log("th07 thcrap persistent layout self-test: %s", passed ? "PASS" : "FAIL");
+        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+    if (g_ThcrapAsciiSelfTest)
+    {
+        const bool passed = Localization::DebugAsciiTableSelfTest();
+        SDL_Log("th07 thcrap EAS1 loader self-test: %s", passed ? "PASS" : "FAIL");
+        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+    if (g_ThcrapStringSelfTest)
+    {
+        const bool passed = Localization::DebugStringTableSelfTest();
+        SDL_Log("th07 thcrap EST1 loader self-test: %s", passed ? "PASS" : "FAIL");
+        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+    if (g_ThcrapTextImageSelfTest)
+    {
+        const bool passed = Localization::DebugBossImageRowContractSelfTest();
+        SDL_Log("th07 thcrap boss textimage row contract: %s", passed ? "PASS" : "FAIL");
+        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+    if (g_ThcrapFontMetricsSelfTest)
+    {
+        const bool passed = TextHelper::DebugLocalizedFontMetricsSelfTest();
+        SDL_Log("th07 thcrap localized SDL_ttf font metrics self-test: %s", passed ? "PASS" : "FAIL");
+        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+#endif
+
+#ifdef TH_DEV_TOOLS
+    if (g_TouchStateSelfTest)
+    {
+        const bool passed = Touch::DebugStateSelfTest();
+        SDL_Log("th07 touch finger-state self-test: %s", passed ? "PASS" : "FAIL");
+        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+#endif
+
 #ifdef TH_ENABLE_THPRAC
     if (g_ThpracReplaySelfTest)
     {
@@ -125,13 +248,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
         SDL_Log("th07 thprac replay metadata round-trip: %s", passed ? "PASS" : "FAIL");
         return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
-    if (g_ThpracRestartSelfTest)
-    {
-        const bool passed = PracticeRuntime::DebugRestartPreservesConfig();
-        SDL_Log("th07 thprac restart parameter preservation: %s", passed ? "PASS" : "FAIL");
-        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
-    }
 #endif
+
+    if (g_Supervisor.LoadConfig("th07.cfg") != ZUN_SUCCESS)
+    {
+        return SDL_APP_FAILURE;
+    }
 
     GameWindow::ChecksumExecutable();
     g_GameWindow.frequency = SDL_GetPerformanceFrequency();
@@ -177,7 +299,113 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     {
         g_Supervisor.curState = 8;
         g_MusicRoomVisualTestDispatched = true;
+#ifdef TH_DEV_TOOLS
+        SDL_Log("th07 music room audit: dispatch requested");
+#endif
     }
+#ifdef TH_DEV_TOOLS
+    if (g_MenuStringVisualTestState >= 0 && !g_MenuStringVisualTestDispatched &&
+        g_MainMenuForDebug && g_MainMenuForDebug->calcChain)
+    {
+        g_MainMenuForDebug->SetGameState(static_cast<GameState>(g_MenuStringVisualTestState));
+        g_MenuStringVisualTestDispatched = true;
+        SDL_Log("th07 strings_lookup menu audit: dispatch state=%d", g_MenuStringVisualTestState);
+    }
+    if (g_CharacterSelectVisualTestIndex >= 0 && !g_CharacterSelectVisualTestDispatched &&
+        g_MainMenuForDebug && g_MainMenuForDebug->calcChain)
+    {
+        // Enter the real normal character-select state through MainMenu's own
+        // transition helper. Only the requested starting character is seeded;
+        // the production state machine still owns all VM activation/scripts.
+        g_Supervisor.cfg.defaultDifficulty = 1;
+        g_GameManager.difficulty = 1;
+        g_GameManager.character = g_CharacterSelectVisualTestIndex;
+        g_GameManager.practice = 0;
+        g_MainMenuForDebug->SetGameState(STATE_NORMAL_SELECT_CHARACTER);
+        g_CharacterSelectVisualTestDispatched = true;
+        SDL_Log("th07 character-select audit: dispatch character=%d",
+                g_CharacterSelectVisualTestIndex);
+    }
+    if (g_OpenResultSpellsForVisualTest && !g_ResultSpellsVisualTestDispatched &&
+        g_MainMenuForDebug && g_MainMenuForDebug->calcChain)
+    {
+        MainMenu *menu = g_MainMenuForDebug;
+        g_Chain.Cut(menu->calcChain);
+        g_Supervisor.curState = 9;
+        g_Supervisor.wantedState = 9;
+        if (ResultScreen::RegisterChain(3) != ZUN_SUCCESS)
+            return SDL_APP_FAILURE;
+        g_ResultSpellsVisualTestDispatched = true;
+        SDL_Log("th07 dev: dispatched real Result spell-history visual test");
+    }
+    if ((g_OpenResultStatsForVisualTest || g_OpenResultStatsPhantasmForVisualTest) &&
+        !g_ResultStatsVisualTestDispatched &&
+        g_MainMenuForDebug && g_MainMenuForDebug->calcChain)
+    {
+        MainMenu *menu = g_MainMenuForDebug;
+        g_Chain.Cut(menu->calcChain);
+        g_Supervisor.curState = 9;
+        g_Supervisor.wantedState = 9;
+        if (ResultScreen::RegisterChain(g_OpenResultStatsPhantasmForVisualTest ? 5 : 4) != ZUN_SUCCESS)
+            return SDL_APP_FAILURE;
+        g_ResultStatsVisualTestDispatched = true;
+        SDL_Log("th07 dev: dispatched real Result Stats visual test phantasm=%d",
+                g_OpenResultStatsPhantasmForVisualTest ? 1 : 0);
+    }
+    if (g_OpenEndingForVisualTest && !g_EndingVisualTestDispatched &&
+        g_MainMenuForDebug && g_MainMenuForDebug->calcChain && g_GameManager.globals)
+    {
+        // Developer audit only. Seed the same minimum gameplay fields that a
+        // no-continue Reimu-A clear would carry into the production Ending
+        // chain; the Ending parser/ANM/background/text renderer remain real.
+        g_GameManager.character = CHAR_REIMU;
+        g_GameManager.shotType = 0;
+        g_GameManager.shotTypeAndCharacter = SHOT_REIMU_A;
+        g_GameManager.difficulty = 1;
+        g_GameManager.globals->numRetries = 0;
+        g_GameManager.clrd[SHOT_REIMU_A].difficultyClearedWithRetries[1] = 99;
+        MainMenu *menu = g_MainMenuForDebug;
+        g_Chain.Cut(menu->calcChain);
+        g_Supervisor.curState = 1;
+        g_Supervisor.wantedState = 1;
+        if (Ending::RegisterChain() != ZUN_SUCCESS)
+            return SDL_APP_FAILURE;
+        Ending::DebugSetFastForward(true);
+        g_EndingVisualTestDispatched = true;
+        SDL_Log("th07 dev: dispatched real Reimu-A Ending visual test");
+    }
+    if (g_StageVisualTestIndex >= 0 && !g_Stage1VisualTestDispatched &&
+        g_MainMenuForDebug && g_MainMenuForDebug->calcChain)
+    {
+        // This keeps the production menu untouched while providing a repeatable
+        // desktop-only path through the real GameManager/Stage initialization.
+        g_Supervisor.cfg.defaultDifficulty = 1;
+        g_GameManager.difficulty = 1;
+        g_GameManager.character = CHAR_REIMU;
+        g_GameManager.shotType = 0;
+        g_GameManager.practice = 0;
+        g_GameManager.demo = 0;
+        g_GameManager.SetReplay(0);
+        g_GameManager.currentStage = g_StageVisualTestIndex;
+        g_GameManager.finished = 0;
+        MainMenu *menu = g_MainMenuForDebug;
+        g_Chain.Cut(menu->calcChain);
+        g_Supervisor.curState = 2;
+        g_Stage1VisualTestDispatched = true;
+        SDL_Log("th07 dev: dispatched real Stage %d visual test", g_StageVisualTestIndex + 1);
+    }
+    if (g_Stage1VisualTestDispatched && !g_Stage1VisualTestPrepared &&
+        g_Supervisor.curState == 2 && g_GameManager.notInMenu && g_GameManager.globals)
+    {
+        // Keep the real ECL timeline and collision code, but make a long visual
+        // inspection run practical without changing ordinary gameplay.
+        g_GameManager.SetLivesRemaining(99);
+        g_DevSpeedMultiplier = 8.0f;
+        g_Stage1VisualTestPrepared = true;
+        SDL_Log("th07 dev: Stage %d visual test prepared (99 lives, 8x logic)",
+                g_StageVisualTestIndex + 1);
+    }
+#endif
 #ifdef TH_ENABLE_THPRAC
     if (g_OpenThpracMenuForVisualTest && !g_ThpracMenuVisualTestDispatched &&
         g_MainMenuForDebug && g_MainMenuForDebug->calcChain)
@@ -201,6 +429,13 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         g_ThpracPauseVisualTestDispatched = true;
     }
 #endif
+    if (g_ToggleFullscreenRequested)
+    {
+        // Do not change native window styles from inside SDL_AppEvent. SDL can
+        // otherwise apply a delayed geometry restore after the callback.
+        g_ToggleFullscreenRequested = false;
+        GameWindow::ToggleFullscreen();
+    }
     renderRes = g_GameWindow.Render();
     if (renderRes != RENDER_RESULT_KEEP_RUNNING)
     {
@@ -213,22 +448,60 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 {
+#ifdef TH_ENABLE_THPRAC
+    ThpracImGui::ProcessEvent(*event);
+#endif
     switch (event->type)
     {
-#ifdef TH_DEV_TOOLS
     case SDL_EVENT_KEY_DOWN:
+#ifdef TH_DEV_TOOLS
+        if (event->key.scancode == SDL_SCANCODE_RETURN ||
+            event->key.scancode == SDL_SCANCODE_KP_ENTER)
+        {
+            SDL_Log("th07 window input: keydown scancode=%d mod=0x%x repeat=%d",
+                    static_cast<int>(event->key.scancode), static_cast<unsigned>(event->key.mod),
+                    event->key.repeat ? 1 : 0);
+        }
+#endif
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE) && !defined(__EMSCRIPTEN__)
+        if (event->key.repeat == 0 &&
+            (event->key.scancode == SDL_SCANCODE_RETURN ||
+             event->key.scancode == SDL_SCANCODE_KP_ENTER) &&
+            (event->key.mod & (SDL_KMOD_LALT | SDL_KMOD_RALT)) != 0)
+        {
+            g_ToggleFullscreenRequested = true;
+            // TH07 polls SDL keyboard state directly, so consuming the event
+            // alone would still expose Enter to the game on this frame.
+            Controller::SetEnterSuppressed(true);
+#ifdef TH_DEV_TOOLS
+            SDL_Log("th07 window input: Alt+Enter toggle requested");
+#endif
+        }
+#ifdef TH_DEV_TOOLS
+        else
+#endif
+#endif
+#if defined(TH_DEV_TOOLS) && !defined(TH_ENABLE_THPRAC)
         if (event->key.repeat == 0 && event->key.scancode == SDL_SCANCODE_F5)
         {
             g_DevSpeedMultiplier = g_DevSpeedMultiplier == 1.0f ? 4.0f :
                                    g_DevSpeedMultiplier == 4.0f ? 8.0f : 1.0f;
             SDL_Log("th07 dev: logic speed = %gx", g_DevSpeedMultiplier);
         }
-        break;
 #endif
+        break;
+    case SDL_EVENT_KEY_UP:
+        if (event->key.scancode == SDL_SCANCODE_RETURN ||
+            event->key.scancode == SDL_SCANCODE_KP_ENTER)
+        {
+            Controller::SetEnterSuppressed(false);
+        }
+        break;
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
         ResumeAudioForActiveWindow();
         g_GameWindow.isAppActive = 1;
-        if (!g_Supervisor.cfg.windowed)
+        GameWindow::RememberWindowedState();
+        if (GameWindow::IsFullscreen())
         {
             SDL_HideCursor();
         }
@@ -312,8 +585,18 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
         // enabling vsync since theres nothing before the checkvsync call that needs vsyncenabled to
         // be there beforehand
     }
-    FileSystem::WriteDataToFile("th07.cfg", &g_Supervisor.cfg, sizeof(GameConfiguration));
-    g_GameErrorContext.Flush();
+#ifdef TH_DEV_TOOLS
+    if (!g_TouchStateSelfTest)
+#endif
+    {
+        FileSystem::WriteDataToFile("th07.cfg", &g_Supervisor.cfg, sizeof(GameConfiguration));
+    }
+#ifdef TH_DEV_TOOLS
+    if (!g_TouchStateSelfTest)
+#endif
+    {
+        g_GameErrorContext.Flush();
+    }
 #ifdef __EMSCRIPTEN__
     EM_ASM({ globalThis.EaglerTouhouGameExited?.($0); }, static_cast<int>(result));
 #endif

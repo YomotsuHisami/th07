@@ -18,6 +18,29 @@
 #include "AnmManager.hpp"
 #include "ZunGraphics.hpp"
 
+#ifdef TH_ENABLE_THPRAC
+struct ImDrawData;
+#endif
+
+#ifndef __EMSCRIPTEN__
+struct GlesNativePerfCounters
+{
+    u64 drawCalls;
+    u64 drawVertices;
+    u64 bufferSubDataCalls;
+    u64 bufferSubDataBytes;
+    u64 bufferDataCalls;
+    u64 bufferDataBytes;
+    u64 texSubImageCalls;
+    u64 texSubImageBytes;
+    u64 bindTextureCalls;
+    u64 uniformCalls;
+    u64 swapCalls;
+};
+
+GlesNativePerfCounters GlesTakeNativePerfCounters();
+#endif
+
 struct CachedState
 {
     void Invalidate()
@@ -103,6 +126,10 @@ class GlesGraphics : public ZunGraphics
 
     void SwapBuffers() override;
 
+#ifdef TH_ENABLE_THPRAC
+    void RenderImGui(const ImDrawData *drawData);
+#endif
+
   private:
     SDL_GLContext ctx;
     u32 shaderProgram;
@@ -127,6 +154,16 @@ class GlesGraphics : public ZunGraphics
 
     GLuint unitQuadVao = 0;
     GLuint unitQuadVbo = 0;
+
+#ifdef TH_ENABLE_THPRAC
+    GLuint imguiProgram = 0;
+    GLuint imguiVao = 0;
+    GLuint imguiVbo = 0;
+    GLuint imguiEbo = 0;
+    GLuint imguiFontTexture = 0;
+    GLint imguiProjMtx = -1;
+    GLint imguiTexture = -1;
+#endif
 
     ZunMatrix transforms[4];
     ZunViewport viewport;

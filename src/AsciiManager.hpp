@@ -85,6 +85,9 @@ struct AsciiManager
     static u32 OnDrawPopups(AsciiManager *arg);
 
     static void AddFormatText(AsciiManager *manager, ZunVec3 *pos, const char *fmt, ...);
+#if defined(TH_DEV_TOOLS) && defined(TH_ENABLE_THCRAP)
+    static bool DebugLocalizedFormatSelfTest();
+#endif
     void AddString(ZunVec3 *pos, const char *text);
     void CreatePopup1(ZunVec3 *pos, i32 value, u32 color);
     void CreatePopup2(ZunVec3 *pos, i32 value, u32 color);
@@ -132,6 +135,14 @@ struct AsciiManager
 
     void UpdatePrev()
     {
+        // Portable presentation interpolates ANM color/scale/UV between 60 Hz
+        // simulation samples. The original TH07 Demonstration VM (`vm`) runs
+        // script 7's intentional slow alpha pulse, so it must participate in
+        // the same previous-state publication. Omitting it leaves prevColor
+        // stale and makes every render interval interpolate from an ancient
+        // alpha value, producing frame-level flicker that the original 60 Hz
+        // renderer cannot exhibit.
+        this->vm.UpdatePrev();
         this->cherryGauge.UpdatePrev();
         this->cherryDigit.UpdatePrev();
         this->cherryBorderActive.UpdatePrev();

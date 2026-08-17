@@ -1,13 +1,52 @@
 #include "MusicRoom.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "AnmIdx.hpp"
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
 #include "Chain.hpp"
 #include "Controller.hpp"
 #include "FileSystem.hpp"
+#include "Localization.hpp"
 #include "SoundPlayer.hpp"
 #include "Supervisor.hpp"
+
+#ifdef TH_DEV_TOOLS
+static double AuditMusicRoomGpuAgainstSurface(SDL_Surface *source)
+{
+    if (!source || source->w != 640 || source->h != 480 ||
+        source->format != SDL_PIXELFORMAT_RGBA32)
+    {
+        return -1.0;
+    }
+
+    const i32 width = source->w;
+    const i32 height = source->h;
+    u8 *readback = new u8[(size_t)width * height * 4];
+    g_Supervisor.gfxDevice->ReadPixels(0, 0, width, height, readback);
+    const u8 *expected = static_cast<const u8 *>(source->pixels);
+    uint64_t absDiff = 0;
+    uint64_t compared = 0;
+    for (i32 y = 0; y < height; y++)
+    {
+        const u8 *expectedRow = expected + (size_t)y * source->pitch;
+        const u8 *actualRow = readback + (size_t)y * width * 4;
+        for (i32 x = 0; x < width; x++)
+        {
+            for (i32 c = 0; c < 3; c++)
+            {
+                absDiff += (uint64_t)std::abs((i32)actualRow[x * 4 + c] -
+                                             (i32)expectedRow[x * 4 + c]);
+                compared++;
+            }
+        }
+    }
+    delete[] readback;
+    return compared ? (double)absDiff / (double)compared : -1.0;
+}
+#endif
 
 ZunResult MusicRoom::CheckInputEnable()
 {
@@ -187,7 +226,45 @@ u32 MusicRoom::OnDraw(MusicRoom *arg)
     local_c[1] = 0;
     g_AnmManager->SetTexture(0);
     g_AnmManager->CopySurfaceToBackBuffer(0, 0, 0, 0, 0);
+#ifdef TH_DEV_TOOLS
+    static bool auditedBackgroundCopy = false;
+    if (!auditedBackgroundCopy && g_AnmManager->surfacesBis[0])
+    {
+        auditedBackgroundCopy = true;
+        ZunViewport viewport;
+        g_Supervisor.gfxDevice->GetViewport(viewport);
+        SDL_Surface *source = g_AnmManager->surfacesBis[0];
+        const i32 width = source->w;
+        const i32 height = source->h;
+        if (width == 640 && height == 480 && source->format == SDL_PIXELFORMAT_RGBA32)
+        {
+            const double mae = AuditMusicRoomGpuAgainstSurface(source);
+            SDL_Log("th07 music room audit: post-copy viewport=%d,%d %dx%d source=%dx%d "
+                    "gpu-mae=%.3f",
+                    viewport.x, viewport.y, viewport.width, viewport.height, width, height,
+                    mae);
+        }
+        else
+        {
+            SDL_Log("th07 music room audit: post-copy unsupported source=%dx%d format=%u "
+                    "viewport=%d,%d %dx%d",
+                    width, height, (unsigned)source->format, viewport.x, viewport.y,
+                    viewport.width, viewport.height);
+        }
+    }
+#endif
     g_AnmManager->DrawInterpNoRotation(&arg->vm[0]);
+#ifdef TH_DEV_TOOLS
+    static bool auditedStableLayers = false;
+    const bool auditStableLayers = !auditedStableLayers && arg->waitFramesCounter >= 90 &&
+                                   g_AnmManager->surfacesBis[0];
+    if (auditStableLayers)
+    {
+        g_AnmManager->Flush();
+        SDL_Log("th07 music room audit: stable after-vm0 gpu-mae=%.3f",
+                AuditMusicRoomGpuAgainstSurface(g_AnmManager->surfacesBis[0]));
+    }
+#endif
     for (i = arg->listingOffset; i < arg->listingOffset + 10; i++)
     {
         if (i >= arg->numDescriptors)
@@ -208,11 +285,28 @@ u32 MusicRoom::OnDraw(MusicRoom *arg)
         local_18.x += 15.0f;
         AsciiManager::AddFormatText(&g_AsciiManager, &local_18, "%2d.", i + 1);
     }
+#ifdef TH_DEV_TOOLS
+    if (auditStableLayers)
+    {
+        g_AnmManager->Flush();
+        SDL_Log("th07 music room audit: stable after-title-list gpu-mae=%.3f",
+                AuditMusicRoomGpuAgainstSurface(g_AnmManager->surfacesBis[0]));
+    }
+#endif
     i++;
     for (i = 0; i < 8; i++)
     {
         g_AnmManager->DrawInterpNoRotation(&arg->descriptionSprites[i]);
     }
+#ifdef TH_DEV_TOOLS
+    if (auditStableLayers)
+    {
+        g_AnmManager->Flush();
+        SDL_Log("th07 music room audit: stable after-descriptions gpu-mae=%.3f",
+                AuditMusicRoomGpuAgainstSurface(g_AnmManager->surfacesBis[0]));
+        auditedStableLayers = true;
+    }
+#endif
     g_AsciiManager.color = 0xffffffff;
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
@@ -233,6 +327,10 @@ ZunResult MusicRoom::AddedCallback(MusicRoom *arg)
     {
         return ZUN_ERROR;
     }
+#ifdef TH_DEV_TOOLS
+    SDL_Log("th07 music room audit: resources loaded, localization=%d",
+            Localization::Active() ? 1 : 0);
+#endif
 
     g_AnmManager->SetAnmIdxAndExecuteScript(&arg->vm[0], 2304);
     arg->waitFramesCounter = 0;
@@ -281,6 +379,12 @@ ZunResult MusicRoom::AddedCallback(MusicRoom *arg)
                     goto LAB_0043b195;
                 }
             }
+            // Vanilla TH07 intentionally/actually has the impossible AND here,
+            // after the track title (not after the path). It leaves the title
+            // terminator in place, so description slot 0 parses as an empty line.
+            // base_tsa's music_cmt#line_num hook is first reached while advancing
+            // from that empty slot to slot 1; therefore translated comment index 0
+            // (the numbered-title "@") belongs to VM slot 1 at y=336.
             while (*curChar == '\n' && *curChar == '\r')
             {
                 curChar++;
@@ -326,6 +430,33 @@ ZunResult MusicRoom::AddedCallback(MusicRoom *arg)
     }
 LAB_0043b195:
     arg->numDescriptors = offset + 1;
+    if (Localization::Active())
+    {
+        for (i32 track = 1; track <= arg->numDescriptors; track++)
+        {
+            TrackDescriptor &descriptor = arg->trackDescriptors[track - 1];
+            const char *title = Localization::MusicTitle(track, descriptor.title);
+            Localization::CopyText(descriptor.title, sizeof(descriptor.title), title);
+            // Slot 0 is the empty line preserved by the vanilla parser above.
+            // thcrap line_num 0 is published only when the original loop
+            // advances to slot 1, so musiccmt.js index N maps to VM slot N+1.
+            for (i32 slot = 1; slot < 8; slot++)
+            {
+                const i32 line = slot - 1;
+                const char *comment = Localization::MusicComment(
+                    track, static_cast<std::uint16_t>(line), descriptor.description[slot]);
+                // thcrap resolves comment index 0's "@" marker through the
+                // Music Room Numbered Title format while rendering VM slot 1.
+                if (std::strcmp(comment, "@") == 0)
+                    std::snprintf(descriptor.description[slot],
+                                  sizeof(descriptor.description[slot]),
+                                  "No. %2u  %s", static_cast<unsigned>(track), descriptor.title);
+                else
+                    Localization::CopyText(descriptor.description[slot],
+                                           sizeof(descriptor.description[slot]), comment);
+            }
+        }
+    }
     for (offset = 0; offset < arg->numDescriptors; offset++)
     {
         g_AnmManager->SetAnmIdxAndExecuteScript(&arg->titleSprites[offset], offset + 2305);
@@ -353,6 +484,10 @@ LAB_0043b195:
         }
     }
     free(firstChar);
+#ifdef TH_DEV_TOOLS
+    SDL_Log("th07 music room audit: ready descriptors=%d selected=%d",
+            arg->numDescriptors, arg->selectedIdx);
+#endif
     return ZUN_SUCCESS;
 }
 

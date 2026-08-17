@@ -162,7 +162,10 @@ void GameManager::Pause()
     g_Player.prevOptionsPosition[1] = g_Player.optionsPosition[1];
     g_Stage.prevCam = g_Stage.cam;
     g_Stage.prevPos = g_Stage.pos;
-    if (g_GameManager.currentStage != 6 || g_Gui.frameCounter >= 300)
+    // th07_bgm_st6_2: direct Stage6 advanced sections bypass the original
+    // 300-frame pre-BGM delay, so their already-playing track must pause.
+    if (PracticeRuntime::AdvancedSectionActive() ||
+        g_GameManager.currentStage != 6 || g_Gui.frameCounter >= 300)
     {
         g_SoundPlayer.PushCommand(AUDIO_PAUSE, 0, "Pause");
     }
@@ -494,7 +497,7 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
 
     Touch::ResetRunUsage();
     PracticeRuntime::RefreshFromHost();
-    if (arg->replay)
+    if (arg->replay && !PracticeRuntime::ReplayPlaybackActive())
         PracticeRuntime::LoadReplayMetadata(arg->replayFilename);
     PracticeRuntime::PrepareStart(*arg);
 
@@ -565,6 +568,10 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
             return ZUN_ERROR;
         }
         arg->InitializeRank();
+        // Upstream th07_enter @ 0x42EB08 is exactly the new-run deaths=0
+        // initialization site. Tracker ownership resets here, not merely when
+        // its ImGui window is opened/closed.
+        PracticeRuntime::ResetTracker();
         arg->globals->deaths = 0.0f;
         arg->RegenerateGameIntegrityCsum();
         arg->globals->bombsUsed = 0.0f;
@@ -779,7 +786,16 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
     }
     g_Supervisor.LoadAudio(0, g_Stage.stdData->bgmPaths[0]);
     g_Supervisor.LoadAudio(1, g_Stage.stdData->bgmPaths[1]);
-    if (arg->currentStage != 6)
+    if (PracticeRuntime::AdvancedSectionActive())
+    {
+        // th07_bgm: Stage6 always preloads the special Resurrection Butterfly
+        // track for direct section starts. THBGMTest() then selects road=0,
+        // boss=1, or Resurrection Butterfly=2; dialogue/chapter starts select 0.
+        if (arg->currentStage == 6)
+            g_Supervisor.LoadAudio(2, "bgm/th07_13b.mid");
+        g_Supervisor.PlayLoadedAudio(PracticeRuntime::InitialBgmIndex());
+    }
+    else if (arg->currentStage != 6)
     {
         g_Supervisor.PlayLoadedAudio(0);
     }

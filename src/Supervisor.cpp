@@ -4,6 +4,7 @@
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_timer.h>
+#include <SDL3_image/SDL_image.h>
 #include <chrono>
 #include <cstdio>
 
@@ -464,6 +465,14 @@ ZunResult Supervisor::LoadGameData()
 
 i32 Supervisor::CheckVSync()
 {
+#ifdef TH_ENABLE_THCRAP
+    // base_tsa/th07.v1.00b force_disable_vsync @ Rx38887 replaces the
+    // original conditional JNE with an unconditional jump straight to this
+    // function's success return.  Besides preventing the legacy software
+    // VSync fallback, that also skips the startup timing probe itself.  Keep
+    // this a build-time base_tsa behavior rather than a language toggle.
+    return 0;
+#endif
 #ifdef __EMSCRIPTEN__
     return 0;
 #endif
@@ -530,6 +539,25 @@ i32 Supervisor::CheckVSync()
     g_Supervisor.vsyncEnabled = 1;
     return 0;
 }
+
+#ifdef TH_ENABLE_THCRAP
+i32 Supervisor::SnapshotPng(const char *param_1)
+{
+    u8 *pixels = new u8[640 * 480 * 4];
+    this->gfxDevice->ReadPixels(0, 0, 640, 480, pixels);
+
+    SDL_Surface *surf = SDL_CreateSurfaceFrom(640, 480, SDL_PIXELFORMAT_RGBA32, pixels, 640 * 4);
+    const std::string outputPath = FileSystem::GetPrefPath(param_1);
+    const bool ok = surf != nullptr && IMG_SavePNG(surf, outputPath.c_str());
+#ifdef TH_DEV_TOOLS
+    SDL_Log("TH07 thcrap snapshot: path=%s ok=%d", outputPath.c_str(), ok ? 1 : 0);
+#endif
+    if (surf != nullptr)
+        SDL_DestroySurface(surf);
+    delete[] pixels;
+    return ok ? 0 : -1;
+}
+#endif
 
 ZunResult Supervisor::AddedCallback(Supervisor *arg)
 {
@@ -947,7 +975,9 @@ ZunResult Supervisor::LoadConfig(const char *configFilename)
         }
         g_Supervisor.cfg.playSounds = 1;
         g_Supervisor.cfg.defaultDifficulty = (u8)DIFF_NORMAL;
-        g_Supervisor.cfg.windowed = 0;
+        // Portable desktop builds start windowed by default. Fullscreen remains
+        // available through the in-game option and the runtime Alt+Enter toggle.
+        g_Supervisor.cfg.windowed = 1;
         g_Supervisor.cfg.frameskipConfig = 0;
         g_Supervisor.cfg.controllerMapping = g_ControllerMapping;
         g_Supervisor.cfg.effectQuality = QUALITY_BEAUTIFUL;

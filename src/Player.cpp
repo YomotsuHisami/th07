@@ -13,6 +13,7 @@
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
 #include "Gui.hpp"
+#include "PracticeRuntime.hpp"
 #include "Rng.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
@@ -1193,7 +1194,10 @@ void Player::Die()
     g_GameManager.RegenerateGameIntegrityCsum();
     g_EffectManager.SpawnEffect(12, &this->positionCenter, 3, 1, 0xff4040ff);
     g_EffectManager.SpawnParticles(6, &this->positionCenter, 16, 0xffffffff);
-    this->playerState = PLAYER_STATE_DEAD;
+    // Upstream THOverlay F1 (th07 mMuteki) patches only the immediate written
+    // by Player::Die at 0x43EE14: DEAD(2) -> INVULNERABLE(3). Keep all other
+    // hit feedback/timers exactly on the vanilla path.
+    this->playerState = PracticeRuntime::OverlayInvincible() ? PLAYER_STATE_INVULNERABLE : PLAYER_STATE_DEAD;
     this->invulnerabilityTimer = 0;
     g_SoundPlayer.PlaySoundByIdx(SOUND_PICHUN, 0);
 
@@ -1848,9 +1852,17 @@ void Player::UpdateBorderAndBombState()
         }
         else
         {
+            // THOverlay F6 does not call the bomb routine directly. Upstream
+            // patches the bomb test at 0x440B8E from g_CurFrameGameInput
+            // (0x4B9E50) to g_LastFrameRawInput (0x4B9E54). UpdateDeath below
+            // synthesizes Bomb into the current raw word, so it is consumed by
+            // this normal vanilla bomb path on the following tick.
+            const bool bombPressed = PracticeRuntime::OverlayAutoBomb()
+                                         ? ((g_LastFrameRawInput & TH_BUTTON_BOMB) != 0)
+                                         : IS_PRESSED_GAME(TH_BUTTON_BOMB);
             if (!g_GameManager.CheckGameIntegrity() && !g_Gui.HasCurrentMsgIdx() &&
                 this->respawnTimer != 0 && 0 < (i32)g_GameManager.globals->bombsRemaining &&
-                this->borderInvulnerabilityTime == 0 && IS_PRESSED_GAME(TH_BUTTON_BOMB))
+                this->borderInvulnerabilityTime == 0 && bombPressed)
             {
                 if (this->playerState == PLAYER_STATE_DEAD)
                 {
@@ -1864,7 +1876,9 @@ void Player::UpdateBorderAndBombState()
                 }
                 g_ReplayManager->replayEventFlags |= 1;
                 g_GameManager.AddBombsUsed(1);
-                g_GameManager.AddBombsRemaining(-1);
+                // THOverlay F3 patches the -1 immediate at 0x440BC7 to 0.
+                if (!PracticeRuntime::OverlayInfiniteBombs())
+                    g_GameManager.AddBombsRemaining(-1);
                 g_Gui.showBombs = 2;
                 this->bombInfo.isFocus = (i32)this->isFocus;
                 this->bombInfo.isInUse = 1;
@@ -1910,6 +1924,13 @@ i32 Player::UpdateDeath()
             return 0;
         }
         this->respawnTimer--;
+        // Remaining F6 patches replace the vanilla respawnTimer load/sub/store
+        // at 0x440D2C..0x440D3D with a direct decrement plus
+        //   g_CurFrameRawInput = TH_BUTTON_BOMB (2).
+        // The next tick's patched bomb test above reads this through
+        // g_LastFrameRawInput, preserving the upstream one-tick ownership.
+        if (PracticeRuntime::OverlayAutoBomb())
+            g_CurFrameRawInput = TH_BUTTON_BOMB;
         if (this->respawnTimer == 0)
         {
             g_ReplayManager->replayEventFlags |= 4;
@@ -1919,14 +1940,21 @@ i32 Player::UpdateDeath()
             g_GameManager.CheckGameIntegrityOnDeath(1);
             if ((i32)g_GameManager.globals->livesRemaining > 0)
             {
-                if ((i32)g_GameManager.globals->currentPower <= 16)
+                // THOverlay F4 NOPs the currentPower=0 store at 0x440DBF and
+                // changes the -16 immediate at 0x440DD3 to 0. Typed portable
+                // equivalent: preserve the entire death path but do not alter
+                // power while the option is active.
+                if (!PracticeRuntime::OverlayInfinitePower())
                 {
-                    g_GameManager.globals->currentPower = 0.0f;
-                    g_GameManager.RegenerateGameIntegrityCsum();
-                }
-                else
-                {
-                    g_GameManager.AddCurrentPower(-16);
+                    if ((i32)g_GameManager.globals->currentPower <= 16)
+                    {
+                        g_GameManager.globals->currentPower = 0.0f;
+                        g_GameManager.RegenerateGameIntegrityCsum();
+                    }
+                    else
+                    {
+                        g_GameManager.AddCurrentPower(-16);
+                    }
                 }
                 g_ItemManager.SpawnItem(&this->positionCenter, ITEM_POWER_BIG, 2);
                 g_ItemManager.SpawnItem(&this->positionCenter, ITEM_POWER_SMALL, 2);
@@ -1955,8 +1983,11 @@ i32 Player::UpdateDeath()
             }
             else
             {
-                g_GameManager.globals->currentPower = 0.0f;
-                g_GameManager.RegenerateGameIntegrityCsum();
+                if (!PracticeRuntime::OverlayInfinitePower())
+                {
+                    g_GameManager.globals->currentPower = 0.0f;
+                    g_GameManager.RegenerateGameIntegrityCsum();
+                }
                 g_ItemManager.SpawnItem(&this->positionCenter, ITEM_FULL_POWER, 2);
                 g_ItemManager.SpawnItem(&this->positionCenter, ITEM_FULL_POWER, 2);
                 g_ItemManager.SpawnItem(&this->positionCenter, ITEM_FULL_POWER, 2);
@@ -1994,7 +2025,9 @@ i32 Player::UpdateDeath()
             }
             else
             {
-                g_GameManager.AddLivesRemaining(-1);
+                // THOverlay F2 patches the -1 immediate at 0x44116B to 0.
+                if (!PracticeRuntime::OverlayInfiniteLives())
+                    g_GameManager.AddLivesRemaining(-1);
                 g_Gui.showLives = 2;
                 g_GameManager.SetBombsRemainingAndComputeCsum(g_Player.shooterData->initialBombs);
                 g_Gui.showBombs = 2;
@@ -2291,6 +2324,10 @@ void Player::BreakBorder()
     this->invulnerabilityTimer = 40;
     this->borderInvulnerabilityTime = 40;
     g_GameManager.cherryPlus = g_GameManager.globals->cherryStart;
+    // Upstream th07_border_break @ 0x441DA4 is inside BreakBorder(), after
+    // the forced-break state transition and before the bomb-clear effect.
+    // Natural border expiration uses BreakBorderNaturally() and must not count.
+    PracticeRuntime::RecordBorderBreak();
     SpawnBombEffect(&this->positionCenter, 32.0f, 16.0f, 50, 8);
     angle = -ZUN_PI;
     for (i = 0; i < 32; i++, angle += 0.19634955f)

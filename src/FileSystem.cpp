@@ -39,6 +39,14 @@ static u8 *ReadRuntimeOverrideFile(const std::string &path)
 u8 *FileSystem::OpenRuntimeOverride(const char *filepath)
 {
     g_LastFileWasRuntimeOverride = false;
+#ifndef TH_ENABLE_THCRAP
+    // A localization-disabled build is the strict Japanese regression
+    // baseline. Do not let a stale/adjacent thcrap directory affect any file
+    // load in that configuration; the whole override namespace is disabled at
+    // its single filesystem entry point.
+    (void)filepath;
+    return NULL;
+#else
     if (!filepath || !*filepath)
         return NULL;
     std::string relative(filepath);
@@ -62,6 +70,7 @@ u8 *FileSystem::OpenRuntimeOverride(const char *filepath)
     if (separator != std::string::npos)
         return ReadRuntimeOverrideFile(root + relative.substr(separator + 1));
     return NULL;
+#endif
 }
 
 u8 *FileSystem::OpenFile(const char *filepath, i32 isExternalResource)

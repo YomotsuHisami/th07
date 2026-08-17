@@ -23,6 +23,9 @@ struct GameWindow
     static ZunResult InitInterface();
     static ZunResult InitRendering();
     static void Present();
+    static void RememberWindowedState();
+    static void ToggleFullscreen();
+    static bool IsFullscreen();
     RenderResult Render();
     static void ResetRenderState();
 

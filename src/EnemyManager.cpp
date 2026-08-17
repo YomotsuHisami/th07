@@ -8,6 +8,7 @@
 #include "GameWindow.hpp"
 #include "Gui.hpp"
 #include "Player.hpp"
+#include "PracticeRuntime.hpp"
 #include "Rng.hpp"
 #include "SoundPlayer.hpp"
 #include "ZunResult.hpp"
@@ -697,6 +698,21 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
         {
             arg->timelines[i].timelineInstr = g_EclManager.GetTimeline(i);
         }
+
+        if (PracticeRuntime::OverlayTimeLock() && g_GameManager.currentStage == 4 &&
+            arg->bosses[0] != nullptr)
+        {
+            constexpr i32 lilyStart = 7122;
+            constexpr i32 lilyLatest = lilyStart + 60 * 50;
+            constexpr i32 lilySkipTo = lilyStart + 60 * 10;
+            const i32 curTime = arg->timelines[i].timelineTime.GetCurrent();
+            if (curTime >= lilyStart && curTime < lilyLatest)
+            {
+                if (curTime < lilySkipTo)
+                    arg->timelines[i].timelineTime.current = lilySkipTo;
+                continue;
+            }
+        }
         RunEclTimeline(&arg->timelines[i]);
     }
 
@@ -1114,7 +1130,7 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
             }
         }
         enemy->UpdateEffects();
-        if (!g_GameManager.isTimeStopped)
+        if (!g_GameManager.isTimeStopped && !PracticeRuntime::OverlayTimeLock())
         {
             enemy->timer++;
         }
