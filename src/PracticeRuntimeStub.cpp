@@ -18,8 +18,11 @@ void ReplayMenuReset() {}
 bool ReplayMenuCheck(const char *) { return false; }
 void ReplayMenuActivate() {}
 bool ReplayPlaybackActive() { return false; }
+bool ReplayStartupCommitted() { return false; }
+void FinishReplayStartup() {}
 void UpdateOverlay() {}
 void DrawOverlay() {}
+bool AdvancedOptionsOpen() { return false; }
 bool OverlayInvincible() { return false; }
 bool OverlayInfiniteLives() { return false; }
 bool OverlayInfiniteBombs() { return false; }
@@ -27,6 +30,8 @@ bool OverlayInfinitePower() { return false; }
 bool OverlayTimeLock() { return false; }
 bool OverlayAutoBomb() { return false; }
 bool OverlayEverlastingBgm() { return false; }
+void ResetReplayDeterminismUsage() {}
+bool ReplayUnsafeAssistUsedThisRun() { return false; }
 bool AdvancedAllClearBonus() { return false; }
 bool AdvancedFixSpellBonusDisplay() { return false; }
 bool ConsumeResurrectionButterflySpawnSkip() { return false; }

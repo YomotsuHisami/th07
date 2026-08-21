@@ -22,6 +22,7 @@
 #include "Localization.hpp"
 #include "MainMenu.hpp"
 #include "PracticeRuntime.hpp"
+#include "ReplayExtension.hpp"
 #include "ResultScreen.hpp"
 #include "SoundPlayer.hpp"
 #include "Supervisor.hpp"
@@ -56,12 +57,14 @@ static bool g_OpenResultStatsForVisualTest = false;
 static bool g_ResultStatsVisualTestDispatched = false;
 static bool g_OpenResultStatsPhantasmForVisualTest = false;
 static bool g_OpenEndingForVisualTest = false;
+static i32 g_EndingViewerSelection = -1;
 static bool g_EndingVisualTestDispatched = false;
 static i32 g_CharacterSelectVisualTestIndex = -1;
 static bool g_CharacterSelectVisualTestDispatched = false;
 static i32 g_MenuStringVisualTestState = -1;
 static bool g_MenuStringVisualTestDispatched = false;
 static bool g_TouchStateSelfTest = false;
+static bool g_ReplayExtensionSelfTest = false;
 #ifdef TH_ENABLE_THCRAP
 static bool g_ThcrapFontMetricsSelfTest = false;
 static bool g_ThcrapTextImageSelfTest = false;
@@ -110,6 +113,16 @@ static void ResumeAudioForActiveWindow()
     g_AudioSuspendedByFocus = false;
 }
 
+#ifdef __EMSCRIPTEN__
+extern "C" EMSCRIPTEN_KEEPALIVE void TouhouWebSetAudioActive(i32 active)
+{
+    if (active)
+        ResumeAudioForActiveWindow();
+    else
+        SuspendAudioForInactiveWindow();
+}
+#endif
+
 void AnmManager::TakeScreenshotIfRequested()
 {
     if (this->screenshotTextureId >= 0)
@@ -153,6 +166,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
             g_MenuStringVisualTestState = STATE_KEY_CONFIG;
         else if (std::strcmp(argv[index], "--touch-selftest") == 0)
             g_TouchStateSelfTest = true;
+        else if (std::strcmp(argv[index], "--replay-extension-selftest") == 0)
+            g_ReplayExtensionSelfTest = true;
 #ifdef TH_ENABLE_THCRAP
         else if (std::strcmp(argv[index], "--thcrap-font-selftest") == 0)
             g_ThcrapFontMetricsSelfTest = true;
@@ -182,6 +197,22 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
 #endif
 #ifdef __EMSCRIPTEN__
     g_OpenMusicRoomForVisualTest = EM_ASM_INT({ return Module.eaglerOptions?.debugHarness === 'music-room'; }) != 0;
+#ifdef TH_DEV_TOOLS
+    g_EndingViewerSelection = EM_ASM_INT({
+        const id = Module.eaglerOptions?.debugHarness;
+        return id === 'ending-reimu-a' ? 0 :
+               id === 'ending-reimu-b' ? 1 :
+               id === 'ending-marisa-a' ? 2 :
+               id === 'ending-marisa-b' ? 3 :
+               id === 'ending-sakuya-a' ? 4 :
+               id === 'ending-sakuya-b' ? 5 :
+               id === 'ending-reimu-bad' ? 6 :
+               id === 'ending-marisa-bad' ? 7 :
+               id === 'ending-sakuya-bad' ? 8 : -1;
+    });
+    if (g_EndingViewerSelection >= 0)
+        g_OpenEndingForVisualTest = true;
+#endif
 #ifdef TH_ENABLE_THPRAC
     g_OpenThpracMenuForVisualTest = EM_ASM_INT({ return Module.eaglerOptions?.debugHarness === 'thprac-menu'; }) != 0;
 #endif
@@ -237,6 +268,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
     {
         const bool passed = Touch::DebugStateSelfTest();
         SDL_Log("th07 touch finger-state self-test: %s", passed ? "PASS" : "FAIL");
+        return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
+    }
+    if (g_ReplayExtensionSelfTest)
+    {
+        const bool passed = ReplayExtension::DebugRoundTrip("replay-extension-selftest.rpy");
+        SDL_Log("th07 ReplayExtension round-trip self-test: %s", passed ? "PASS" : "FAIL");
         return passed ? SDL_APP_SUCCESS : SDL_APP_FAILURE;
     }
 #endif
@@ -355,24 +392,36 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     if (g_OpenEndingForVisualTest && !g_EndingVisualTestDispatched &&
         g_MainMenuForDebug && g_MainMenuForDebug->calcChain && g_GameManager.globals)
     {
-        // Developer audit only. Seed the same minimum gameplay fields that a
-        // no-continue Reimu-A clear would carry into the production Ending
-        // chain; the Ending parser/ANM/background/text renderer remain real.
-        g_GameManager.character = CHAR_REIMU;
-        g_GameManager.shotType = 0;
-        g_GameManager.shotTypeAndCharacter = SHOT_REIMU_A;
+        // Developer viewer/audit only. Seed the production ending selector
+        // fields; the Ending parser/ANM/background/text renderer remain real.
+        const i32 selection = g_EndingViewerSelection >= 0 ? g_EndingViewerSelection : 0;
+        const bool badEnding = selection >= 6;
+        const i32 character = badEnding ? selection - 6 : selection / 2;
+        const i32 shotType = badEnding ? 0 : selection % 2;
+        const i32 shotTypeAndCharacter = character * 2 + shotType;
+        g_GameManager.character = character;
+        g_GameManager.shotType = shotType;
+        g_GameManager.shotTypeAndCharacter = shotTypeAndCharacter;
         g_GameManager.difficulty = 1;
-        g_GameManager.globals->numRetries = 0;
-        g_GameManager.clrd[SHOT_REIMU_A].difficultyClearedWithRetries[1] = 99;
+        g_GameManager.globals->numRetries = badEnding ? 1 : 0;
+        g_GameManager.clrd[shotTypeAndCharacter].difficultyClearedWithRetries[1] = 99;
+        g_GameManager.clrd[shotTypeAndCharacter].difficultyClearedWithoutRetries[1] = 99;
         MainMenu *menu = g_MainMenuForDebug;
         g_Chain.Cut(menu->calcChain);
-        g_Supervisor.curState = 1;
-        g_Supervisor.wantedState = 1;
+        // Once the production Supervisor has registered an Ending from the
+        // gameplay path, both state fields settle on 9 for the lifetime of
+        // that Ending. Ending::DeletedCallback then changes only curState to
+        // 6, producing the real wanted=9/cur=6 transition that registers the
+        // post-ending ResultScreen. Keep that ownership pair here as well;
+        // using the main-menu pair (1/1) leaves no consumer for curState=6
+        // and strands the final ending frame under the FPS overlay.
+        g_Supervisor.curState = 9;
+        g_Supervisor.wantedState = 9;
         if (Ending::RegisterChain() != ZUN_SUCCESS)
             return SDL_APP_FAILURE;
-        Ending::DebugSetFastForward(true);
+        Ending::DebugSetFastForward(g_EndingViewerSelection < 0);
         g_EndingVisualTestDispatched = true;
-        SDL_Log("th07 dev: dispatched real Reimu-A Ending visual test");
+        SDL_Log("th07 dev: dispatched real Ending viewer selection=%d", selection);
     }
     if (g_StageVisualTestIndex >= 0 && !g_Stage1VisualTestDispatched &&
         g_MainMenuForDebug && g_MainMenuForDebug->calcChain)
@@ -586,13 +635,13 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
         // be there beforehand
     }
 #ifdef TH_DEV_TOOLS
-    if (!g_TouchStateSelfTest)
+    if (!g_TouchStateSelfTest && !g_ReplayExtensionSelfTest)
 #endif
     {
         FileSystem::WriteDataToFile("th07.cfg", &g_Supervisor.cfg, sizeof(GameConfiguration));
     }
 #ifdef TH_DEV_TOOLS
-    if (!g_TouchStateSelfTest)
+    if (!g_TouchStateSelfTest && !g_ReplayExtensionSelfTest)
 #endif
     {
         g_GameErrorContext.Flush();

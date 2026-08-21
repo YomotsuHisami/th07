@@ -7,6 +7,7 @@
 #include <SDL3_image/SDL_image.h>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 
 #ifdef __EMSCRIPTEN__
 static char g_WebMidiPaths[32][256] = {};
@@ -89,6 +90,47 @@ static void NotifyWebMidiFallback(const char *path)
     }, path);
 }
 #endif
+
+ZunResult Supervisor::CheckIntegrity(const char *version, i32 exeSize, i32 exeChecksum)
+{
+    if (!this->version)
+    {
+        return ZUN_SUCCESS;
+    }
+    if (strncmp(version, "debug", 5) == 0)
+    {
+        return ZUN_SUCCESS;
+    }
+
+    char *cursor = this->version;
+    i32 remaining = this->versionTableSize;
+    while (remaining > 0)
+    {
+        if (strncmp(version, cursor, 5) == 0)
+        {
+            i32 expectedSize;
+            i32 expectedChecksum;
+            if (sscanf(cursor + 6, "%d %d", &expectedSize, &expectedChecksum) != 2)
+            {
+                return ZUN_ERROR;
+            }
+            return expectedSize == exeSize && expectedChecksum == exeChecksum
+                       ? ZUN_SUCCESS
+                       : ZUN_ERROR;
+        }
+
+        char *next = strchr(cursor, '\n');
+        if (!next)
+        {
+            return ZUN_ERROR;
+        }
+        next++;
+        remaining -= static_cast<i32>(next - cursor);
+        cursor = next;
+    }
+    return ZUN_ERROR;
+}
+
 u32 g_FpsUpdateCounter;
 char g_ReplayFpsBuffer[256];
 char g_FpsCounterBuffer[256];

@@ -27,15 +27,24 @@ const wrongAndBeforeTitle = musicRoom.indexOf("while (*curChar == '\\n' && *curC
 if (wrongAndBeforeTitle >= 0 && wrongAndBeforeTitle < titlePos) {
   throw new Error('TH07 Music Room parser regression: vanilla impossible AND was moved to the path terminator');
 }
-requireText('for (i32 slot = 1; slot < 8; slot++)', 'thcrap Music Room translated VM slots 1..7');
-requireText('const i32 line = slot - 1;', 'thcrap line index to VM slot offset');
-requireText('Localization::MusicComment(', 'thcrap Music Room comment lookup');
-requireText('std::strcmp(comment, "@") == 0', 'line-0 numbered-title marker');
-requireText('"No. %2u  %s"', 'numbered-title formatting contract');
-requireText('descriptor.description[slot]', 'slot-preserving localized description storage');
-requireText('VM slot N+1', 'source explanation of thcrap line/VM mapping');
+// thcrap replaces the string pointer at the formatter callsite. Translated
+// UTF-8 must therefore never be materialized into vanilla's 66-byte
+// TrackDescriptor fields before drawing.
+requireText('MusicRoomTitleForDisplay', 'late-bound Music Room title lookup');
+requireText('MusicRoomCommentForDisplay', 'late-bound Music Room comment lookup');
+requireText('if (!Localization::Active() || slot == 0)', 'vanilla blank slot 0 ownership');
+requireText('static_cast<std::uint16_t>(slot - 1)', 'thcrap line index to VM slot offset');
+requireText('Localization::MusicComment(', 'render-time thcrap Music Room comment lookup');
+requireText('std::strcmp(comment, "@")', 'line-0 numbered-title marker');
+requireText('"No. %2u  "', 'numbered-title formatting contract');
+requireText('formatted += MusicRoomTitleForDisplay', 'dynamic numbered-title storage');
 requireText('SetAnmIdxAndExecuteScript(&arg->descriptionSprites[offset], offset + 1799)',
             'original eight text VM script slots');
+if (musicRoom.includes('Localization::CopyText(descriptor.description') ||
+    musicRoom.includes('std::snprintf(descriptor.description') ||
+    musicRoom.includes('Localization::CopyText(descriptor.title')) {
+  throw new Error('TH07 Music Room regression: translated text must not be copied into vanilla fixed-size TrackDescriptor buffers');
+}
 
 const copyPos = musicRoom.indexOf('CopySurfaceToBackBuffer(0, 0, 0, 0, 0);');
 const musicVmPos = musicRoom.indexOf('DrawInterpNoRotation(&arg->vm[0]);', copyPos);

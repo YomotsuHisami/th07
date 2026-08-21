@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #include "AnmIdx.hpp"
 #include "AnmManager.hpp"
@@ -12,6 +13,36 @@
 #include "Localization.hpp"
 #include "SoundPlayer.hpp"
 #include "Supervisor.hpp"
+
+namespace
+{
+const char *MusicRoomTitleForDisplay(const TrackDescriptor &descriptor, i32 track)
+{
+    return Localization::Active()
+               ? Localization::MusicTitle(static_cast<std::uint32_t>(track), descriptor.title)
+               : descriptor.title;
+}
+
+const char *MusicRoomCommentForDisplay(const TrackDescriptor &descriptor, i32 track, i32 slot,
+                                       std::string &formatted)
+{
+    const char *fallback = descriptor.description[slot];
+    if (!Localization::Active() || slot == 0)
+        return fallback;
+
+    const char *comment = Localization::MusicComment(static_cast<std::uint32_t>(track),
+                                                      static_cast<std::uint16_t>(slot - 1),
+                                                      fallback);
+    if (std::strcmp(comment, "@") != 0)
+        return comment;
+
+    char prefix[32];
+    std::snprintf(prefix, sizeof(prefix), "No. %2u  ", static_cast<unsigned>(track));
+    formatted.assign(prefix);
+    formatted += MusicRoomTitleForDisplay(descriptor, track);
+    return formatted.c_str();
+}
+} // namespace
 
 #ifdef TH_DEV_TOOLS
 static double AuditMusicRoomGpuAgainstSurface(SDL_Surface *source)
@@ -147,13 +178,25 @@ i32 MusicRoom::ProcessInput()
         g_Supervisor.PlayAudio(this->trackDescriptors[this->selectedIdx].path);
         for (i = 0; i < 8; i++)
         {
-            memset(local_54, 0, sizeof(local_54));
-            memcpy(local_54, this->trackDescriptors[this->selectedIdx].description[i], 64);
-            if (local_54[0] != '\0')
+            const TrackDescriptor &descriptor = this->trackDescriptors[this->selectedIdx];
+            const char *text = nullptr;
+            std::string formatted;
+            if (Localization::Active())
+            {
+                text = MusicRoomCommentForDisplay(descriptor, this->selectedIdx + 1, i, formatted);
+            }
+            else
+            {
+                // Preserve the vanilla fixed-buffer path when translation is inactive.
+                memset(local_54, 0, sizeof(local_54));
+                memcpy(local_54, descriptor.description[i], 64);
+                text = local_54;
+            }
+            if (text[0] != '\0')
             {
                 this->descriptionSprites[i].active = 1;
                 AnmManager::DrawVmTextFmt(g_AnmManager, this->descriptionSprites + i, 0xffe0c0,
-                                          0x300000, local_54);
+                                          0x300000, text);
             }
             else
             {
@@ -430,38 +473,12 @@ ZunResult MusicRoom::AddedCallback(MusicRoom *arg)
     }
 LAB_0043b195:
     arg->numDescriptors = offset + 1;
-    if (Localization::Active())
-    {
-        for (i32 track = 1; track <= arg->numDescriptors; track++)
-        {
-            TrackDescriptor &descriptor = arg->trackDescriptors[track - 1];
-            const char *title = Localization::MusicTitle(track, descriptor.title);
-            Localization::CopyText(descriptor.title, sizeof(descriptor.title), title);
-            // Slot 0 is the empty line preserved by the vanilla parser above.
-            // thcrap line_num 0 is published only when the original loop
-            // advances to slot 1, so musiccmt.js index N maps to VM slot N+1.
-            for (i32 slot = 1; slot < 8; slot++)
-            {
-                const i32 line = slot - 1;
-                const char *comment = Localization::MusicComment(
-                    track, static_cast<std::uint16_t>(line), descriptor.description[slot]);
-                // thcrap resolves comment index 0's "@" marker through the
-                // Music Room Numbered Title format while rendering VM slot 1.
-                if (std::strcmp(comment, "@") == 0)
-                    std::snprintf(descriptor.description[slot],
-                                  sizeof(descriptor.description[slot]),
-                                  "No. %2u  %s", static_cast<unsigned>(track), descriptor.title);
-                else
-                    Localization::CopyText(descriptor.description[slot],
-                                           sizeof(descriptor.description[slot]), comment);
-            }
-        }
-    }
     for (offset = 0; offset < arg->numDescriptors; offset++)
     {
         g_AnmManager->SetAnmIdxAndExecuteScript(&arg->titleSprites[offset], offset + 2305);
+        const TrackDescriptor &descriptor = arg->trackDescriptors[offset];
         AnmManager::DrawVmTextFmt(g_AnmManager, arg->titleSprites + offset, 0xc0e0ff, 0x302080,
-                                  arg->trackDescriptors[offset].title);
+                                  MusicRoomTitleForDisplay(descriptor, offset + 1));
         arg->titleSprites[offset].pos.x = 93.0f;
         arg->titleSprites[offset].pos.y = (f32)((offset + 1) * 18) + 104.0f - 20.0f;
         arg->titleSprites[offset].pos.z = 0.0f;
@@ -470,13 +487,25 @@ LAB_0043b195:
     for (offset = 0; offset < 8; offset++)
     {
         g_AnmManager->SetAnmIdxAndExecuteScript(&arg->descriptionSprites[offset], offset + 1799);
-        memset(lineCharBuffer, 0, sizeof(lineCharBuffer));
-        memcpy(lineCharBuffer, arg->trackDescriptors[arg->selectedIdx].description[offset], 64);
-        if (*lineCharBuffer != '\0')
+        const TrackDescriptor &descriptor = arg->trackDescriptors[arg->selectedIdx];
+        const char *text = nullptr;
+        std::string formatted;
+        if (Localization::Active())
+        {
+            text = MusicRoomCommentForDisplay(descriptor, arg->selectedIdx + 1, offset, formatted);
+        }
+        else
+        {
+            // Preserve the vanilla fixed-buffer path when translation is inactive.
+            memset(lineCharBuffer, 0, sizeof(lineCharBuffer));
+            memcpy(lineCharBuffer, descriptor.description[offset], 64);
+            text = lineCharBuffer;
+        }
+        if (text[0] != '\0')
         {
             arg->descriptionSprites[offset].active = 1;
             AnmManager::DrawVmTextFmt(g_AnmManager, arg->descriptionSprites + offset, 0xffe0c0,
-                                      0x300000, (char *)&lineCharBuffer);
+                                      0x300000, text);
         }
         else
         {

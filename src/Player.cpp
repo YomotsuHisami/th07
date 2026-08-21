@@ -14,6 +14,7 @@
 #include "GameWindow.hpp"
 #include "Gui.hpp"
 #include "PracticeRuntime.hpp"
+#include "ReplayExtension.hpp"
 #include "Rng.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
@@ -56,6 +57,63 @@ const char *g_ShooterTable[6] = {
     "data/ply00a.sht", "data/ply00b.sht", "data/ply01a.sht",
     "data/ply01b.sht", "data/ply02a.sht", "data/ply02b.sht",
 };
+
+namespace
+{
+// Effect 24's native ANM mapping.  Keep the optional always-visible marker
+// outside EffectManager so a display preference can never consume an effect
+// slot or advance the gameplay RNG.  The normal focus effect below remains
+// completely vanilla.
+constexpr i32 EAGLER_HITBOX_ANM = 0x2c2;
+AnmVm g_EaglerHitboxVm;
+bool g_EaglerHitboxVmActive = false;
+
+void RestartEaglerHitboxVm()
+{
+    const Rng savedRng = g_Rng;
+    g_AnmManager->SetAnmIdxAndExecuteScript(&g_EaglerHitboxVm, EAGLER_HITBOX_ANM);
+    g_Rng = savedRng;
+    g_EaglerHitboxVm.zWriteDisable = 1;
+    g_EaglerHitboxVm.color.color = 0xffffffff;
+    g_EaglerHitboxVm.UpdatePrev();
+    g_EaglerHitboxVmActive = true;
+}
+
+void UpdateEaglerHitboxVm(const Player *player)
+{
+    const bool nativeFocusEffect = player->focusEffect && player->focusEffect->inUseFlag &&
+                                   player->focusEffect->effectId == 24;
+    if (!EaglerOptions::AlwaysShowHitbox() || nativeFocusEffect)
+    {
+        g_EaglerHitboxVmActive = false;
+        return;
+    }
+
+    if (!g_EaglerHitboxVmActive)
+    {
+        RestartEaglerHitboxVm();
+        return;
+    }
+
+    g_EaglerHitboxVm.UpdatePrev();
+    const Rng savedRng = g_Rng;
+    const bool finished = g_AnmManager->ExecuteScript(&g_EaglerHitboxVm) != 0;
+    g_Rng = savedRng;
+    if (finished)
+        RestartEaglerHitboxVm();
+}
+
+void DrawEaglerHitboxVm(const Player *player)
+{
+    if (!g_EaglerHitboxVmActive || !EaglerOptions::AlwaysShowHitbox() ||
+        g_GameManager.isInRetryMenu)
+        return;
+    const ZunVec3 drawPos = player->prevPositionCenter.Lerp(player->positionCenter, g_RenderAlpha);
+    g_EaglerHitboxVm.pos = {g_GameManager.arcadeRegionTopLeftPos.x + drawPos.x,
+                            g_GameManager.arcadeRegionTopLeftPos.y + drawPos.y, 0.0f};
+    g_AnmManager->Draw(&g_EaglerHitboxVm);
+}
+} // namespace
 
 const char *g_ShooterTableFocus[6] = {
     "data/ply00as.sht", "data/ply00bs.sht", "data/ply01as.sht",
@@ -1222,7 +1280,12 @@ i32 Player::HandlePlayerInputs()
 
     f32 touchDx;
     f32 touchDy;
+    f32 joystickX;
+    f32 joystickY;
     bool touchFocus;
+    bool sampledReplayTouch = false;
+    bool touchUnlimited = false;
+    const bool replayPlayback = g_GameManager.replay != 0;
 
     horizontalSpeed = 0.0f;
     verticalSpeed = 0.0f;
@@ -1339,10 +1402,36 @@ i32 Player::HandlePlayerInputs()
         }
     }
 
-    if (Touch::GetPlayerDelta(&touchDx, &touchDy))
+    ReplayExtension::BeginInputFrame();
+    if (replayPlayback && ReplayExtension::GetPlaybackJoystick(&joystickX, &joystickY))
     {
+        const f32 maxSpeed = this->isFocus ? this->shooterData->speedFocus : this->shooterData->speed;
+        horizontalSpeed = joystickX * maxSpeed;
+        verticalSpeed = joystickY * maxSpeed;
+        this->playerDirection = MOVEMENT_NONE;
+    }
+    else if (!replayPlayback && Touch::GetFreeJoystickVector(&joystickX, &joystickY))
+    {
+        ReplayExtension::CaptureJoystick(joystickX, joystickY);
+        const f32 maxSpeed = this->isFocus ? this->shooterData->speedFocus : this->shooterData->speed;
+        horizontalSpeed = joystickX * maxSpeed;
+        verticalSpeed = joystickY * maxSpeed;
+        this->playerDirection = MOVEMENT_NONE;
+    }
+    else if ((replayPlayback &&
+              (sampledReplayTouch = ReplayExtension::GetPlaybackDirectTouch(&touchDx, &touchDy, &touchUnlimited))) ||
+             (!replayPlayback && Touch::GetPlayerDelta(&touchDx, &touchDy)))
+    {
+        if (!sampledReplayTouch)
+        {
+            touchUnlimited = Touch::IsUnlimited();
+            // Sample the touch owner's input on the same fixed game tick as
+            // vanilla replay input. Raw touch events remain a separate stream
+            // for semantics and the replay touch-position overlay.
+            ReplayExtension::CaptureDirectTouch(touchDx, touchDy, touchUnlimited);
+        }
         f32 focusRatio = 1.0f;
-        if (!Touch::IsUnlimited() && this->isFocus && this->shooterData &&
+        if (!touchUnlimited && this->isFocus && this->shooterData &&
             this->shooterData->speed != 0.0f)
         {
             focusRatio = this->shooterData->speedFocus / this->shooterData->speed;
@@ -1379,7 +1468,7 @@ i32 Player::HandlePlayerInputs()
             reqGameDy = maxY - this->positionCenter.y;
         }
 
-        if (focusRatio != 0.0f)
+        if (focusRatio != 0.0f && !sampledReplayTouch)
         {
             Touch::SetPlayerDelta(reqGameDx / focusRatio, reqGameDy / focusRatio);
         }
@@ -1396,12 +1485,12 @@ i32 Player::HandlePlayerInputs()
                              requestedVerticalSpeed * requestedVerticalSpeed;
 
         f32 maxSpeed = this->isFocus ? this->shooterData->speedFocus : this->shooterData->speed;
-        if (Touch::IsUnlimited())
+        if (touchUnlimited)
         {
             maxSpeed = sqrtf(currentSpeedSq);
         }
 
-        if (!Touch::IsUnlimited() && currentSpeedSq > maxSpeed * maxSpeed && currentSpeedSq > 0.0f)
+        if (!touchUnlimited && currentSpeedSq > maxSpeed * maxSpeed && currentSpeedSq > 0.0f)
         {
             f32 currentSpeed = sqrtf(currentSpeedSq);
             horizontalSpeed = (requestedHorizontalSpeed / currentSpeed) * maxSpeed;
@@ -1425,9 +1514,9 @@ i32 Player::HandlePlayerInputs()
             consumedGameDy = verticalSpeed * vy;
         }
 
-        if (focusRatio != 0.0f)
+        if (focusRatio != 0.0f && !sampledReplayTouch)
         {
-            if (!Touch::IsUnlimited() && currentSpeedSq > maxSpeed * maxSpeed &&
+            if (!touchUnlimited && currentSpeedSq > maxSpeed * maxSpeed &&
                 currentSpeedSq > 0.0f)
             {
                 f32 consumeX = (hx != 0.0f) ? consumedGameDx / focusRatio : touchDx;
@@ -1544,16 +1633,6 @@ i32 Player::HandlePlayerInputs()
     this->optionsPosition[1] = this->positionCenter;
     optionOffsetX = optionOffsetY = 0.0f;
 
-    // Reuse PCB's own focus marker (effect 24).  eagler-touhou only changes
-    // its lifetime; the sprite, animation and player attachment stay native.
-    if (EaglerOptions::AlwaysShowHitbox() &&
-        (!this->eaglerHitboxEffect || !this->eaglerHitboxEffect->inUseFlag ||
-         this->eaglerHitboxEffect->effectId != 24))
-    {
-        this->eaglerHitboxEffect =
-            g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
-    }
-
     if (g_GameManager.character != CHAR_SAKUYA || g_GameManager.shotType != 1)
     {
         switch (this->optionState)
@@ -1567,9 +1646,8 @@ i32 Player::HandlePlayerInputs()
             if (this->isFocus)
             {
                 this->optionState = OPTION_FOCUSING;
-                if (!EaglerOptions::AlwaysShowHitbox())
-                    this->focusEffect =
-                        g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
+                this->focusEffect =
+                    g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
             }
             else
             {
@@ -1627,9 +1705,8 @@ i32 Player::HandlePlayerInputs()
             {
                 this->optionState = OPTION_FOCUSING;
                 this->focusMovementTimer = 8 - this->focusMovementTimer.GetCurrent();
-                if (!EaglerOptions::AlwaysShowHitbox())
-                    this->focusEffect =
-                        g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
+                this->focusEffect =
+                    g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
                 goto CASE_OPTION_FOCUSING;
             }
         }
@@ -1652,9 +1729,8 @@ i32 Player::HandlePlayerInputs()
             if (this->isFocus)
             {
                 this->optionState = OPTION_FOCUSING;
-                if (!EaglerOptions::AlwaysShowHitbox())
-                    this->focusEffect =
-                        g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
+                this->focusEffect =
+                    g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
                 goto CASE_OPTION_FOCUSING_2;
             }
             this->optionsPosition[0].x -= optionOffsetX;
@@ -1721,9 +1797,8 @@ i32 Player::HandlePlayerInputs()
             {
                 this->optionState = OPTION_FOCUSING;
                 this->focusMovementTimer = 8 - this->focusMovementTimer.GetCurrent();
-                if (!EaglerOptions::AlwaysShowHitbox())
-                    this->focusEffect =
-                        g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
+                this->focusEffect =
+                    g_EffectManager.SpawnEffect(24, &this->positionCenter, 2, 1, 0xffffffff);
                 goto CASE_OPTION_FOCUSING_2;
             }
             this->focusMovementTimer++;
@@ -2410,6 +2485,7 @@ WHY:
     arg->UpdateShots();
     arg->UpdateFireBulletTimer();
     arg->UpdateUI();
+    UpdateEaglerHitboxVm(arg);
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -2463,6 +2539,7 @@ u32 Player::OnDrawHighPrio(Player *arg)
 u32 Player::OnDrawLowPrio(Player *arg)
 {
     arg->DrawBulletExplosions();
+    DrawEaglerHitboxVm(arg);
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -2487,6 +2564,8 @@ ZunResult Player::AddedCallback(Player *arg)
 {
     PlayerBullet *bullet;
     i32 i;
+
+    g_EaglerHitboxVmActive = false;
 
     if (ShtData::LoadShtData(&arg->shooterData,
                              g_ShooterTable[g_GameManager.shotTypeAndCharacter]) != ZUN_SUCCESS)

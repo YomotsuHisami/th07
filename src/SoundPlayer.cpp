@@ -520,6 +520,15 @@ ZunResult SoundPlayer::StartBGM(const char *path)
 
     Supervisor::DebugPrint("Streming BGM Start\n");
     StopBGM();
+#ifdef __EMSCRIPTEN__
+    // Reset the WebAudio device boundary between Music Room/archive sources so
+    // a stale render quantum cannot be repeated while the next source opens.
+    if (this->engine)
+    {
+        ma_engine_stop(this->engine);
+        ma_engine_start(this->engine);
+    }
+#endif
 
     return ZUN_SUCCESS;
 }
@@ -582,8 +591,18 @@ ZunResult SoundPlayer::OpenOggBGM(const char *name)
     int channels = 0;
     int sampleRate = 0;
     short *decoded = NULL;
+    StopBGM();
+#ifdef __EMSCRIPTEN__
+    // Web OGG decoding is synchronous. Stop the old source and suspend the
+    // engine before decoding so a blocked main thread cannot make the browser
+    // repeat the last audio quantum while Music Room changes tracks.
+    ma_engine_stop(this->engine);
+#endif
     std::string fullPath = FileSystem::GetBasePath(oggPath);
     const int frames = stb_vorbis_decode_filename(fullPath.c_str(), &channels, &sampleRate, &decoded);
+#ifdef __EMSCRIPTEN__
+    ma_engine_start(this->engine);
+#endif
     if (frames <= 0 || !decoded || channels != 2 || sampleRate != 44100 ||
         static_cast<u64>(frames) * 4 > UINT32_MAX)
     {
@@ -602,7 +621,6 @@ ZunResult SoundPlayer::OpenOggBGM(const char *name)
         return ZUN_ERROR;
     }
 
-    StopBGM();
     this->oggPcmData = decoded;
     this->oggFormat = format;
     this->bgmDataSource = new ThBgmDataSource;

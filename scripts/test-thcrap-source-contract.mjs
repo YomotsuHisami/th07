@@ -16,6 +16,7 @@ const layout = read("dependencies/upstream-thcrap/thcrap_tsa/src/layout.cpp");
 const upstreamAscii = read("dependencies/upstream-thcrap/thcrap_tsa/src/ascii.cpp");
 const upstreamAsciiHeader = read("dependencies/upstream-thcrap/thcrap_tsa/src/ascii.hpp");
 const upstreamAnm = read("dependencies/upstream-thcrap/thcrap_tsa/src/anm.cpp");
+const upstreamMusic = read("dependencies/upstream-thcrap/thcrap_tsa/src/music.cpp");
 const upstreamStrings = read("dependencies/upstream-thcrap/thcrap/src/strings.cpp");
 const upstreamFileBp = read("dependencies/upstream-thcrap/thcrap/src/bp_file.cpp");
 const compiler = read("eagler-touhou/server/thcrap-compiler.mjs");
@@ -139,7 +140,7 @@ requireText(gameWindow, "g_Supervisor.SnapshotPng(snapshotPath);", "TH07 P-key P
 requireText(supervisor, "i32 Supervisor::SnapshotPng(const char *param_1)", "TH07 PNG snapshot implementation");
 requireText(supervisor, "this->gfxDevice->ReadPixels(0, 0, 640, 480, pixels);", "TH07 PNG 640x480 backbuffer read");
 requireText(supervisor, "IMG_SavePNG(surf, outputPath.c_str())", "TH07 PNG encoder");
-if (!/chainRes = g_Chain\.RunCalcChain\(\);\s*#ifdef TH_ENABLE_THCRAP[^]*?keyboard\[SDL_SCANCODE_P\][^]*?#endif\s*g_SoundPlayer\.ProcessQueues\(\);/m.test(gameWindow)) {
+if (!/chainRes = g_Chain\.RunCalcChain\(\);[^]*?#ifdef TH_ENABLE_THCRAP[^]*?keyboard\[SDL_SCANCODE_P\][^]*?#endif\s*g_SoundPlayer\.ProcessQueues\(\);/m.test(gameWindow)) {
   throw new Error("TH07 P-key snapshot sampling must remain at the fixed 60Hz calc boundary");
 }
 if (!/#ifdef TH_ENABLE_THCRAP[^]*?g_Supervisor\.SnapshotPng\(snapshotPath\);[^]*?#endif\s*g_Supervisor\.gfxDevice->SwapBuffers\(\);/m.test(gameWindow)) {
@@ -488,8 +489,12 @@ requireText(th07Version, '"0x43b403"', "TH07 music_cmt address #2");
 requireText(th07Patch, '"music_cmt#track": {\n\t\t\t"track": "ecx"', "TH07 Music Room comment track source");
 requireText(th07Patch, '"music_cmt#line_num": {\n\t\t\t"line_num": "eax"', "TH07 Music Room comment line source");
 requireText(th07Patch, '"format_id": "Music Room Numbered Title"', "TH07 Music Room numbered-title format selector");
-requireText(musicRoom, "for (i32 track = 1; track <= arg->numDescriptors; track++)", "portable Music Room one-based track loop");
-requireText(musicRoom, "const char *title = Localization::MusicTitle(track, descriptor.title);", "portable Music Room title lookup");
+requireText(upstreamMusic, "*str = str_rep;", "upstream Music Room direct comment pointer replacement");
+requireText(upstreamMusic, "*str = strings_sprintf(0, format, track_id_displayed, title);", "upstream Music Room dynamic numbered-title pointer replacement");
+requireText(upstreamMusic, "*str = title;", "upstream Music Room direct title pointer replacement");
+requireText(musicRoom, "MusicRoomTitleForDisplay", "portable render-time Music Room title lookup");
+requireText(musicRoom, "MusicRoomCommentForDisplay", "portable render-time Music Room comment lookup");
+requireText(musicRoom, "Localization::MusicTitle(static_cast<std::uint32_t>(track), descriptor.title)", "portable direct Music Room title pointer lookup");
 const musicPathWrite = 'arg->trackDescriptors[offset].path[charIdx] = *curChar;';
 const musicTitleWrite = 'arg->trackDescriptors[offset].title[charIdx] = *curChar;';
 const musicPathPos = musicRoom.indexOf(musicPathWrite);
@@ -504,13 +509,17 @@ const misplacedMusicAnd = musicRoom.indexOf("while (*curChar == '\\n' && *curCha
 if (misplacedMusicAnd >= 0 && misplacedMusicAnd < musicTitlePos) {
   throw new Error('TH07 Music Room parser contract regression: impossible AND moved before title parsing');
 }
-requireText(musicRoom, "for (i32 slot = 1; slot < 8; slot++)", "portable Music Room translated VM slot loop");
-requireText(musicRoom, "const i32 line = slot - 1;", "portable thcrap line to VM slot mapping");
 requireText(musicRoom, "Localization::MusicComment(", "portable Music Room comment lookup");
-requireText(musicRoom, "track, static_cast<std::uint16_t>(line), descriptor.description[slot]", "portable Music Room typed track/line lookup");
-requireText(musicRoom, 'std::strcmp(comment, "@") == 0', "portable Music Room numbered-title marker");
-requireText(musicRoom, '"No. %2u  %s", static_cast<unsigned>(track), descriptor.title', "portable Music Room numbered-title output");
-requireText(musicRoom, "VM slot N+1", "portable Music Room blank-slot mapping contract");
+requireText(musicRoom, "static_cast<std::uint16_t>(slot - 1)", "portable thcrap line to VM slot mapping");
+requireText(musicRoom, "if (!Localization::Active() || slot == 0)", "portable Music Room blank slot ownership");
+requireText(musicRoom, 'std::strcmp(comment, "@")', "portable Music Room numbered-title marker");
+requireText(musicRoom, '"No. %2u  ", static_cast<unsigned>(track)', "portable Music Room numbered-title prefix");
+requireText(musicRoom, "formatted += MusicRoomTitleForDisplay(descriptor, track);", "portable dynamic Music Room numbered-title output");
+if (musicRoom.includes("Localization::CopyText(descriptor.description") ||
+    musicRoom.includes("std::snprintf(descriptor.description") ||
+    musicRoom.includes("Localization::CopyText(descriptor.title")) {
+  throw new Error("TH07 Music Room must not pre-materialize translated UTF-8 into vanilla fixed-size TrackDescriptor buffers");
+}
 
 // Boss title/name textimages are one logical two-slot group. Upstream owns
 // logical slots 0x702/0x703 and 384x64 sprite rows, with Stage 4 selecting the
@@ -611,6 +620,29 @@ if (ending.includes("DrawInterp(&arg->sprites[i])") || ending.includes("prevEndi
   throw new Error("TH07 Ending must not reintroduce a second presentation-interpolation lifetime absent from original TH07");
 }
 
+// DrawEndingRect is an immediate surface draw followed in the same Ending
+// callback by normal ANM text/sprite draws. Portable's renderer caches the
+// currently bound ANM texture, so this direct path must flush queued sprites
+// and update currentTexture before binding the surface. Otherwise DrawInner can
+// falsely skip the next ANM BindTexture while the GPU still owns the Ending
+// background texture, producing alternating wrong-texture/flicker frames.
+const endingRectStart = anm.indexOf("void AnmManager::DrawEndingRect(");
+const screenshotStart = anm.indexOf("void AnmManager::TakeScreenshot(", endingRectStart);
+if (endingRectStart < 0 || screenshotStart < 0) throw new Error("TH07 DrawEndingRect bounds missing");
+const endingRect = anm.slice(endingRectStart, screenshotStart);
+for (const [needle, label] of [
+  ["this->Flush();", "Ending direct draw flush"],
+  ["this->currentTexture = this->surfaceTextures[surfaceIdx];", "Ending surface texture cache sync"],
+  ["g_Supervisor.gfxDevice->BindTexture(this->currentTexture);", "Ending synchronized surface bind"],
+]) requireText(endingRect, needle, label);
+const endingFlush = endingRect.indexOf("this->Flush();");
+const endingCache = endingRect.indexOf("this->currentTexture = this->surfaceTextures[surfaceIdx];");
+const endingBind = endingRect.indexOf("g_Supervisor.gfxDevice->BindTexture(this->currentTexture);");
+const endingDraw = endingRect.indexOf("DrawPrimitiveUP(PRIM_TRIANGLE_STRIP");
+if (!(endingFlush < endingCache && endingCache < endingBind && endingBind < endingDraw)) {
+  throw new Error("TH07 DrawEndingRect direct-draw/cache-sync order drifted");
+}
+
 // The original Demonstration label intentionally runs ANM script 7, whose
 // opcode 34 is ANM_INTERP_ALPHA. Keep that slow source animation. Portable
 // DrawInner additionally interpolates prevColor->color at presentation rate,
@@ -663,5 +695,10 @@ requireText(originalGui, "stringPos.x = 144.0f;", "original Stage Result x=144 b
 requireText(gui, 'Localization::AsciiString("Clear  = %8d")', "portable Stage Result lookup basis");
 requireText(gui, "200.0f - static_cast<f32>(std::strlen(clearFormat) * 8u)", "portable Stage Result x formula");
 requireText(gui, "th07 thcrap stage result align: localization=0", "Japanese Stage Result baseline audit");
+
+// The detailed assertions above are necessary but not sufficient: also fail
+// closed on the complete v1.00b site inventory and reverse portable consumer
+// inventory every time this normal contract entrypoint runs.
+await import('./audit-thcrap-proof-ledger.mjs');
 
 console.log("th07 thcrap source contract: PASS");

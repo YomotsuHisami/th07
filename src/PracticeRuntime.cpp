@@ -15,7 +15,10 @@
 #include "EnemyManager.hpp"
 #include "FileSystem.hpp"
 #include "GameManager.hpp"
+#include "GameWindow.hpp"
 #include "Gui.hpp"
+#include "ReplayExtension.hpp"
+#include "Player.hpp"
 #include "ReplayManager.hpp"
 #include "ScreenEffect.hpp"
 #include "SoundPlayer.hpp"
@@ -45,13 +48,20 @@ static Config g_Config;
 static Config g_MenuConfig = [] {
     Config config;
     config.mode = 1;
+    // THGuiPrac constructor defaults. Config{} itself must stay equivalent to
+    // THPracParam::Reset()/memset zero so live/replay resets cannot silently
+    // turn into menu defaults.
+    config.life = 8;
+    config.bomb = 8;
+    config.power = 128;
+    config.cherryMax = 200000;
+    config.rank = 16;
     return config;
 }();
 static MenuResult g_MenuResult = MenuResult::Waiting;
 static bool g_MenuOpen = false;
 static i32 g_MenuCursor = 0;
 static i32 g_MenuDifficulty = 0;
-static i32 g_MenuShotType = 0;
 static i32 g_MenuSectionIndex = 0;
 static i32 g_MenuChapter = 1;
 static constexpr i32 kMenuItemCount = 20;
@@ -68,13 +78,17 @@ static float g_MenuCloseStep = 0.1f;
 static MenuResult g_MenuPendingResult = MenuResult::Waiting;
 static bool g_ImGuiMenuFocusPending = false;
 static const char *g_ImGuiMenuFocusLabel = "Stage";
+static bool g_ImGuiMenuFocusRemembered = false;
 // THGuiRep keeps a candidate replay parameter block separate from live
 // thPracParam. State(2) only inspects the highlighted replay; State(3) marks
 // replay ownership active and copies the candidate if it was valid.
 static Config g_ReplayCandidate;
 static bool g_ReplayCandidateValid = false;
 static bool g_ReplayPlaybackActive = false;
-static std::string g_ReplayCandidateJson;
+// Portable-only one-shot handoff from THGuiRep::State(3) to the immediately
+// following Replay GameManager startup.  Upstream mRepStatus above is sticky
+// until State(1); this bridge is deliberately not.
+static bool g_ReplayStartupCommitted = false;
 #ifdef TH_ENABLE_THPRAC
 struct OverlayState
 {
@@ -89,6 +103,11 @@ struct OverlayState
     bool trackerOpen = false;
 };
 static OverlayState g_Overlay;
+// THOverlay::OnPreUpdate runs after THGuiPrac/THGuiRep in the same ImGui frame
+// and suppresses Backspace while any earlier item is active. Capture only the
+// 60 Hz chord edge at th07_update; consume it later in DrawOverlay.
+static bool g_ModMenuToggleRequested = false;
+static bool g_AdvancedMenuToggleRequested = false;
 struct AdvancedOptionsState
 {
     bool menuOpen = false;
@@ -97,12 +116,23 @@ struct AdvancedOptionsState
     bool showLicense = false;
 };
 static AdvancedOptionsState g_AdvancedOptions;
-static bool g_OverlayKeyDown[10] = {};
+static bool g_OverlayKeyDown[13] = {};
 #endif
 static i32 g_TrackerBorderBreaks = 0;
 static i32 g_EverlastingCurrentSong = -1;
 static bool g_SupervisorFadeOutScope = false;
 static bool g_ResurrectionButterflySpawnSkipPending = false;
+static bool g_ReplayUnsafeAssistUsedThisRun = false;
+
+void ResetReplayDeterminismUsage()
+{
+    g_ReplayUnsafeAssistUsedThisRun = false;
+}
+
+bool ReplayUnsafeAssistUsedThisRun()
+{
+    return g_ReplayUnsafeAssistUsedThisRun;
+}
 
 template <typename T> static T Clamp(T value, T minimum, T maximum)
 {
@@ -114,6 +144,32 @@ static void StoreWorkingMenuConfig()
     g_MenuConfig = g_Config;
     g_MenuConfig.active = false;
 }
+
+static int FormatPortableSessionJson(char *json, std::size_t size)
+{
+    return std::snprintf(json, size,
+        "{\"schema\":\"eagler-touhou/thprac-session/1\",\"game\":\"th07\",\"params\":{"
+        "\"mode\":%d,\"stage\":%d,\"warp\":%d,\"section\":%d,\"phase\":%d,\"frame\":%d,"
+        "\"dlg\":%s,\"score\":%lld,\"life\":%d,\"bomb\":%d,\"power\":%d,\"graze\":%d,"
+        "\"point\":%d,\"point_total\":%d,\"point_stage\":%d,\"cherry\":%d,\"cherryMax\":%d,"
+        "\"cherryPlus\":%d,\"spellBonus\":%d,\"rank\":%d,\"rankLock\":%s}}",
+        g_Config.mode, g_Config.stage, g_Config.warp, g_Config.section, g_Config.phase, g_Config.frame,
+        g_Config.dialogue ? "true" : "false", static_cast<long long>(g_Config.score), g_Config.life,
+        g_Config.bomb, g_Config.power, g_Config.graze, g_Config.point, g_Config.pointTotal,
+        g_Config.pointStage, g_Config.cherry, g_Config.cherryMax, g_Config.cherryPlus,
+        g_Config.spellBonus, g_Config.rank, g_Config.rankLock ? "true" : "false");
+}
+
+#if defined(THPRAC_PORTABLE_ENABLED)
+static bool PublishPortableSession()
+{
+    char json[2304];
+    const int length = FormatPortableSessionJson(json, sizeof(json));
+    if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(json))
+        return false;
+    return ThpracPortableTh07SetSessionJson(json);
+}
+#endif
 
 #ifdef __EMSCRIPTEN__
 static double HostNumber(const char *key, double fallback)
@@ -137,17 +193,9 @@ static bool HostBool(const char *key, bool fallback)
 static void PublishConfigToHost()
 {
     char json[2304];
-    std::snprintf(json, sizeof(json),
-        "{\"schema\":\"eagler-touhou/thprac-session/1\",\"game\":\"th07\",\"params\":{"
-        "\"mode\":%d,\"stage\":%d,\"warp\":%d,\"section\":%d,\"phase\":%d,\"frame\":%d,"
-        "\"dlg\":%s,\"score\":%lld,\"life\":%d,\"bomb\":%d,\"power\":%d,\"graze\":%d,"
-        "\"point\":%d,\"point_total\":%d,\"point_stage\":%d,\"cherry\":%d,\"cherryMax\":%d,"
-        "\"cherryPlus\":%d,\"spellBonus\":%d,\"rank\":%d,\"rankLock\":%s}}",
-        g_Config.mode, g_Config.stage, g_Config.warp, g_Config.section, g_Config.phase, g_Config.frame,
-        g_Config.dialogue ? "true" : "false", static_cast<long long>(g_Config.score), g_Config.life,
-        g_Config.bomb, g_Config.power, g_Config.graze, g_Config.point, g_Config.pointTotal,
-        g_Config.pointStage, g_Config.cherry, g_Config.cherryMax, g_Config.cherryPlus,
-        g_Config.spellBonus, g_Config.rank, g_Config.rankLock ? "true" : "false");
+    const int length = FormatPortableSessionJson(json, sizeof(json));
+    if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(json))
+        return;
     EM_ASM({
         Module.eaglerOptions = Module.eaglerOptions || {};
         Module.eaglerOptions.thpracSession = JSON.parse(UTF8ToString($0));
@@ -176,10 +224,11 @@ void SetConfig(const Config &config)
     g_Config.cherryMax = Clamp(g_Config.cherryMax, 0, 9999990);
     g_Config.cherryPlus = Clamp(g_Config.cherryPlus, 0, 50000);
     g_Config.spellBonus = Clamp(g_Config.spellBonus, 0, 30);
-    // Upstream permits 99 only while rank lock is enabled. Easy uses a
-    // narrower unlocked 12..20 range; the final difficulty-aware clamp is
-    // performed when the game state is available.
-    g_Config.rank = Clamp(g_Config.rank, 10, 99);
+    // THPracParam::Reset()/ReadJson() use rank==0 as a real sentinel: the
+    // th07_patch_main hook does not overwrite the game's current rank in that
+    // case.  Keep zero representable for Replay/compatibility paths.  The GUI
+    // widget itself enforces its normal difficulty-specific lower bound.
+    g_Config.rank = Clamp(g_Config.rank, 0, 99);
 }
 
 void RefreshFromHost()
@@ -194,8 +243,17 @@ void RefreshFromHost()
     // after this boundary by GameManager::AddedCallback.
     if (!g_GameManager.practice)
     {
+        // THGuiRep::State(3) has already accepted this Replay and, for a PRAC
+        // replay, copied mRepParam into live thPracParam. Replay startup must
+        // preserve both the ownership flag and that parameter payload.
+        if (g_ReplayStartupCommitted && g_GameManager.replay)
+            return;
+
         g_Config = {};
-        g_ReplayPlaybackActive = false;
+        // Do NOT clear g_ReplayPlaybackActive here. Upstream THGuiRep::mRepStatus
+        // is sticky and is cleared only by THGuiRep::State(1) when the Replay
+        // menu is entered again. Ordinary Start / Practice entry reset the live
+        // thPracParam but not that separate Replay-owner flag.
         EM_ASM({
             Module.eaglerOptions = Module.eaglerOptions || {};
             Module.eaglerOptions.thpracSession = null;
@@ -215,11 +273,17 @@ void RefreshFromHost()
     if (!active)
     {
         g_Config = {};
+#if defined(THPRAC_PORTABLE_ENABLED)
+        // Host/session absence is itself an ownership boundary.  Do not leave
+        // the previous adapter Session/PatchContext alive until a later ECL
+        // callback notices that the host is empty.
+        ThpracPortableTh07SetSessionJson(nullptr);
+#endif
         return;
     }
     Config config;
     config.active = true;
-    config.mode = static_cast<i32>(HostNumber("mode", 1));
+    config.mode = static_cast<i32>(HostNumber("mode", 0));
     config.stage = static_cast<i32>(HostNumber("stage", 0));
     config.warp = static_cast<i32>(HostNumber("warp", 0));
     config.section = static_cast<i32>(HostNumber("section", 0));
@@ -227,28 +291,39 @@ void RefreshFromHost()
     config.frame = static_cast<i32>(HostNumber("frame", 0));
     config.dialogue = HostBool("dlg", false);
     config.score = static_cast<i64>(HostNumber("score", 0));
-    config.life = static_cast<i32>(HostNumber("life", 8));
-    config.bomb = static_cast<i32>(HostNumber("bomb", 8));
-    config.power = static_cast<i32>(HostNumber("power", 128));
+    config.life = static_cast<i32>(HostNumber("life", 0));
+    config.bomb = static_cast<i32>(HostNumber("bomb", 0));
+    config.power = static_cast<i32>(HostNumber("power", 0));
     config.graze = static_cast<i32>(HostNumber("graze", 0));
     config.point = static_cast<i32>(HostNumber("point", 0));
     config.pointTotal = static_cast<i32>(HostNumber("point_total", 0));
     config.pointStage = static_cast<i32>(HostNumber("point_stage", 0));
     config.cherry = static_cast<i32>(HostNumber("cherry", 0));
-    config.cherryMax = static_cast<i32>(HostNumber("cherryMax", 200000));
+    config.cherryMax = static_cast<i32>(HostNumber("cherryMax", 0));
     config.cherryPlus = static_cast<i32>(HostNumber("cherryPlus", 0));
     config.spellBonus = static_cast<i32>(HostNumber("spellBonus", 0));
-    config.rank = static_cast<i32>(HostNumber("rank", 16));
+    config.rank = static_cast<i32>(HostNumber("rank", 0));
     config.rankLock = HostBool("rankLock", false);
     SetConfig(config);
 #else
-    if (g_ReplayPlaybackActive)
+    // State(3)'s THGuiRep replay ownership is a distinct sticky flag. Upstream
+    // clears it only in THGuiRep::State(1), not at arbitrary GameManager starts.
+    if (g_ReplayStartupCommitted && g_GameManager.replay)
         return;
+    // Once THGuiPrac::State(3) has committed live parameters, they remain the
+    // current thPracParam for the lifetime of this Practice run, including a
+    // GameManager reinitialization/restart. State(1) explicitly clears them
+    // before a new Practice selection flow.
+    if (g_GameManager.practice && g_Config.active)
+        return;
+    g_Config = {};
+#if defined(THPRAC_PORTABLE_ENABLED)
+    ThpracPortableTh07SetSessionJson(nullptr);
+#endif
     // TH07's live thPracParam is not a launcher/session-file setting. It is
     // reset when the real Practice UI is entered (THGuiPrac::State(1)) and
     // replay parameters are loaded only by THGuiRep. Ordinary desktop starts
     // therefore must not resurrect an old thprac-session.json payload.
-    g_Config.active = false;
 #endif
 }
 
@@ -315,11 +390,10 @@ i32 InitialBgmIndex()
 void FilterUnpauseInput()
 {
     // th07_unpause_prevent_desync: THGuiRep::mRepStatus is true for every
-    // replay once playback is accepted, not only for PRAC-tagged replays.
-    // Replays therefore retain the original input stream verbatim.  Normal
-    // gameplay clears Shoot when resuming inside skippable dialogue so the
-    // key used to leave Pause cannot advance the message / desync the run.
-    if (g_GameManager.replay)
+    // accepted replay, not only for PRAC-tagged replays. Do not substitute
+    // GameManager::replay for this owner: State(1)/State(3) define a separate
+    // lifetime in upstream THGuiRep.
+    if (g_ReplayPlaybackActive)
         return;
     if (g_Gui.IsDialogueSkippable() == 1)
     {
@@ -343,18 +417,24 @@ bool Enabled()
 
 void OpenPracticeMenu(i32 difficulty, i32 shotType)
 {
-    // Entering THGuiPrac is a new non-replay trainer flow. This also closes
-    // the stale replay-ownership lifetime after returning from playback.
-    g_ReplayPlaybackActive = false;
-    g_ReplayCandidateValid = false;
-    g_ReplayCandidateJson.clear();
+    // THGuiPrac::State(1) calls THReset(), but it does NOT modify THGuiRep's
+    // mRepStatus/mParamStatus/mRepParam members. Keep Replay ownership and the
+    // candidate object separate instead of "cleaning them up" on Practice
+    // entry; Replay State(1) is the only upstream reset boundary for them.
 #ifdef __EMSCRIPTEN__
-    RefreshFromHost();
-    if (g_Config.active)
-    {
-        g_MenuConfig = g_Config;
-        g_MenuConfig.active = false;
-    }
+    // THGuiPrac::State(1) calls THReset(): live thPracParam is cleared, while
+    // the window's widget members keep their own persistent values.  The host
+    // session mirrors live run state, so it must not be copied back into the
+    // persistent menu model on a fresh Practice entry.
+    EM_ASM({
+        Module.eaglerOptions = Module.eaglerOptions || {};
+        Module.eaglerOptions.thpracSession = null;
+    });
+#endif
+#if defined(THPRAC_PORTABLE_ENABLED)
+    // THReset() also sets thFakeShot=-1 upstream. Clearing the adapter session
+    // here owns the portable equivalent of that live patch-context reset.
+    ThpracPortableTh07SetSessionJson(nullptr);
 #endif
     // THGuiPrac::State(1) calls THReset() on the live thPracParam while its
     // widget members keep their previous values. Edit that persistent widget
@@ -364,10 +444,11 @@ void OpenPracticeMenu(i32 difficulty, i32 shotType)
 
     const i32 oldDifficulty = g_MenuDifficulty;
     g_MenuDifficulty = Clamp(difficulty, 0, 5);
+    // Exact State(1): oldRank is the previous persistent difficulty. When the
+    // difficulty crosses Easy <-> Normal+, SetBound changes and mRank is reset
+    // to 20/32 respectively. Same-band changes preserve the existing value.
     if (g_MenuDifficulty != oldDifficulty)
     {
-        // Exact TH07 State(1) rank transition: Easy defaults to 20 with an
-        // unlocked 12..20 range; Normal+ defaults to 32 with 10..32.
         if (oldDifficulty == 0 && g_MenuDifficulty > 0)
             g_Config.rank = 32;
         else if (oldDifficulty > 0 && g_MenuDifficulty == 0)
@@ -378,7 +459,7 @@ void OpenPracticeMenu(i32 difficulty, i32 shotType)
     g_Config.rank = Clamp(g_Config.rank, rankMin, rankMax);
     StoreWorkingMenuConfig();
 
-    g_MenuShotType = Clamp(shotType, 0, 5);
+    (void)shotType; // TH07 THGuiPrac has no shot-type state/widget owner.
     // mStage/mWarp/mSection/mChapter are persistent THGuiPrac widget members.
     // Do not reset their cursor state merely because State(1) reopened the
     // window; CurrentSection() re-synchronizes from g_MenuConfig on first use.
@@ -551,6 +632,9 @@ static void CommitMenuConfigToRuntime()
     StoreWorkingMenuConfig();
 
     g_Config.active = true;
+    // THGuiPrac::State(3) never writes THPracParam::warp. State(1)'s THReset
+    // leaves the live field at zero; Warp remains a persistent GUI selector.
+    g_Config.warp = 0;
     // State(1) THReset() happened before State(3), and State(3) only writes
     // dlg when SectionHasDlg() and phase when SpellPhase() exposes a selector.
     if (!(section && section->dialogue))
@@ -636,7 +720,10 @@ template <typename T> static void CycleGuiStep(GuiStepState<T> &step)
 static void RememberGuiFocus(const char *label)
 {
     if (label && (ImGui::IsItemFocusedAlt(label) || ImGui::IsItemFocused()))
+    {
         g_ImGuiMenuFocusLabel = label;
+        g_ImGuiMenuFocusRemembered = true;
+    }
 }
 
 template <typename T>
@@ -785,7 +872,8 @@ static void FinishPracticeNav()
     const bool focusPending = g_ImGuiMenuFocusPending;
     if (focusPending)
     {
-        g_ImGuiMenuFocusLabel = ThpracImGui::Text(ThpracImGui::TextId::Stage);
+        if (!g_ImGuiMenuFocusRemembered)
+            g_ImGuiMenuFocusLabel = ThpracImGui::Text(ThpracImGui::TextId::Stage);
         g_ImGuiMenuFocusPending = false;
     }
     if (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
@@ -952,8 +1040,13 @@ static void RequestMenuClose(MenuResult result, bool accept)
         CurrentSection();
         StoreWorkingMenuConfig();
         CommitMenuConfigToRuntime();
+#if defined(THPRAC_PORTABLE_ENABLED)
+        if (!PublishPortableSession())
+            g_Config.active = false;
+#endif
 #ifdef __EMSCRIPTEN__
-        PublishConfigToHost();
+        if (g_Config.active)
+            PublishConfigToHost();
 #endif
         // THGuiPrac::State(3): SetFade(.8,.8), Close().
         g_MenuCloseStep = 0.8f;
@@ -961,7 +1054,17 @@ static void RequestMenuClose(MenuResult result, bool accept)
     else
     {
         StoreWorkingMenuConfig();
-        g_Config.active = false;
+        // State(4) closes without committing widget members. State(1) already
+        // THReset() the live THPracParam, so Cancel must leave the live owner
+        // all-zero rather than retaining an inactive copy of menu defaults.
+        g_Config = {};
+        // THGuiPrac::State(4) alone clears mNavFocus. State(3) deliberately
+        // leaves it untouched, so accepted runs remember the last focused
+        // widget when Practice is opened again.
+#ifdef TH_ENABLE_THPRAC
+        g_ImGuiMenuFocusLabel = ThpracImGui::Text(ThpracImGui::TextId::Stage);
+#endif
+        g_ImGuiMenuFocusRemembered = false;
         // State(4) uses the normal .1 fade configured by State(1).
         g_MenuCloseStep = 0.1f;
     }
@@ -1051,6 +1154,10 @@ void DebugAcceptPracticeMenu()
     CurrentSection();
     StoreWorkingMenuConfig();
     CommitMenuConfigToRuntime();
+#if defined(THPRAC_PORTABLE_ENABLED)
+    if (!PublishPortableSession())
+        g_Config.active = false;
+#endif
     g_MenuOpen = false;
     g_MenuResult = MenuResult::Accepted;
 }
@@ -1103,7 +1210,10 @@ static void SetPointItems(GameManager &gameManager)
         globals.pointItemsCollectedThisStage = g_Config.pointStage;
         globals.pointItemsCollectedForExtend = g_Config.pointTotal;
     }
-    globals.extendsFromPointItems = 0;
+    // THSetPoint() explicitly recreates the original extend-threshold loop
+    // after overwriting point_stage/point_total. Preserve point_extends as the
+    // loop's starting owner; only increment it while the selected total has
+    // already crossed each threshold.
     while (true)
     {
         if (gameManager.difficulty >= 4)
@@ -1116,7 +1226,7 @@ static void SetPointItems(GameManager &gameManager)
             globals.nextNeededPointItemsForExtend = 75 * globals.extendsFromPointItems + 50;
         if (globals.pointItemsCollectedForExtend < globals.nextNeededPointItemsForExtend)
             break;
-        globals.extendsFromPointItems++;
+        ++globals.extendsFromPointItems;
     }
 }
 
@@ -1129,6 +1239,15 @@ void ApplyInitialState(GameManager &gameManager, bool applyStats)
         g_ResurrectionButterflySpawnSkipPending = false;
         return;
     }
+    // Upstream THSectionPatch() forces PLAYER->playerState back to ALIVE for
+    // every non-zero direct section/chapter patch before the patched ECL is
+    // allowed to run.  Player::RegisterChain has already initialized the
+    // vanilla spawn state by this point, so omitting this write leaves direct
+    // practice warps in the normal spawning/invulnerability lifecycle instead
+    // of the trainer's immediate-live state.
+    if (g_Config.section != 0)
+        g_Player.playerState = PLAYER_STATE_ALIVE;
+
     // Upstream THSectionPatch enables th07_rb only for TH07_ST6_BOSS10,
     // consumes it once, then self-disables. Portable section IDs are identical
     // to the generated patch IDs; Stage 6 is zero-based stage index 5 here.
@@ -1146,34 +1265,58 @@ void ApplyInitialState(GameManager &gameManager, bool applyStats)
         gameManager.cherry = gameManager.globals->cherryStart + g_Config.cherry;
         gameManager.cherryMax = gameManager.globals->cherryStart + g_Config.cherryMax;
         gameManager.cherryPlus = gameManager.globals->cherryStart + g_Config.cherryPlus;
-        const i32 rankMinimum = gameManager.difficulty == 0 ? 12 : 10;
-        const i32 rankMaximum = g_Config.rankLock ? 99 : gameManager.difficulty == 0 ? 20 : 32;
-        const i32 rank = Clamp(g_Config.rank, rankMinimum, rankMaximum);
-        gameManager.rank.rank = rank;
-        if (g_Config.rankLock)
-            gameManager.rank.minRank = gameManager.rank.maxRank = rank;
+        // Upstream th07_patch_main treats rank==0 as "leave vanilla rank
+        // alone".  Do not turn a missing/zero Replay field into the GUI's
+        // minimum rank.  Non-zero values are written exactly as the hook does;
+        // normal menu input has already been bounded by the widget.
+        if (g_Config.rank != 0)
+        {
+            gameManager.rank.rank = g_Config.rank;
+            if (g_Config.rankLock)
+                gameManager.rank.minRank = gameManager.rank.maxRank = g_Config.rank;
+        }
         gameManager.RegenerateGameIntegrityCsum();
     }
-    i32 frame = g_Config.frame;
-    if (frame == 0 && g_Config.section >= 10000)
-    {
-        const i32 encoded = g_Config.section - 10000;
-        frame = ResolveWarpFrame(encoded / 100 - 1, encoded % 100);
-    }
-    if (frame == 0)
-        frame = ResolveWarpFrame(g_Config.stage, g_Config.warp);
-    if (frame > 0)
-    {
-        // Match thprac's stage-3 background correction before jumping the ECL
-        // timelines, otherwise the enemies and background disagree.
-        if (g_Config.stage == 2 && g_AnmManager && g_AnmManager->anmFiles[5].raw)
+    auto applyStage3BackgroundPatch = []() {
+        // ECLST3BG() writes the currently loaded primary stage-background ANM
+        // slot (ANM_FILE_STAGE_BG1 == 5).  The helper name is historical: the
+        // direct-Frame path calls it unconditionally, while THStageWarp calls
+        // it only for Stage 3 chapters.
+        if (g_AnmManager && g_AnmManager->anmFiles[5].raw)
         {
             u16 *raw = reinterpret_cast<u16 *>(g_AnmManager->anmFiles[5].raw);
             raw[0xa0] = raw[0xd2] = raw[0x104] = raw[0x136] = 2;
         }
-        const i32 count = g_Config.stage == 1 ? 3 : 2;
-        for (i32 index = 0; index < count; index++)
-            g_EnemyManager.timelines[index].timelineTime.current = frame;
+    };
+
+    if (g_Config.frame > 0)
+    {
+        // th07_patch_main: direct Frame mode is exactly
+        //   ECLST3BG(); ECLTimeWarp(2, thPracParam.frame);
+        // It is independent from THStageWarp's Stage-2 three-timeline chapter
+        // special case.
+        applyStage3BackgroundPatch();
+        for (i32 index = 0; index < 2; index++)
+            g_EnemyManager.timelines[index].timelineTime.current = g_Config.frame;
+    }
+    else if (g_Config.section >= 10000 && g_Config.section < 20000)
+    {
+        // Chapter mode belongs to THStageWarp, whose timeline cardinality is
+        // different from direct Frame: only Stage 2 uses three timelines, and
+        // only Stage 3 calls ECLST3BG().  The chapter-only ECL byte mutations
+        // are applied by the portable adapter while the file is loaded.
+        const i32 encoded = g_Config.section - 10000;
+        const i32 chapterStage = encoded / 100 - 1;
+        const i32 portion = encoded % 100;
+        const i32 chapterFrame = ResolveWarpFrame(chapterStage, portion);
+        if (chapterFrame > 0)
+        {
+            if (chapterStage == 2)
+                applyStage3BackgroundPatch();
+            const i32 count = chapterStage == 1 ? 3 : 2;
+            for (i32 index = 0; index < count; index++)
+                g_EnemyManager.timelines[index].timelineTime.current = chapterFrame;
+        }
     }
 }
 
@@ -1218,7 +1361,7 @@ static bool LoadConfigJson(const std::string &json)
         return false;
     Config config;
     config.active = true;
-    config.mode = static_cast<i32>(JsonNumber(json, "mode", 1));
+    config.mode = static_cast<i32>(JsonNumber(json, "mode", 0));
     config.stage = static_cast<i32>(JsonNumber(json, "stage", 0));
     config.warp = static_cast<i32>(JsonNumber(json, "warp", 0));
     config.section = static_cast<i32>(JsonNumber(json, "section", 0));
@@ -1226,18 +1369,21 @@ static bool LoadConfigJson(const std::string &json)
     config.frame = static_cast<i32>(JsonNumber(json, "frame", 0));
     config.dialogue = JsonBool(json, "dlg", false);
     config.score = static_cast<i64>(JsonNumber(json, "score", 0));
-    config.life = static_cast<i32>(JsonNumber(json, "life", 8));
-    config.bomb = static_cast<i32>(JsonNumber(json, "bomb", 8));
-    config.power = static_cast<i32>(JsonNumber(json, "power", 128));
+    // THPracParam::ReadJson() memsets the parameter object to zero before
+    // parsing. Missing keys keep zero; they do not inherit Practice-menu
+    // defaults.
+    config.life = static_cast<i32>(JsonNumber(json, "life", 0));
+    config.bomb = static_cast<i32>(JsonNumber(json, "bomb", 0));
+    config.power = static_cast<i32>(JsonNumber(json, "power", 0));
     config.graze = static_cast<i32>(JsonNumber(json, "graze", 0));
     config.point = static_cast<i32>(JsonNumber(json, "point", 0));
     config.pointTotal = static_cast<i32>(JsonNumber(json, "point_total", 0));
     config.pointStage = static_cast<i32>(JsonNumber(json, "point_stage", 0));
     config.cherry = static_cast<i32>(JsonNumber(json, "cherry", 0));
-    config.cherryMax = static_cast<i32>(JsonNumber(json, "cherryMax", 200000));
+    config.cherryMax = static_cast<i32>(JsonNumber(json, "cherryMax", 0));
     config.cherryPlus = static_cast<i32>(JsonNumber(json, "cherryPlus", 0));
     config.spellBonus = static_cast<i32>(JsonNumber(json, "spellBonus", 0));
-    config.rank = static_cast<i32>(JsonNumber(json, "rank", 16));
+    config.rank = static_cast<i32>(JsonNumber(json, "rank", 0));
     config.rankLock = JsonBool(json, "rankLock", false);
     SetConfig(config);
     return true;
@@ -1290,15 +1436,16 @@ static bool WriteWholeFile(const char *path, const std::vector<u8> &bytes)
 
 static bool ExtractReplayMetadataJson(const std::vector<u8> &bytes, std::string &json)
 {
-    if (bytes.size() < 24 || std::memcmp(bytes.data(), "T7RP", 4) != 0 ||
-        std::memcmp(bytes.data() + bytes.size() - 4, "PRAC", 4) != 0)
+    const std::size_t baseSize = ReplayExtension::BaseFileSize(bytes.data(), bytes.size());
+    if (baseSize < 24 || std::memcmp(bytes.data(), "T7RP", 4) != 0 ||
+        std::memcmp(bytes.data() + baseSize - 4, "PRAC", 4) != 0)
         return false;
 
-    const u32 payloadSize = ReadLe32(bytes.data() + bytes.size() - 8);
+    const u32 payloadSize = ReadLe32(bytes.data() + baseSize - 8);
     if (payloadSize == 0 || payloadSize >= 512 || (payloadSize & 3u) != 0 ||
-        static_cast<std::size_t>(payloadSize) > bytes.size() - 8 - 16)
+        static_cast<std::size_t>(payloadSize) > baseSize - 8 - 16)
         return false;
-    const std::size_t payloadOffset = bytes.size() - 8 - payloadSize;
+    const std::size_t payloadOffset = baseSize - 8 - payloadSize;
     std::size_t jsonSize = 0;
     while (jsonSize < payloadSize && bytes[payloadOffset + jsonSize] != 0)
         ++jsonSize;
@@ -1317,10 +1464,20 @@ void ReplayMenuReset()
 {
     // THGuiRep::State(1): THReset(), mRepStatus=false, mParamStatus=false.
     g_ReplayPlaybackActive = false;
+    g_ReplayStartupCommitted = false;
     g_ReplayCandidateValid = false;
-    g_ReplayCandidate = {};
-    g_ReplayCandidateJson.clear();
+    // State(1) does not reset mRepParam. TH07 ReadJson() itself Reset()s before
+    // every successful parse, and CheckReplay() Reset()s it on failure, so the
+    // retained candidate bytes are normally unobservable while status=false;
+    // still preserve the exact ownership boundary rather than inventing an
+    // extra reset here.
     g_Config = {};
+#ifdef __EMSCRIPTEN__
+    EM_ASM({
+        Module.eaglerOptions = Module.eaglerOptions || {};
+        Module.eaglerOptions.thpracSession = null;
+    });
+#endif
 #if defined(THPRAC_PORTABLE_ENABLED)
     ThpracPortableTh07SetSessionJson(nullptr);
 #endif
@@ -1330,23 +1487,33 @@ bool ReplayMenuCheck(const char *replayPath)
 {
     // THGuiRep::State(2): inspect the selected replay into mRepParam without
     // mutating the live thPracParam / active ECL patch context.
-    g_ReplayCandidateValid = false;
-    g_ReplayCandidate = {};
-    g_ReplayCandidateJson.clear();
     if (!replayPath || !*replayPath)
+    {
+        g_ReplayCandidate = {};
         return false;
+    }
     std::vector<u8> bytes;
     std::string json;
     if (!ReadWholeFile(replayPath, bytes) || !ExtractReplayMetadataJson(bytes, json))
+    {
+        // CheckReplay() failure resets mRepParam but leaves mParamStatus
+        // untouched. This sticky flag is intentional source behavior.
+        g_ReplayCandidate = {};
         return false;
+    }
 
     const Config saved = g_Config;
     const bool parsed = LoadConfigJson(json);
     if (parsed)
     {
         g_ReplayCandidate = g_Config;
-        g_ReplayCandidateJson = json;
         g_ReplayCandidateValid = true;
+    }
+    else
+    {
+        g_ReplayCandidate = {};
+        // Do not clear g_ReplayCandidateValid: upstream leaves mParamStatus
+        // unchanged when mRepParam.ReadJson() fails.
     }
     g_Config = saved;
     return parsed;
@@ -1357,17 +1524,47 @@ void ReplayMenuActivate()
     // THGuiRep::State(3): mRepStatus becomes true for every accepted replay;
     // only a valid PRAC candidate is copied into live thPracParam.
     g_ReplayPlaybackActive = true;
+    g_ReplayStartupCommitted = true;
     if (g_ReplayCandidateValid)
     {
         g_Config = g_ReplayCandidate;
 #if defined(THPRAC_PORTABLE_ENABLED)
-        if (!ThpracPortableTh07SetSessionJson(g_ReplayCandidateJson.c_str()))
-            g_Config = {};
+        // Publish the already-resolved live THPracParam. The adapter is a
+        // consumer of State(3), not a second independent Replay parser.
+        if (g_Config.active)
+        {
+            if (!PublishPortableSession())
+                g_Config = {};
+        }
+        else
+        {
+            // Sticky mParamStatus + a later failed CheckReplay means State(3)
+            // copies a Reset() mRepParam. Represent that as no live adapter
+            // session, not an invented empty JSON payload.
+            ThpracPortableTh07SetSessionJson(nullptr);
+        }
+#endif
+#ifdef __EMSCRIPTEN__
+        if (g_Config.active)
+            PublishConfigToHost();
+        else
+        {
+            EM_ASM({
+                Module.eaglerOptions = Module.eaglerOptions || {};
+                Module.eaglerOptions.thpracSession = null;
+            });
+        }
 #endif
     }
     else
     {
         g_Config = {};
+#ifdef __EMSCRIPTEN__
+        EM_ASM({
+            Module.eaglerOptions = Module.eaglerOptions || {};
+            Module.eaglerOptions.thpracSession = null;
+        });
+#endif
 #if defined(THPRAC_PORTABLE_ENABLED)
         ThpracPortableTh07SetSessionJson(nullptr);
 #endif
@@ -1379,10 +1576,20 @@ bool ReplayPlaybackActive()
     return g_ReplayPlaybackActive;
 }
 
+bool ReplayStartupCommitted()
+{
+    return g_ReplayStartupCommitted;
+}
+
+void FinishReplayStartup()
+{
+    g_ReplayStartupCommitted = false;
+}
+
 bool OverlayInvincible()
 {
 #ifdef TH_ENABLE_THPRAC
-    return g_Overlay.invincible;
+    return !g_GameManager.replay && g_Overlay.invincible;
 #else
     return false;
 #endif
@@ -1390,7 +1597,7 @@ bool OverlayInvincible()
 bool OverlayInfiniteLives()
 {
 #ifdef TH_ENABLE_THPRAC
-    return g_Overlay.infiniteLives;
+    return !g_GameManager.replay && g_Overlay.infiniteLives;
 #else
     return false;
 #endif
@@ -1398,7 +1605,7 @@ bool OverlayInfiniteLives()
 bool OverlayInfiniteBombs()
 {
 #ifdef TH_ENABLE_THPRAC
-    return g_Overlay.infiniteBombs;
+    return !g_GameManager.replay && g_Overlay.infiniteBombs;
 #else
     return false;
 #endif
@@ -1406,7 +1613,7 @@ bool OverlayInfiniteBombs()
 bool OverlayInfinitePower()
 {
 #ifdef TH_ENABLE_THPRAC
-    return g_Overlay.infinitePower;
+    return !g_GameManager.replay && g_Overlay.infinitePower;
 #else
     return false;
 #endif
@@ -1414,7 +1621,7 @@ bool OverlayInfinitePower()
 bool OverlayTimeLock()
 {
 #ifdef TH_ENABLE_THPRAC
-    return g_Overlay.timeLock;
+    return !g_GameManager.replay && g_Overlay.timeLock;
 #else
     return false;
 #endif
@@ -1422,7 +1629,7 @@ bool OverlayTimeLock()
 bool OverlayAutoBomb()
 {
 #ifdef TH_ENABLE_THPRAC
-    return g_Overlay.autoBomb;
+    return !g_GameManager.replay && g_Overlay.autoBomb;
 #else
     return false;
 #endif
@@ -1439,7 +1646,7 @@ bool OverlayEverlastingBgm()
 bool AdvancedAllClearBonus()
 {
 #ifdef TH_ENABLE_THPRAC
-    return g_AdvancedOptions.allClearBonus;
+    return !g_GameManager.replay && g_AdvancedOptions.allClearBonus;
 #else
     return false;
 #endif
@@ -1505,11 +1712,54 @@ bool FilterAudioCommand(i32 opcode, i32 arg)
 }
 
 #ifdef TH_ENABLE_THPRAC
+static bool EaglerOverlayKeyDown(SDL_Scancode scancode)
+{
+#ifdef __EMSCRIPTEN__
+    i32 bit = -1;
+    switch (scancode)
+    {
+    case SDL_SCANCODE_BACKSPACE: bit = 0; break;
+    case SDL_SCANCODE_F1: bit = 1; break;
+    case SDL_SCANCODE_F2: bit = 2; break;
+    case SDL_SCANCODE_F3: bit = 3; break;
+    case SDL_SCANCODE_F4: bit = 4; break;
+    case SDL_SCANCODE_F5: bit = 5; break;
+    case SDL_SCANCODE_F6: bit = 6; break;
+    case SDL_SCANCODE_F7: bit = 7; break;
+    default: return false;
+    }
+    return EM_ASM_INT({
+        return !!(((Module.eaglerControls && Module.eaglerControls.thpracKeyboardBits) | 0) & (1 << $0));
+    }, bit) != 0;
+#else
+    (void)scancode;
+    return false;
+#endif
+}
+
+static void PublishEaglerOverlayMenuState(bool open)
+{
+#ifdef __EMSCRIPTEN__
+    static i32 last = -1;
+    const i32 value = open ? 1 : 0;
+    if (last == value)
+        return;
+    last = value;
+    EM_ASM({
+        Module.eaglerThpracMenuOpen = !!$0;
+        window.dispatchEvent(new CustomEvent("eagler-thprac-menu", { detail: { open: !!$0 } }));
+    }, value);
+#else
+    (void)open;
+#endif
+}
+
 static bool OverlayKeyPressed(i32 slot, SDL_Scancode scancode)
 {
     int count = 0;
     const bool *keys = SDL_GetKeyboardState(&count);
-    const bool down = keys && static_cast<int>(scancode) < count && keys[scancode];
+    const bool down = (keys && static_cast<int>(scancode) < count && keys[scancode]) ||
+                      EaglerOverlayKeyDown(scancode);
     const bool pressed = down && !g_OverlayKeyDown[slot];
     g_OverlayKeyDown[slot] = down;
     return pressed;
@@ -1519,16 +1769,16 @@ static bool OverlayKeyPressed(i32 slot, SDL_Scancode scancode)
 void UpdateOverlay()
 {
 #ifdef TH_ENABLE_THPRAC
-    if (OverlayKeyPressed(0, SDL_SCANCODE_BACKSPACE)) g_Overlay.menuOpen = !g_Overlay.menuOpen;
-    if (OverlayKeyPressed(1, SDL_SCANCODE_F1)) g_Overlay.invincible = !g_Overlay.invincible;
-    if (OverlayKeyPressed(2, SDL_SCANCODE_F2)) g_Overlay.infiniteLives = !g_Overlay.infiniteLives;
-    if (OverlayKeyPressed(3, SDL_SCANCODE_F3)) g_Overlay.infiniteBombs = !g_Overlay.infiniteBombs;
-    if (OverlayKeyPressed(4, SDL_SCANCODE_F4)) g_Overlay.infinitePower = !g_Overlay.infinitePower;
-    if (OverlayKeyPressed(5, SDL_SCANCODE_F5)) g_Overlay.timeLock = !g_Overlay.timeLock;
-    if (OverlayKeyPressed(6, SDL_SCANCODE_F6)) g_Overlay.autoBomb = !g_Overlay.autoBomb;
-    if (OverlayKeyPressed(7, SDL_SCANCODE_F7)) g_Overlay.everlastingBgm = !g_Overlay.everlastingBgm;
+    if (!g_GameManager.replay &&
+        (g_Overlay.invincible || g_Overlay.infiniteLives || g_Overlay.infiniteBombs ||
+         g_Overlay.infinitePower || g_Overlay.timeLock || g_Overlay.autoBomb ||
+         g_AdvancedOptions.allClearBonus))
+    {
+        g_ReplayUnsafeAssistUsedThisRun = true;
+    }
+    if (OverlayKeyPressed(0, SDL_SCANCODE_BACKSPACE)) g_ModMenuToggleRequested = true;
     if (OverlayKeyPressed(8, SDL_SCANCODE_TAB)) g_Overlay.trackerOpen = !g_Overlay.trackerOpen;
-    if (OverlayKeyPressed(9, SDL_SCANCODE_F12)) g_AdvancedOptions.menuOpen = !g_AdvancedOptions.menuOpen;
+    if (OverlayKeyPressed(9, SDL_SCANCODE_F12)) g_AdvancedMenuToggleRequested = true;
 #endif
 }
 
@@ -1537,8 +1787,35 @@ void DrawOverlay()
 #ifdef TH_ENABLE_THPRAC
     if (!ThpracImGui::IsFrameOpen())
         return;
+
+    // TH07 GameGuiEnd(drawCursor) requests the software cursor only for
+    // THAdvOptWnd or THGuiPrac, and the Win32 backend only draws it in real
+    // fullscreen where the OS cursor is hidden. THGuiRep is deliberately not
+    // part of drawCursor upstream.
+    const bool fullscreen = g_GameWindow.window != nullptr &&
+        (SDL_GetWindowFlags(g_GameWindow.window) & SDL_WINDOW_FULLSCREEN) != 0;
+    ImGui::GetIO().MouseDrawCursor = fullscreen &&
+        (g_AdvancedOptions.menuOpen || g_MenuOpen);
+    if (g_ModMenuToggleRequested)
+    {
+        if (!ImGui::IsAnyItemActive())
+            g_Overlay.menuOpen = !g_Overlay.menuOpen;
+        g_ModMenuToggleRequested = false;
+    }
+    PublishEaglerOverlayMenuState(g_Overlay.menuOpen);
     if (g_Overlay.menuOpen)
     {
+        // GuiHotKey F1..F7 are only evaluated from THOverlay::OnContentUpdate
+        // while the Mod Menu is open. Their key history intentionally does not
+        // advance while the window is closed.
+        if (OverlayKeyPressed(1, SDL_SCANCODE_F1)) g_Overlay.invincible = !g_Overlay.invincible;
+        if (OverlayKeyPressed(2, SDL_SCANCODE_F2)) g_Overlay.infiniteLives = !g_Overlay.infiniteLives;
+        if (OverlayKeyPressed(3, SDL_SCANCODE_F3)) g_Overlay.infiniteBombs = !g_Overlay.infiniteBombs;
+        if (OverlayKeyPressed(4, SDL_SCANCODE_F4)) g_Overlay.infinitePower = !g_Overlay.infinitePower;
+        if (OverlayKeyPressed(5, SDL_SCANCODE_F5)) g_Overlay.timeLock = !g_Overlay.timeLock;
+        if (OverlayKeyPressed(6, SDL_SCANCODE_F6)) g_Overlay.autoBomb = !g_Overlay.autoBomb;
+        if (OverlayKeyPressed(7, SDL_SCANCODE_F7)) g_Overlay.everlastingBgm = !g_Overlay.everlastingBgm;
+
         ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.5f);
         constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -1555,6 +1832,12 @@ void DrawOverlay()
             ImGui::Checkbox(ThpracImGui::Text(ThpracImGui::TextId::EverlastingBgm), &g_Overlay.everlastingBgm);
         }
         ImGui::End();
+    }
+    // THAdvOptWnd::StaticUpdate() runs after THOverlay::Update() upstream.
+    if (g_AdvancedMenuToggleRequested)
+    {
+        g_AdvancedOptions.menuOpen = !g_AdvancedOptions.menuOpen;
+        g_AdvancedMenuToggleRequested = false;
     }
     if (g_Overlay.trackerOpen && g_Supervisor.curState == 2 && g_GameManager.globals)
     {
@@ -1664,6 +1947,35 @@ void DrawOverlay()
         }
         ImGui::End();
     }
+
+    // Common GameGuiEnd language chord. As upstream, digit state is updated
+    // only while Alt is held and no current ImGui item owns input.
+    if (!ImGui::IsAnyItemActive())
+    {
+        int keyCount = 0;
+        const bool *keys = SDL_GetKeyboardState(&keyCount);
+        const bool alt = keys &&
+            ((static_cast<int>(SDL_SCANCODE_LALT) < keyCount && keys[SDL_SCANCODE_LALT]) ||
+             (static_cast<int>(SDL_SCANCODE_RALT) < keyCount && keys[SDL_SCANCODE_RALT]));
+        if (alt)
+        {
+            if (OverlayKeyPressed(10, SDL_SCANCODE_1))
+                ThpracImGui::RequestLocale(ThpracImGui::Locale::JaJP);
+            else if (OverlayKeyPressed(11, SDL_SCANCODE_2))
+                ThpracImGui::RequestLocale(ThpracImGui::Locale::ZhCN);
+            else if (OverlayKeyPressed(12, SDL_SCANCODE_3))
+                ThpracImGui::RequestLocale(ThpracImGui::Locale::EnUS);
+        }
+    }
+#endif
+}
+
+bool AdvancedOptionsOpen()
+{
+#ifdef TH_ENABLE_THPRAC
+    return g_AdvancedOptions.menuOpen;
+#else
+    return false;
 #endif
 }
 
@@ -1730,7 +2042,10 @@ bool LoadReplayMetadata(const char *replayPath)
 
 bool SaveReplayMetadata(const char *replayPath)
 {
-    if (!Active() || !replayPath || !*replayPath)
+    // Upstream th07_save_replay uses `if (thPracParam.mode) THSaveReplay`.
+    // Mode=Original is still an active Practice run, but its replay must stay
+    // vanilla and carry no PRAC metadata.
+    if (!AdvancedActive() || !replayPath || !*replayPath)
         return false;
     std::vector<u8> bytes;
     if (!ReadWholeFile(replayPath, bytes) || bytes.size() < 16 || std::memcmp(bytes.data(), "T7RP", 4) != 0)
@@ -1870,7 +2185,7 @@ bool DebugReplayMetadataRoundTrip(const char *replayPath)
     if (!LoadReplayMetadata(replayPath))
         return false;
     const Config &actual = GetConfig();
-    return actual.active == expected.active && actual.mode == expected.mode && actual.stage == expected.stage &&
+    const bool replayRoundTripStable = actual.active == expected.active && actual.mode == expected.mode && actual.stage == expected.stage &&
         actual.warp == expected.warp && actual.section == expected.section && actual.phase == expected.phase &&
         actual.frame == expected.frame && actual.dialogue == expected.dialogue && actual.score == expected.score &&
         actual.life == expected.life && actual.bomb == expected.bomb && actual.power == expected.power &&
@@ -1879,6 +2194,58 @@ bool DebugReplayMetadataRoundTrip(const char *replayPath)
         actual.cherryMax == expected.cherryMax && actual.cherryPlus == expected.cherryPlus &&
         actual.spellBonus == expected.spellBonus && actual.rank == expected.rank &&
         actual.rankLock == expected.rankLock;
+    if (!replayRoundTripStable)
+        return false;
+
+    // Regression for the reported cross-run degeneration: run the exact same
+    // persistent THGuiPrac selection through three fresh Practice lifetimes.
+    // State(1) must reset only live ownership, State(3) must republish the full
+    // parameter block, and leaving the run must clear live C++/adapter state
+    // without erasing the widget values used by the next round.
+    const i32 savedPractice = g_GameManager.practice;
+    const i32 savedReplay = g_GameManager.replay;
+    Config repeatedMenu;
+    repeatedMenu.mode = 1;
+    repeatedMenu.stage = 0;
+    repeatedMenu.warp = 5; // Spell
+    repeatedMenu.section = 4;
+    repeatedMenu.life = 5;
+    repeatedMenu.bomb = 4;
+    repeatedMenu.power = 96;
+    repeatedMenu.rank = 18;
+    g_MenuConfig = repeatedMenu;
+    g_ReplayPlaybackActive = false;
+    g_GameManager.replay = 0;
+    g_GameManager.practice = 1;
+    bool repeatedPracticeStable = true;
+    for (i32 round = 0; round < 3 && repeatedPracticeStable; round++)
+    {
+        OpenPracticeMenu(1, 0);
+        repeatedPracticeStable = !g_Config.active && g_Config.mode == repeatedMenu.mode &&
+            g_Config.stage == repeatedMenu.stage && g_Config.warp == repeatedMenu.warp &&
+            g_Config.power == repeatedMenu.power;
+        if (!repeatedPracticeStable)
+            break;
+
+        DebugAcceptPracticeMenu();
+        repeatedPracticeStable = g_Config.active && g_Config.mode == 1 && g_Config.stage == 0 &&
+            g_Config.section == 4 && g_Config.life == 5 && g_Config.bomb == 4 && g_Config.power == 96;
+        if (!repeatedPracticeStable)
+            break;
+
+        RefreshFromHost();
+        repeatedPracticeStable = g_Config.active && g_Config.section == 4 && g_Config.power == 96;
+        if (!repeatedPracticeStable)
+            break;
+
+        g_GameManager.practice = 0;
+        RefreshFromHost();
+        repeatedPracticeStable = !g_Config.active && g_MenuConfig.section == 4 && g_MenuConfig.power == 96;
+        g_GameManager.practice = 1;
+    }
+    g_GameManager.practice = savedPractice;
+    g_GameManager.replay = savedReplay;
+    return repeatedPracticeStable;
 #else
     (void)replayPath;
     return false;

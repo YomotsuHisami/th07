@@ -205,6 +205,7 @@ RenderResult GameWindow::Render()
 #else
     constexpr bool limitPresentationTo60 = false;
 #endif
+    const bool preserveReplayCadence = g_GameManager.replay != 0;
 #ifdef TH_DEV_TOOLS
     if (g_DevSpeedMultiplier > 1.0f)
         this->accumulator += elapsed * (g_DevSpeedMultiplier - 1.0f);
@@ -220,13 +221,14 @@ RenderResult GameWindow::Render()
 #ifndef __EMSCRIPTEN__
         const u64 calcStartNs = g_NativePerfTelemetry.enabled ? SDL_GetTicksNS() : 0;
 #endif
+        chainRes = g_Chain.RunCalcChain();
 #ifdef TH_ENABLE_THPRAC
-        // Upstream THOverlay hotkeys are sampled from the 60 Hz update hook.
-        // Keep their ownership on simulation ticks rather than presentation-only
-        // frames so Backspace/F1-F7/F12 timing matches the game clock.
+        // th07_update @ 0x42fdf8 is a one-byte hook in the tail of
+        // Chain::RunCalcChain (0x42fd60..0x42fe20), matching th07_render's
+        // tail hook in RunDrawChain. Trainer GUI/hotkey producers therefore
+        // run after this tick's game consumers, not before them.
         PracticeRuntime::UpdateOverlay();
 #endif
-        chainRes = g_Chain.RunCalcChain();
 #ifdef TH_ENABLE_THCRAP
         const bool *keyboard = SDL_GetKeyboardState(NULL);
         if (keyboard != nullptr && keyboard[SDL_SCANCODE_P] && g_ThcrapSnapshotRequests < 1000)
@@ -244,7 +246,7 @@ RenderResult GameWindow::Render()
         return chainRes;
     };
 
-    if (limitPresentationTo60)
+    if (limitPresentationTo60 || preserveReplayCadence)
     {
         if (this->accumulator >= targetDt)
         {
@@ -319,6 +321,9 @@ RenderResult GameWindow::Render()
 
     g_SuppressAnmAdvance = !updated;
 #ifdef TH_ENABLE_THPRAC
+    // GameGuiBegin(..., !THAdvOptWnd::IsOpen()): Advanced Options owns game
+    // navigation exclusively while open.
+    ThpracImGui::SetGameNavEnabled(!PracticeRuntime::AdvancedOptionsOpen());
     ThpracImGui::SetGameInput(g_CurFrameRawInput, updated);
     if (updated)
         ThpracImGui::BeginFrame(static_cast<f32>(targetDt));

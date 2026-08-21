@@ -1165,6 +1165,12 @@ i32 Gui::MsgWait()
     return this->impl->msg.currentMsgIdx >= 0;
 }
 
+i32 Gui::IsWaitingForPlayerAdvance()
+{
+    return this->impl != nullptr && this->impl->msg.currentMsgIdx >= 0 &&
+           this->impl->msg.curInstr != nullptr && this->impl->msg.curInstr->opcode == MSG_PAUSE;
+}
+
 i32 Gui::HasCurrentMsgIdx()
 {
     if (!this->impl)

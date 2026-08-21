@@ -108,6 +108,7 @@ struct Supervisor
     static u32 OnDraw(Supervisor *arg);
 
     void CheckTiming();
+    ZunResult CheckIntegrity(const char *version, i32 exeSize, i32 exeChecksum);
     static i32 CheckVSync();
     static void DrawFpsCounter(i32 param_1);
     i32 FadeOutMusic(f32 musicFadeFrames);

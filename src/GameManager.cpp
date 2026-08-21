@@ -179,6 +179,15 @@ u32 GameManager::OnUpdate(GameManager *arg)
     u32 i;
     i32 csum;
 
+    // Vanilla changed 1 -> 2 in OnDraw. With its one-calc/one-draw loop this
+    // was effectively a one-tick pause transition. High-refresh rendering can
+    // insert or delay presentation-only frames, so keep that timing owned by
+    // the fixed simulation chain instead of the display cadence.
+    if (arg->isInPauseMenu == 1)
+    {
+        arg->isInPauseMenu = 2;
+    }
+
     if (arg->isInRetryMenu == 0 && arg->isInPauseMenu == 0 && arg->demo == 0 &&
         (arg->slowModeSlowActive == 0 && WAS_PRESSED_RAW(TH_BUTTON_MENU)))
     {
@@ -350,10 +359,7 @@ u32 GameManager::OnUpdate(GameManager *arg)
 
 u32 GameManager::OnDraw(GameManager *arg)
 {
-    if (arg->isInPauseMenu)
-    {
-        arg->isInPauseMenu = 2;
-    }
+    (void)arg;
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -496,8 +502,9 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
     u32 size;
 
     Touch::ResetRunUsage();
+    PracticeRuntime::ResetReplayDeterminismUsage();
     PracticeRuntime::RefreshFromHost();
-    if (arg->replay && !PracticeRuntime::ReplayPlaybackActive())
+    if (arg->replay && !PracticeRuntime::ReplayStartupCommitted())
         PracticeRuntime::LoadReplayMetadata(arg->replayFilename);
     PracticeRuntime::PrepareStart(*arg);
 
@@ -775,11 +782,6 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
         return ZUN_ERROR;
     }
 
-    // Apply sidecar-backed practice state after the original replay loader.
-    // Ordinary replays leave PracticeRuntime inactive and are unchanged.
-    PracticeRuntime::ApplyInitialState(*arg, true);
-    RuntimeExtension::OnGameStarted(arg);
-
     if (!g_GameManager.replay)
     {
         ReplayManager::RegisterChain(0, "replay/th7_00.rpy");
@@ -814,12 +816,25 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
         g_Supervisor.fpsAccumulator = 0.0f;
     }
     arg->isTimeStopped = 0;
-    if (!PracticeRuntime::Active())
-        arg->globals->score = 0;
+    arg->globals->score = 0;
     arg->finished = 0;
     g_AsciiManager.InitializeVms();
     g_GameManager.slowModeSlowActive = 0;
     Supervisor::DrawFpsCounter(0);
+
+    // th07_patch_main is installed at 0x42f2e3, the final boundary of the
+    // original AddedCallback.  Apply trainer stats and runtime section side
+    // effects only after every vanilla initialization/write above has run.
+    // This keeps Replay/BGM/init code observing the same pre-patch state as
+    // upstream instead of compensating for an early write by skipping vanilla
+    // resets such as globals->score = 0.
+    PracticeRuntime::ApplyInitialState(*arg, true);
+    // Consume only the portable State(3)->GameManager handoff. The upstream
+    // THGuiRep::mRepStatus owner deliberately remains sticky until Replay
+    // State(1) and still gates unpause behavior later.
+    PracticeRuntime::FinishReplayStartup();
+    RuntimeExtension::OnGameStarted(arg);
+
     Supervisor::DebugPrint("random seed %d %d\n", (u32)g_Rng.seed, g_Rng.GetGenCount());
     return ZUN_SUCCESS;
 }

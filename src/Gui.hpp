@@ -217,6 +217,7 @@ struct Gui
     void FreeMsgFile();
     i32 HasCurrentMsgIdx();
     i32 IsDialogueSkippable();
+    i32 IsWaitingForPlayerAdvance();
     i32 IsStageFinished();
     ZunResult LoadMsg(const char *param_1);
     void MsgRead(i32 param_1);

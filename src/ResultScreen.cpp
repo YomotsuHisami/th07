@@ -13,6 +13,8 @@
 #include "GameManager.hpp"
 #include "GameWindow.hpp"
 #include "Localization.hpp"
+#include "PracticeRuntime.hpp"
+#include "ReplayExtension.hpp"
 #include "Rng.hpp"
 #include "SoundPlayer.hpp"
 #include "Touch.hpp"
@@ -1315,13 +1317,12 @@ ZunResult ResultScreen::HandleReplaySaveKeyboard()
     case 11:
         if (this->frameTimer == 60)
         {
-            if (g_Supervisor.IsSlowMode() || (g_Supervisor.flags >> 3 & 1) != 0)
+            if (g_Supervisor.IsSlowMode() || (g_Supervisor.flags >> 3 & 1) != 0 ||
+                PracticeRuntime::ReplayUnsafeAssistUsedThisRun())
             {
                 interrupt = 19;
             }
-            else if (g_GameManager.globals->numRetries != 0 ||
-                     Touch::WasUsedThisRun()) // it probably goes without saying that the touch mode
-                                              // is wholly incompatible with replays
+            else if (g_GameManager.globals->numRetries != 0)
             {
                 interrupt = 14;
             }
@@ -1418,9 +1419,18 @@ ZunResult ResultScreen::HandleReplaySaveKeyboard()
                 replayFile = (ReplayFile *)FileSystem::OpenFile(replayPath.c_str(), 1);
                 if (!replayFile)
                 {
-                    continue;
+                    snprintf(filename, sizeof(filename), "th7_%.2d.rpyx", vmIdx + 1);
+                    replayPath = FileSystem::GetPrefPath("replay") + "/" + filename;
+                    replayFile = (ReplayFile *)FileSystem::OpenFile(replayPath.c_str(), 1);
+                    if (!replayFile)
+                        continue;
                 }
 
+                if (!ReplayExtension::MatchesPath(replayPath.c_str(), reinterpret_cast<const u8 *>(replayFile), g_LastFileSize))
+                {
+                    free(replayFile);
+                    continue;
+                }
                 replayFile = ReplayManager::ValidateReplayData(replayFile, g_LastFileSize);
                 if (replayFile)
                 {
@@ -2120,7 +2130,7 @@ ZunResult ResultScreen::DrawFinalStats()
             slowdown = 1.0f;
         }
 
-        slowdown = Touch::WasUsedThisRun() ? 100.0f : (1.0f - slowdown) * 100.0f;
+        slowdown = Touch::UsedCheatMovementThisRun() ? 100.0f : (1.0f - slowdown) * 100.0f;
 
         pos.y += 22.0f;
         AsciiManager::AddFormatText(&g_AsciiManager, &pos, "    %3.2f%%", slowdown);

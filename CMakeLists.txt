@@ -45,6 +45,7 @@ set(SOURCES
     src/MidiOutput.cpp
     src/MusicRoom.cpp
     src/Player.cpp
+    src/ReplayExtension.cpp
     src/ReplayManager.cpp
     src/ResultScreen.cpp
     src/Rng.cpp

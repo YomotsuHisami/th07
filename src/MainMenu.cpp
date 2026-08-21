@@ -15,6 +15,7 @@
 #include "GameErrorContext.hpp"
 #include "GameManager.hpp"
 #include "Localization.hpp"
+#include "ReplayExtension.hpp"
 #include "ReplayManager.hpp"
 #include "PracticeRuntime.hpp"
 #include "ScreenEffect.hpp"
@@ -1756,6 +1757,15 @@ u32 MainMenu::OnUpdateSelectPracticeStage()
     {
         if (this->stateTimer == 0)
         {
+            // The vanilla STATE_SELECT_PRACTICE_STAGE state owns this write at
+            // its stateTimer==0 boundary.  Our thprac branch intercepts before
+            // the vanilla block below, so preserve that original lifecycle
+            // side effect explicitly.  This matters after returning from a
+            // Practice run: MainMenu::AddedCallback clears
+            // g_GameManager.practice and remembers the route only in
+            // isPracticeMode; the stage-select state is what re-arms the live
+            // Practice owner for the next run.
+            g_GameManager.practice = 1;
             PracticeRuntime::OpenPracticeMenu(g_Supervisor.cfg.defaultDifficulty,
                                               g_GameManager.character * 2 + g_GameManager.shotType);
 
@@ -1781,8 +1791,16 @@ u32 MainMenu::OnUpdateSelectPracticeStage()
             return CHAIN_CALLBACK_RESULT_CONTINUE;
         case PracticeRuntime::MenuResult::Accepted:
             g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
-            g_GameManager.difficulty = g_Supervisor.cfg.defaultDifficulty;
             g_GameManager.currentStage = PracticeRuntime::GetConfig().stage;
+            // Upstream th07_prac_menu_3 owns this state write after
+            // THGuiPrac::State(3): Extra and Phantasm are not allowed to
+            // inherit the normal menu difficulty.
+            if (g_GameManager.currentStage == 6)
+                g_GameManager.difficulty = 4;
+            else if (g_GameManager.currentStage == 7)
+                g_GameManager.difficulty = 5;
+            else
+                g_GameManager.difficulty = g_Supervisor.cfg.defaultDifficulty;
             g_Supervisor.curState = 2;
             g_GameManager.replay = 0;
             g_Supervisor.StopAudio();
@@ -1907,8 +1925,9 @@ u32 MainMenu::OnUpdateSelectPracticeStage()
 
 bool ReplayFileMatches(const std::string &name)
 {
-    return name.size() == 14 && name.compare(0, 6, "th7_ud") == 0 &&
-           name.compare(10, 4, ".rpy") == 0;
+    return name.compare(0, 6, "th7_ud") == 0 &&
+           ((name.size() == 14 && name.compare(10, 4, ".rpy") == 0) ||
+            (name.size() == 15 && name.compare(10, 5, ".rpyx") == 0));
 }
 
 u32 MainMenu::OnUpdateSelectReplay()
@@ -1943,9 +1962,18 @@ u32 MainMenu::OnUpdateSelectReplay()
                 file = (ReplayFile *)FileSystem::OpenFile(replayPath.c_str(), 1);
                 if (!file)
                 {
-                    continue;
+                    snprintf(filename, sizeof(filename), "th7_%.2d.rpyx", i + 1);
+                    replayPath = FileSystem::GetPrefPath("replay") + "/" + filename;
+                    file = (ReplayFile *)FileSystem::OpenFile(replayPath.c_str(), 1);
+                    if (!file)
+                        continue;
                 }
 
+                if (!ReplayExtension::MatchesPath(replayPath.c_str(), reinterpret_cast<const u8 *>(file), g_LastFileSize))
+                {
+                    free(file);
+                    continue;
+                }
                 file = ReplayManager::ValidateReplayData(file, g_LastFileSize);
                 if (file)
                 {
@@ -1981,6 +2009,12 @@ u32 MainMenu::OnUpdateSelectReplay()
                     (FileSystem::GetPrefPath("replay") + "/" + filename).c_str(), 1);
                 if (!file)
                 {
+                    continue;
+                }
+                const std::string replayPath = FileSystem::GetPrefPath("replay") + "/" + filename;
+                if (!ReplayExtension::MatchesPath(replayPath.c_str(), reinterpret_cast<const u8 *>(file), g_LastFileSize))
+                {
+                    free(file);
                     continue;
                 }
                 file = ReplayManager::ValidateReplayData(file, g_LastFileSize);

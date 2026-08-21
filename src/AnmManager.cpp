@@ -2617,7 +2617,15 @@ void AnmManager::DrawEndingRect(i32 surfaceIdx, f32 rectX, f32 rectY, f32 rectLe
     SDL_Surface *surf =
         this->surfaces[surfaceIdx] ? this->surfaces[surfaceIdx] : this->surfacesBis[surfaceIdx];
 
-    g_Supervisor.gfxDevice->BindTexture(this->surfaceTextures[surfaceIdx]);
+    // Ending background blits bypass the normal ANM sprite path and draw
+    // immediately.  Flush any queued sprites before changing the real GPU
+    // binding, then keep AnmManager's texture cache in lockstep with it.
+    // Otherwise the first Ending text/ANM sprite can see a stale cached ANM
+    // texture and skip BindTexture even though the GPU still has the Ending
+    // surface bound, producing alternating wrong-texture frames/flicker.
+    this->Flush();
+    this->currentTexture = this->surfaceTextures[surfaceIdx];
+    g_Supervisor.gfxDevice->BindTexture(this->currentTexture);
 
     VertexTex1DiffuseXyzrhw vertices[4];
     f32 drawWidth = width;

@@ -1,3 +1,4 @@
+#include "EaglerOptions.hpp"
 #include "Controller.hpp"
 
 #include <SDL3/SDL.h>
@@ -186,7 +187,30 @@ u16 Controller::GetInput()
         buttons |= KEY_PRESSED(SDL_SCANCODE_RETURN, TH_BUTTON_ENTER);
     }
 
-    return GetControllerInput(buttons) | Touch::GetButtonBits();
+    buttons |= EaglerOptions::BrowserKeyboardBits();
+    buttons |= EaglerOptions::BrowserGamepadDirectionBits();
+    if (g_EnterSuppressed)
+        buttons &= ~TH_BUTTON_ENTER;
+
+    buttons = GetControllerInput(buttons);
+    if (EaglerOptions::TouchEnabled() && EaglerOptions::TouchMovementIsJoystick())
+    {
+        // Match the existing TH07 SDL gamepad path exactly: convert the raw
+        // signed axis to the game's approximately -1000..1000 scale, then use
+        // the user's original padAxis thresholds. Replay only sees the final
+        // UP/DOWN/LEFT/RIGHT bits, so wheel movement is replay-compatible.
+        const Sint16 x = EaglerOptions::TouchJoystickX() / 32.767f;
+        const Sint16 y = EaglerOptions::TouchJoystickY() / 32.767f;
+        if (x > g_Supervisor.cfg.padAxisX)
+            buttons |= TH_BUTTON_RIGHT;
+        if (x < -g_Supervisor.cfg.padAxisX)
+            buttons |= TH_BUTTON_LEFT;
+        if (y > g_Supervisor.cfg.padAxisY)
+            buttons |= TH_BUTTON_DOWN;
+        if (y < -g_Supervisor.cfg.padAxisY)
+            buttons |= TH_BUTTON_UP;
+    }
+    return buttons | Touch::GetButtonBits();
 }
 
 void Controller::SetEnterSuppressed(bool suppressed)
@@ -196,5 +220,6 @@ void Controller::SetEnterSuppressed(bool suppressed)
 
 void Controller::ResetKeyboard()
 {
+    EaglerOptions::ResetBrowserKeyboard();
     SDL_ResetKeyboard();
 }
