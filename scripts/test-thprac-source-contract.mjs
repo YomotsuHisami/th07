@@ -23,6 +23,7 @@ const portableGui = read('th07-eagler/src/Gui.cpp');
 const portableSupervisor = read('th07-eagler/src/Supervisor.cpp');
 const portableCmake = read('th07-eagler/CMakeLists.txt');
 const portableReplay = read('th07-eagler/src/ReplayManager.cpp');
+const portableResult = read('th07-eagler/src/ResultScreen.cpp');
 const portableImGui = read('th07-eagler/src/ThpracImGui.cpp');
 const portableSession = read('thprac-reallyportable/portable/src/session.cpp');
 const portableAdapter = read('thprac-reallyportable/portable/adapters/th07/adapter.cpp');
@@ -647,6 +648,9 @@ if (!portableReplay.includes('PracticeRuntime::SaveReplayMetadata('))
 if (!upstream.includes('if (thPracParam.mode)\n            THSaveReplay(rep_name);') ||
     !portable.includes('if (!AdvancedActive() || !replayPath || !*replayPath)'))
     throw new Error('Portable TH07 replay metadata save must follow upstream thPracParam.mode gate');
+if (portable.includes('ReplayUnsafeAssistUsedThisRun') ||
+    portableResult.includes('ReplayUnsafeAssistUsedThisRun'))
+    throw new Error('Portable TH07 must not add an assist-based replay-save ban absent from upstream thprac');
 if (!portableSession.includes('const bool upstreamSchema = json.find("\\\"version\\\":") != std::string::npos;') ||
     !portableSession.includes('(!portableSchema && !upstreamSchema)'))
     throw new Error('TH07 adapter no longer accepts upstream version/game PRAC metadata JSON');

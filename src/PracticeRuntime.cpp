@@ -122,18 +122,6 @@ static i32 g_TrackerBorderBreaks = 0;
 static i32 g_EverlastingCurrentSong = -1;
 static bool g_SupervisorFadeOutScope = false;
 static bool g_ResurrectionButterflySpawnSkipPending = false;
-static bool g_ReplayUnsafeAssistUsedThisRun = false;
-
-void ResetReplayDeterminismUsage()
-{
-    g_ReplayUnsafeAssistUsedThisRun = false;
-}
-
-bool ReplayUnsafeAssistUsedThisRun()
-{
-    return g_ReplayUnsafeAssistUsedThisRun;
-}
-
 template <typename T> static T Clamp(T value, T minimum, T maximum)
 {
     return std::max(minimum, std::min(maximum, value));
@@ -1769,13 +1757,6 @@ static bool OverlayKeyPressed(i32 slot, SDL_Scancode scancode)
 void UpdateOverlay()
 {
 #ifdef TH_ENABLE_THPRAC
-    if (!g_GameManager.replay &&
-        (g_Overlay.invincible || g_Overlay.infiniteLives || g_Overlay.infiniteBombs ||
-         g_Overlay.infinitePower || g_Overlay.timeLock || g_Overlay.autoBomb ||
-         g_AdvancedOptions.allClearBonus))
-    {
-        g_ReplayUnsafeAssistUsedThisRun = true;
-    }
     if (OverlayKeyPressed(0, SDL_SCANCODE_BACKSPACE)) g_ModMenuToggleRequested = true;
     if (OverlayKeyPressed(8, SDL_SCANCODE_TAB)) g_Overlay.trackerOpen = !g_Overlay.trackerOpen;
     if (OverlayKeyPressed(9, SDL_SCANCODE_F12)) g_AdvancedMenuToggleRequested = true;

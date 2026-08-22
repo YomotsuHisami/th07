@@ -502,7 +502,6 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
     u32 size;
 
     Touch::ResetRunUsage();
-    PracticeRuntime::ResetReplayDeterminismUsage();
     PracticeRuntime::RefreshFromHost();
     if (arg->replay && !PracticeRuntime::ReplayStartupCommitted())
         PracticeRuntime::LoadReplayMetadata(arg->replayFilename);

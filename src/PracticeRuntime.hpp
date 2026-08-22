@@ -59,8 +59,6 @@ bool OverlayInfinitePower();
 bool OverlayTimeLock();
 bool OverlayAutoBomb();
 bool OverlayEverlastingBgm();
-void ResetReplayDeterminismUsage();
-bool ReplayUnsafeAssistUsedThisRun();
 bool AdvancedAllClearBonus();
 bool AdvancedFixSpellBonusDisplay();
 bool ConsumeResurrectionButterflySpawnSkip();

@@ -1317,8 +1317,7 @@ ZunResult ResultScreen::HandleReplaySaveKeyboard()
     case 11:
         if (this->frameTimer == 60)
         {
-            if (g_Supervisor.IsSlowMode() || (g_Supervisor.flags >> 3 & 1) != 0 ||
-                PracticeRuntime::ReplayUnsafeAssistUsedThisRun())
+            if (g_Supervisor.IsSlowMode() || (g_Supervisor.flags >> 3 & 1) != 0)
             {
                 interrupt = 19;
             }
