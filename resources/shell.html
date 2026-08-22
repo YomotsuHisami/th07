@@ -234,6 +234,7 @@
         for (const key of ["thpracEnabled", "limitPresentationTo60", "touchEnabled", "unlimitedTouch", "touchBombZoneEnabled", "doubleTapBombEnabled", "alwaysHitbox", "th06FocusHitbox"]) {
           if (options[key] != null && typeof options[key] !== "boolean") throw new Error("invalid eagler-touhou option");
         }
+        if (options.touchSensitivity != null && (!Number.isFinite(options.touchSensitivity) || options.touchSensitivity < 50 || options.touchSensitivity > 300)) throw new Error("invalid touch sensitivity");
         if (options.touchMovementMode != null && !["joystick", "joystick-free", "touch", "touch-unlimited"].includes(options.touchMovementMode)) throw new Error("invalid touch movement mode");
         if (options.touchFocusMode != null && !["two-finger", "hold-button", "toggle-button"].includes(options.touchFocusMode)) throw new Error("invalid touch focus mode");
         if (options.thpracLocale != null && !["zh-CN", "ja-JP", "en-US"].includes(options.thpracLocale)) throw new Error("invalid thprac locale");
@@ -250,6 +251,7 @@
           limitPresentationTo60: !!options.limitPresentationTo60,
           touchEnabled: !!options.touchEnabled,
           touchMovementMode: options.touchMovementMode || "touch",
+          touchSensitivity: options.touchSensitivity ?? 100,
           touchFocusMode: options.touchFocusMode || "two-finger",
           unlimitedTouch: !!options.touchEnabled && (options.touchMovementMode === "touch-unlimited" || !!options.unlimitedTouch),
           touchBombZoneEnabled: options.touchBombZoneEnabled !== false,
@@ -445,8 +447,9 @@
           case "launch": launch(); reply(message.request, true); break;
           case "touch-controls":
             if (typeof message.fireEnabled !== "boolean" || typeof message.focusEnabled !== "boolean" || !Number.isInteger(message.bombSerial) || !Number.isInteger(message.escapeSerial) ||
-                !Number.isInteger(message.joystickX) || !Number.isInteger(message.joystickY) || message.joystickX < -32768 || message.joystickX > 32767 || message.joystickY < -32768 || message.joystickY > 32767) throw new Error("invalid touch controls");
-            Module.eaglerControls.fireEnabled = message.fireEnabled; Module.eaglerControls.focusEnabled = message.focusEnabled; Module.eaglerControls.bombSerial = message.bombSerial; Module.eaglerControls.escapeSerial = message.escapeSerial; Module.eaglerControls.joystickX = message.joystickX; Module.eaglerControls.joystickY = message.joystickY;
+                !Number.isInteger(message.joystickX) || !Number.isInteger(message.joystickY) || message.joystickX < -32768 || message.joystickX > 32767 || message.joystickY < -32768 || message.joystickY > 32767 ||
+                !Number.isFinite(message.touchSensitivity) || message.touchSensitivity < 50 || message.touchSensitivity > 300) throw new Error("invalid touch controls");
+            Module.eaglerControls.fireEnabled = message.fireEnabled; Module.eaglerControls.focusEnabled = message.focusEnabled; Module.eaglerControls.bombSerial = message.bombSerial; Module.eaglerControls.escapeSerial = message.escapeSerial; Module.eaglerControls.joystickX = message.joystickX; Module.eaglerControls.joystickY = message.joystickY; Module.eaglerOptions.touchSensitivity = message.touchSensitivity;
             reply(message.request, true); break;
           case "keyboard":
             if (typeof message.down !== "boolean" || typeof message.code !== "string" || typeof message.key !== "string" || !Number.isInteger(message.keyCode) || !Number.isInteger(message.location)) throw new Error("invalid keyboard bridge event");
@@ -476,7 +479,7 @@
         canvas: document.getElementById("canvas"),
         locateFile: path => assetVersion ? `${path}?v=${encodeURIComponent(assetVersion)}` : path,
         touhouMusicMode: "",
-      eaglerOptions: { thpracEnabled: false, limitPresentationTo60: false, touchEnabled: false, touchMovementMode: "touch", touchFocusMode: "hold-button", unlimitedTouch: false, touchBombZoneEnabled: true, doubleTapBombEnabled: false, alwaysHitbox: false, th06FocusHitbox: false, thpracLocale: "en-US", thpracSession: null },
+      eaglerOptions: { thpracEnabled: false, limitPresentationTo60: false, touchEnabled: false, touchMovementMode: "touch", touchSensitivity: 100, touchFocusMode: "hold-button", unlimitedTouch: false, touchBombZoneEnabled: true, doubleTapBombEnabled: false, alwaysHitbox: false, th06FocusHitbox: false, thpracLocale: "en-US", thpracSession: null },
         eaglerControls: { fireEnabled: true, focusEnabled: false, bombSerial: 0, escapeSerial: 0, joystickX: 0, joystickY: 0, keyboardBits: 0, keyboardPulseBits: 0, thpracKeyboardBits: 0 },
         preRun: [() => {
           addRunDependency("savesth07-sync");

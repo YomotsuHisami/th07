@@ -49,7 +49,7 @@ i32 g_PlaybackFrame = -1;
 std::size_t g_PlaybackTouchStart = 0;
 std::size_t g_PlaybackTouchCount = 0;
 
-constexpr u32 VERSION = 6;
+constexpr u32 VERSION = 1;
 constexpr u32 DETERMINISM_ABI = 1;
 constexpr u32 FLAG_JOYSTICK_INPUT = 1;
 constexpr u32 FLAG_TOUCH_EVENTS = 2;

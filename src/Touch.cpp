@@ -773,8 +773,9 @@ void Touch::FingerMotion(const SDL_TouchFingerEvent &f)
 
             if (scale > 0.0f)
             {
-                g_AccumDx += dxPx / scale;
-                g_AccumDy += dyPx / scale;
+                const f32 sensitivity = EaglerOptions::TouchSensitivity();
+                g_AccumDx += dxPx / scale * sensitivity;
+                g_AccumDy += dyPx / scale * sensitivity;
             }
             g_MoveFinger.lastPxX = px;
             g_MoveFinger.lastPxY = py;

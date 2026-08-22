@@ -85,10 +85,14 @@ static void SuspendAudioForInactiveWindow()
     {
         return;
     }
+#ifdef __EMSCRIPTEN__
+    g_SoundPlayer.SetWebAudioWindowActive(false);
+#else
     if (g_SoundPlayer.engine != nullptr)
     {
         ma_engine_stop(g_SoundPlayer.engine);
     }
+#endif
     if (g_Supervisor.midiOutput != nullptr)
     {
         g_Supervisor.midiOutput->SetPaused(true);
@@ -102,10 +106,14 @@ static void ResumeAudioForActiveWindow()
     {
         return;
     }
+#ifdef __EMSCRIPTEN__
+    g_SoundPlayer.SetWebAudioWindowActive(true);
+#else
     if (g_SoundPlayer.engine != nullptr)
     {
         ma_engine_start(g_SoundPlayer.engine);
     }
+#endif
     if (g_Supervisor.midiOutput != nullptr)
     {
         g_Supervisor.midiOutput->SetPaused(false);

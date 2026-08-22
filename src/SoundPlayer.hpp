@@ -3,6 +3,11 @@
 #include "GameErrorContext.hpp"
 #include "ZunResult.hpp"
 #include "inttypes.hpp"
+
+#include <SDL3/SDL_audio.h>
+#ifdef __EMSCRIPTEN__
+#define MA_NO_DEVICE_IO
+#endif
 #include "miniaudio.h"
 
 typedef enum AudioOpcode
@@ -116,6 +121,13 @@ struct SoundPlayer
     ZunResult OpenOggBGM(const char *name);
     ZunResult StartBGM(const char *path);
     void StopBGM();
+#ifdef __EMSCRIPTEN__
+    void SetWebAudioWindowActive(bool active);
+    void SetWebAudioBgmTransition(bool active);
+    void UpdateWebAudioPlaybackState();
+    void ResetWebAudioOutput();
+    bool PumpWebAudio();
+#endif
 
     void FadeOut(f32 duration)
     {
@@ -129,6 +141,12 @@ struct SoundPlayer
     }
 
     ma_engine *engine;
+#ifdef __EMSCRIPTEN__
+    SDL_AudioStream *webAudioStream;
+    bool webAudioWindowActive;
+    bool webAudioBgmTransition;
+    bool webAudioPlaybackSuspended;
+#endif
     ma_audio_buffer *duplicateSfxData[128];
     ma_audio_buffer *sfxData[128];
     void *sfxPCMData[128];

@@ -2,6 +2,10 @@
 
 #include <cstdio>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
+
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
 #include "PracticeRuntime.hpp"
@@ -344,6 +348,107 @@ SoundPlayer::SoundPlayer()
     }
 }
 
+#ifdef __EMSCRIPTEN__
+void SoundPlayer::UpdateWebAudioPlaybackState()
+{
+    const bool shouldSuspend = !this->webAudioWindowActive || this->webAudioBgmTransition;
+    if (shouldSuspend == this->webAudioPlaybackSuspended)
+    {
+        return;
+    }
+
+    if (shouldSuspend)
+    {
+        EM_ASM({
+            const sdl = Module['SDL3'];
+            const node = sdl && sdl.audio_playback && sdl.audio_playback.scriptProcessorNode;
+            if (node) {
+                try { node.disconnect(); } catch (_) {}
+            }
+        });
+        if (this->webAudioStream && !SDL_AudioStreamDevicePaused(this->webAudioStream))
+        {
+            SDL_PauseAudioStreamDevice(this->webAudioStream);
+        }
+    }
+    else
+    {
+        if (this->webAudioStream && SDL_AudioStreamDevicePaused(this->webAudioStream))
+        {
+            SDL_ResumeAudioStreamDevice(this->webAudioStream);
+        }
+        EM_ASM({
+            const sdl = Module['SDL3'];
+            const node = sdl && sdl.audio_playback && sdl.audio_playback.scriptProcessorNode;
+            if (node && sdl.audioContext) {
+                try { node.connect(sdl.audioContext.destination); } catch (_) {}
+            }
+        });
+    }
+    this->webAudioPlaybackSuspended = shouldSuspend;
+}
+
+void SoundPlayer::SetWebAudioWindowActive(bool active)
+{
+    this->webAudioWindowActive = active;
+    this->UpdateWebAudioPlaybackState();
+}
+
+void SoundPlayer::SetWebAudioBgmTransition(bool active)
+{
+    this->webAudioBgmTransition = active;
+    this->UpdateWebAudioPlaybackState();
+}
+
+void SoundPlayer::ResetWebAudioOutput()
+{
+    if (this->webAudioStream)
+    {
+        SDL_ClearAudioStream(this->webAudioStream);
+    }
+}
+
+bool SoundPlayer::PumpWebAudio()
+{
+    if (!this->engine || !this->webAudioStream || this->webAudioPlaybackSuspended)
+    {
+        return true;
+    }
+
+    constexpr ma_uint64 FRAMES_PER_CHUNK = 2048;
+    float pcm[FRAMES_PER_CHUNK * 2];
+    constexpr int TARGET_QUEUED_BYTES = sizeof(pcm);
+
+    while (true)
+    {
+        const int queuedBytes = SDL_GetAudioStreamQueued(this->webAudioStream);
+        if (queuedBytes < 0)
+        {
+            return false;
+        }
+        if (queuedBytes >= TARGET_QUEUED_BYTES)
+        {
+            return true;
+        }
+
+        ma_uint64 framesRead = 0;
+        if (ma_engine_read_pcm_frames(this->engine, pcm, FRAMES_PER_CHUNK, &framesRead) != MA_SUCCESS)
+        {
+            return false;
+        }
+        if (framesRead == 0)
+        {
+            return true;
+        }
+        const int bytesRead = static_cast<int>(framesRead * 2 * sizeof(float));
+        if (!SDL_PutAudioStreamData(this->webAudioStream, pcm, bytesRead))
+        {
+            return false;
+        }
+    }
+}
+#endif
+
 ZunResult SoundPlayer::InitializeSound()
 {
     ma_engine_config engineConfig;
@@ -353,12 +458,18 @@ ZunResult SoundPlayer::InitializeSound()
     {
         this->unusedSoundVolRelated[i] = -1;
     }
+#ifdef __EMSCRIPTEN__
+    this->webAudioWindowActive = true;
+#endif
 
     this->engine = new ma_engine;
 
     engineConfig = ma_engine_config_init();
     engineConfig.sampleRate = 44100;
     engineConfig.channels = 2;
+#ifdef __EMSCRIPTEN__
+    engineConfig.noDevice = MA_TRUE;
+#endif
 
     if (ma_engine_init(&engineConfig, this->engine) != MA_SUCCESS)
     {
@@ -367,12 +478,43 @@ ZunResult SoundPlayer::InitializeSound()
         return ZUN_ERROR;
     }
 
+#ifdef __EMSCRIPTEN__
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "th07: SDL audio initialization failed: %s", SDL_GetError());
+        ma_engine_uninit(this->engine);
+        SAFE_DELETE(this->engine);
+        return ZUN_ERROR;
+    }
+
+    SDL_AudioSpec desiredAudio = {SDL_AUDIO_F32, 2, 44100};
+    this->webAudioStream =
+        SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desiredAudio, NULL, NULL);
+    if (!this->webAudioStream)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "th07: SDL audio stream initialization failed: %s",
+                     SDL_GetError());
+        ma_engine_uninit(this->engine);
+        SAFE_DELETE(this->engine);
+        return ZUN_ERROR;
+    }
+    if (!SDL_ResumeAudioStreamDevice(this->webAudioStream))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "th07: SDL audio stream resume failed: %s", SDL_GetError());
+        SDL_DestroyAudioStream(this->webAudioStream);
+        this->webAudioStream = NULL;
+        ma_engine_uninit(this->engine);
+        SAFE_DELETE(this->engine);
+        return ZUN_ERROR;
+    }
+#else
     if (ma_engine_start(this->engine) != MA_SUCCESS)
     {
         g_GameErrorContext.Log("DirectSound オブジェクトの初期化が失敗したよ\n");
         SAFE_DELETE(this->engine);
         return ZUN_ERROR;
     }
+#endif
 
     g_GameErrorContext.Log("DirectSound は正常に初期化されました\n");
     return ZUN_SUCCESS;
@@ -408,6 +550,13 @@ ZunResult SoundPlayer::Release()
 
     StopBGM();
 
+#ifdef __EMSCRIPTEN__
+    if (this->webAudioStream)
+    {
+        SDL_DestroyAudioStream(this->webAudioStream);
+        this->webAudioStream = NULL;
+    }
+#endif
     ma_engine_uninit(this->engine);
     SAFE_DELETE(this->engine);
     for (i = 0; i < 16; i++)
@@ -520,15 +669,6 @@ ZunResult SoundPlayer::StartBGM(const char *path)
 
     Supervisor::DebugPrint("Streming BGM Start\n");
     StopBGM();
-#ifdef __EMSCRIPTEN__
-    // Reset the WebAudio device boundary between Music Room/archive sources so
-    // a stale render quantum cannot be repeated while the next source opens.
-    if (this->engine)
-    {
-        ma_engine_stop(this->engine);
-        ma_engine_start(this->engine);
-    }
-#endif
 
     return ZUN_SUCCESS;
 }
@@ -591,18 +731,17 @@ ZunResult SoundPlayer::OpenOggBGM(const char *name)
     int channels = 0;
     int sampleRate = 0;
     short *decoded = NULL;
-    StopBGM();
 #ifdef __EMSCRIPTEN__
-    // Web OGG decoding is synchronous. Stop the old source and suspend the
-    // engine before decoding so a blocked main thread cannot make the browser
-    // repeat the last audio quantum while Music Room changes tracks.
-    ma_engine_stop(this->engine);
+    struct WebAudioTransitionGuard
+    {
+        SoundPlayer *owner;
+        ~WebAudioTransitionGuard() { owner->SetWebAudioBgmTransition(false); }
+    } webAudioTransitionGuard{this};
+    this->SetWebAudioBgmTransition(true);
 #endif
+    StopBGM();
     std::string fullPath = FileSystem::GetBasePath(oggPath);
     const int frames = stb_vorbis_decode_filename(fullPath.c_str(), &channels, &sampleRate, &decoded);
-#ifdef __EMSCRIPTEN__
-    ma_engine_start(this->engine);
-#endif
     if (frames <= 0 || !decoded || channels != 2 || sampleRate != 44100 ||
         static_cast<u64>(frames) * 4 > UINT32_MAX)
     {
@@ -754,6 +893,9 @@ ZunResult SoundPlayer::LoadBGM(i32 idx)
 
 void SoundPlayer::StopBGM()
 {
+#ifdef __EMSCRIPTEN__
+    ResetWebAudioOutput();
+#endif
     if (this->backgroundMusic)
     {
         Supervisor::DebugPrint("Streming BGM stop\n");
@@ -1045,11 +1187,7 @@ loop:
     }
 
 loop_breakout:
-    if (!g_Supervisor.cfg.playSounds)
-    {
-        return this->commandQueue[0].opcode;
-    }
-    else
+    if (g_Supervisor.cfg.playSounds)
     {
         for (i = 0; i < 5; i++)
         {
@@ -1069,8 +1207,14 @@ loop_breakout:
             ma_sound_seek_to_pcm_frame(this->soundBuffers[curSound], 0);
             ma_sound_start(this->soundBuffers[curSound]);
         }
-        return this->commandQueue[0].opcode;
     }
+#ifdef __EMSCRIPTEN__
+    if (!this->PumpWebAudio())
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "th07: SDL audio pump failed: %s", SDL_GetError());
+    }
+#endif
+    return this->commandQueue[0].opcode;
 }
 
 void SoundPlayer::PushCommand(AudioOpcode opcode, i32 arg1, const char *arg2)
