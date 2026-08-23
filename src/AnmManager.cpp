@@ -1,4 +1,5 @@
 #include "AnmManager.hpp"
+#include "AnmIdx.hpp"
 
 #include <SDL3_image/SDL_image.h>
 #include <algorithm>
@@ -30,6 +31,264 @@ VertexTex1DiffuseXyz g_Quad3DFallback[4];
 
 namespace
 {
+constexpr i32 SPRITE_EXTRUSION_GUTTER = 1;
+constexpr u32 SPRITE_EXTRUSION_MAX_ATLAS_SIZE = 2048;
+
+struct SpriteExtrusionRect
+{
+    i32 srcX;
+    i32 srcY;
+    i32 width;
+    i32 height;
+    i32 dstX;
+    i32 dstY;
+    std::vector<i32> spriteIndices;
+};
+
+u32 NextPowerOfTwo(u32 value)
+{
+    if (value <= 1)
+        return 1;
+    value--;
+    value |= value >> 1;
+    value |= value >> 2;
+    value |= value >> 4;
+    value |= value >> 8;
+    value |= value >> 16;
+    return value + 1;
+}
+
+bool ToPixelCoordinate(f32 value, i32 &result)
+{
+    result = static_cast<i32>(std::lround(value));
+    return std::fabs(value - static_cast<f32>(result)) <= 0.001f;
+}
+
+bool TryPackSpriteExtrusionRects(std::vector<SpriteExtrusionRect> &rects, u32 atlasWidth,
+                                 u32 &usedHeight)
+{
+    u32 x = 0;
+    u32 y = 0;
+    u32 rowHeight = 0;
+    for (SpriteExtrusionRect &rect : rects)
+    {
+        const u32 packedWidth = static_cast<u32>(rect.width + SPRITE_EXTRUSION_GUTTER * 2);
+        const u32 packedHeight = static_cast<u32>(rect.height + SPRITE_EXTRUSION_GUTTER * 2);
+        if (packedWidth > atlasWidth || packedHeight > SPRITE_EXTRUSION_MAX_ATLAS_SIZE)
+            return false;
+        if (x + packedWidth > atlasWidth)
+        {
+            y += rowHeight;
+            x = 0;
+            rowHeight = 0;
+        }
+        if (y + packedHeight > SPRITE_EXTRUSION_MAX_ATLAS_SIZE)
+            return false;
+        rect.dstX = static_cast<i32>(x);
+        rect.dstY = static_cast<i32>(y);
+        x += packedWidth;
+        rowHeight = std::max(rowHeight, packedHeight);
+    }
+    usedHeight = y + rowHeight;
+    return usedHeight > 0 && usedHeight <= SPRITE_EXTRUSION_MAX_ATLAS_SIZE;
+}
+
+bool BuildSpriteExtrusionAtlas(AnmManager *manager, i32 textureIdx,
+                               const std::vector<i32> &spriteIndices)
+{
+    if (!manager || textureIdx < 0 || textureIdx >= 256 || !manager->textures[textureIdx] ||
+        !manager->imageDataArray[textureIdx] || manager->textureWidths[textureIdx] == 0 ||
+        manager->textureHeights[textureIdx] == 0 || manager->texturePitches[textureIdx] == 0)
+        return false;
+
+    const u32 sourceWidth = manager->textureWidths[textureIdx];
+    const u32 sourceHeight = manager->textureHeights[textureIdx];
+    if (sourceWidth > SPRITE_EXTRUSION_MAX_ATLAS_SIZE ||
+        sourceHeight > SPRITE_EXTRUSION_MAX_ATLAS_SIZE)
+        return false;
+
+    if (manager->spriteAtlasTextures[textureIdx])
+    {
+        if (manager->currentTexture == manager->spriteAtlasTextures[textureIdx])
+            manager->currentTexture = 0;
+        g_Supervisor.gfxDevice->DeleteTexture(manager->spriteAtlasTextures[textureIdx]);
+        manager->spriteAtlasTextures[textureIdx] = 0;
+    }
+
+    std::vector<SpriteExtrusionRect> rects;
+    rects.reserve(spriteIndices.size());
+    for (const i32 spriteIdx : spriteIndices)
+    {
+        if (spriteIdx < 0 || spriteIdx >= 2560)
+            continue;
+        AnmLoadedSprite &sprite = manager->sprites[spriteIdx];
+        sprite.extrudedUvStart = sprite.uvStart;
+        sprite.extrudedUvEnd = sprite.uvEnd;
+        sprite.hasExtrudedUv = false;
+        if (sprite.sourceFileIndex != textureIdx)
+            continue;
+
+        i32 x0, y0, x1, y1;
+        if (!ToPixelCoordinate(sprite.startPixelInclusive.x, x0) ||
+            !ToPixelCoordinate(sprite.startPixelInclusive.y, y0) ||
+            !ToPixelCoordinate(sprite.endPixelInclusive.x, x1) ||
+            !ToPixelCoordinate(sprite.endPixelInclusive.y, y1))
+            continue;
+
+        const i32 width = x1 - x0;
+        const i32 height = y1 - y0;
+        if (width <= 0 || height <= 0 || x0 < 0 || y0 < 0 ||
+            x1 > static_cast<i32>(sourceWidth) || y1 > static_cast<i32>(sourceHeight))
+            continue;
+
+        SpriteExtrusionRect *existing = nullptr;
+        for (SpriteExtrusionRect &rect : rects)
+        {
+            if (rect.srcX == x0 && rect.srcY == y0 && rect.width == width && rect.height == height)
+            {
+                existing = &rect;
+                break;
+            }
+        }
+        if (existing)
+            existing->spriteIndices.push_back(spriteIdx);
+        else
+            rects.push_back({x0, y0, width, height, 0, 0, {spriteIdx}});
+    }
+
+    if (rects.empty())
+        return false;
+
+    std::sort(rects.begin(), rects.end(), [](const SpriteExtrusionRect &a, const SpriteExtrusionRect &b) {
+        if (a.height != b.height)
+            return a.height > b.height;
+        return a.width > b.width;
+    });
+
+    u32 widestPackedRect = 1;
+    for (const SpriteExtrusionRect &rect : rects)
+        widestPackedRect = std::max(widestPackedRect,
+                                    static_cast<u32>(rect.width + SPRITE_EXTRUSION_GUTTER * 2));
+
+    u32 atlasWidth = NextPowerOfTwo(std::max(sourceWidth, widestPackedRect));
+    u32 usedHeight = 0;
+    while (atlasWidth <= SPRITE_EXTRUSION_MAX_ATLAS_SIZE &&
+           !TryPackSpriteExtrusionRects(rects, atlasWidth, usedHeight))
+        atlasWidth <<= 1;
+    if (atlasWidth > SPRITE_EXTRUSION_MAX_ATLAS_SIZE || usedHeight == 0)
+        return false;
+
+    const u32 atlasHeight = NextPowerOfTwo(usedHeight);
+    if (atlasHeight > SPRITE_EXTRUSION_MAX_ATLAS_SIZE)
+        return false;
+
+    constexpr u32 bytesPerPixel = 4;
+    const size_t atlasPitch = static_cast<size_t>(atlasWidth) * bytesPerPixel;
+    std::vector<u8> atlas(atlasPitch * atlasHeight, 0);
+    const u8 *source = static_cast<const u8 *>(manager->imageDataArray[textureIdx]);
+    const size_t sourcePitch = manager->texturePitches[textureIdx];
+
+    for (const SpriteExtrusionRect &rect : rects)
+    {
+        const i32 contentX = rect.dstX + SPRITE_EXTRUSION_GUTTER;
+        const i32 contentY = rect.dstY + SPRITE_EXTRUSION_GUTTER;
+        const size_t copyBytes = static_cast<size_t>(rect.width) * bytesPerPixel;
+        for (i32 row = 0; row < rect.height; row++)
+        {
+            const u8 *sourceRow = source + static_cast<size_t>(rect.srcY + row) * sourcePitch +
+                                  static_cast<size_t>(rect.srcX) * bytesPerPixel;
+            u8 *destinationRow = atlas.data() + static_cast<size_t>(contentY + row) * atlasPitch +
+                                 static_cast<size_t>(contentX) * bytesPerPixel;
+            std::memcpy(destinationRow, sourceRow, copyBytes);
+            std::memcpy(destinationRow - bytesPerPixel, sourceRow, bytesPerPixel);
+            std::memcpy(destinationRow + copyBytes, sourceRow + copyBytes - bytesPerPixel,
+                        bytesPerPixel);
+        }
+        u8 *firstPackedRow = atlas.data() + static_cast<size_t>(contentY) * atlasPitch +
+                             static_cast<size_t>(rect.dstX) * bytesPerPixel;
+        u8 *lastPackedRow = atlas.data() + static_cast<size_t>(contentY + rect.height - 1) * atlasPitch +
+                            static_cast<size_t>(rect.dstX) * bytesPerPixel;
+        const size_t packedRowBytes = static_cast<size_t>(rect.width + 2 * SPRITE_EXTRUSION_GUTTER) *
+                                      bytesPerPixel;
+        std::memcpy(firstPackedRow - atlasPitch, firstPackedRow, packedRowBytes);
+        std::memcpy(lastPackedRow + atlasPitch, lastPackedRow, packedRowBytes);
+    }
+
+    const GfxTextureHandle atlasTexture = g_Supervisor.gfxDevice->CreateTexture();
+    if (!atlasTexture)
+        return false;
+    g_Supervisor.gfxDevice->BindTexture(atlasTexture);
+    g_Supervisor.gfxDevice->SetTextureImage(atlasWidth, atlasHeight, PIXEL_RGBA,
+                                            PIXEL_UNSIGNED_BYTE, atlas.data());
+    manager->spriteAtlasTextures[textureIdx] = atlasTexture;
+    manager->currentTexture = atlasTexture;
+    manager->currentSprite = nullptr;
+
+    for (const SpriteExtrusionRect &rect : rects)
+    {
+        const f32 u0 = static_cast<f32>(rect.dstX + SPRITE_EXTRUSION_GUTTER) / atlasWidth;
+        const f32 v0 = static_cast<f32>(rect.dstY + SPRITE_EXTRUSION_GUTTER) / atlasHeight;
+        const f32 u1 = static_cast<f32>(rect.dstX + SPRITE_EXTRUSION_GUTTER + rect.width) / atlasWidth;
+        const f32 v1 = static_cast<f32>(rect.dstY + SPRITE_EXTRUSION_GUTTER + rect.height) / atlasHeight;
+        for (const i32 spriteIdx : rect.spriteIndices)
+        {
+            AnmLoadedSprite &sprite = manager->sprites[spriteIdx];
+            sprite.extrudedUvStart = {u0, v0};
+            sprite.extrudedUvEnd = {u1, v1};
+            sprite.hasExtrudedUv = true;
+        }
+    }
+    return true;
+}
+
+bool UseSpriteExtrusionAtlas(const AnmManager *manager, const AnmLoadedSprite *sprite,
+                             const Float2 &drawUv)
+{
+    return manager && sprite && sprite->hasExtrudedUv && drawUv.x == 0.0f && drawUv.y == 0.0f &&
+           sprite->sourceFileIndex >= 0 && sprite->sourceFileIndex < 264 &&
+           static_cast<bool>(manager->spriteAtlasTextures[sprite->sourceFileIndex]);
+}
+
+void InvalidateSpriteExtrusionAtlas(AnmManager *manager, i32 textureIdx)
+{
+    if (!manager || textureIdx < 0 || textureIdx >= 264)
+        return;
+
+    const GfxTextureHandle atlas = manager->spriteAtlasTextures[textureIdx];
+    if (atlas)
+    {
+        if (manager->currentTexture == atlas)
+            manager->currentTexture = 0;
+        g_Supervisor.gfxDevice->DeleteTexture(atlas);
+        manager->spriteAtlasTextures[textureIdx] = 0;
+        manager->currentSprite = nullptr;
+    }
+
+    for (AnmLoadedSprite &sprite : manager->sprites)
+    {
+        if (sprite.sourceFileIndex == textureIdx)
+            sprite.hasExtrudedUv = false;
+    }
+}
+
+void ResolveSpriteDrawSampling(const AnmManager *manager, const AnmLoadedSprite *sprite,
+                               const Float2 &drawUv, Float2 &uvStart, Float2 &uvEnd,
+                               GfxTextureHandle &texture)
+{
+    if (UseSpriteExtrusionAtlas(manager, sprite, drawUv))
+    {
+        uvStart = sprite->extrudedUvStart;
+        uvEnd = sprite->extrudedUvEnd;
+        texture = manager->spriteAtlasTextures[sprite->sourceFileIndex];
+    }
+    else
+    {
+        uvStart = {sprite->uvStart.x + drawUv.x, sprite->uvStart.y + drawUv.y};
+        uvEnd = {sprite->uvEnd.x + drawUv.x, sprite->uvEnd.y + drawUv.y};
+        texture = manager->textures[sprite->sourceFileIndex];
+    }
+}
+
 SDL_Surface *LoadRuntimeOverrideRgba(const char *texturePath)
 {
     u8 *srcData = FileSystem::OpenRuntimeOverride(texturePath);
@@ -46,6 +305,194 @@ SDL_Surface *LoadRuntimeOverrideRgba(const char *texturePath)
     SDL_DestroySurface(surface);
     return converted;
 }
+
+#ifdef __EMSCRIPTEN__
+struct WebTransitionSurfaceCacheEntry
+{
+    const char *path;
+    SDL_Surface *surface;
+    SDL_Surface *surfaceBis;
+    GfxTextureHandle texture;
+    i32 width;
+    i32 height;
+};
+
+static WebTransitionSurfaceCacheEntry g_WebTransitionSurfaceCache[] = {
+    {"data/title/title00.jpg", nullptr, nullptr, {}, 0, 0},
+    {"data/title/select00.jpg", nullptr, nullptr, {}, 0, 0},
+    {"data/result/music.jpg", nullptr, nullptr, {}, 0, 0},
+    {"data/result/result.jpg", nullptr, nullptr, {}, 0, 0},
+    {"data/title/phantasm.jpg", nullptr, nullptr, {}, 0, 0},
+};
+
+// 0 means the normal AnmManager-owned lifetime. Non-zero means that slot is
+// borrowing one of the persistent Web transition-cache entries above.
+static u8 g_WebTransitionSurfaceOwner[32] = {};
+
+static WebTransitionSurfaceCacheEntry *FindWebTransitionSurface(const char *path, u8 *ownerId = nullptr)
+{
+    for (u8 i = 0; i < static_cast<u8>(std::size(g_WebTransitionSurfaceCache)); i++)
+    {
+        if (std::strcmp(g_WebTransitionSurfaceCache[i].path, path) == 0)
+        {
+            if (ownerId)
+                *ownerId = static_cast<u8>(i + 1);
+            return &g_WebTransitionSurfaceCache[i];
+        }
+    }
+    return nullptr;
+}
+
+static bool EnsureWebTransitionSurface(WebTransitionSurfaceCacheEntry *entry)
+{
+    if (entry->surface && entry->surfaceBis && entry->texture.id != 0)
+        return true;
+
+    u8 *data = FileSystem::OpenFile(entry->path, 0);
+    if (!data)
+        return false;
+
+    SDL_IOStream *rw = SDL_IOFromMem(data, g_LastFileSize);
+    SDL_Surface *decoded = rw ? IMG_Load_IO(rw, 1) : nullptr;
+    free(data);
+    if (!decoded)
+        return false;
+
+    SDL_Surface *surface = SDL_ConvertSurface(decoded, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(decoded);
+    if (!surface)
+        return false;
+
+    SDL_Surface *surfaceBis = SDL_ConvertSurface(surface, SDL_PIXELFORMAT_RGBA32);
+    if (!surfaceBis)
+    {
+        SDL_DestroySurface(surface);
+        return false;
+    }
+
+    GfxTextureHandle texture = g_Supervisor.gfxDevice->CreateTexture();
+    g_Supervisor.gfxDevice->BindTexture(texture);
+    g_Supervisor.gfxDevice->SetTextureImage(surfaceBis->w, surfaceBis->h, PIXEL_RGBA,
+                                            PIXEL_UNSIGNED_BYTE, surfaceBis->pixels);
+
+    entry->surface = surface;
+    entry->surfaceBis = surfaceBis;
+    entry->texture = texture;
+    entry->width = surface->w;
+    entry->height = surface->h;
+    return true;
+}
+
+struct WebTransitionAnmSpriteBinding
+{
+    i32 index;
+    AnmLoadedSprite sprite;
+};
+
+struct WebTransitionAnmScriptBinding
+{
+    i32 index;
+    AnmRawInstr *script;
+    i32 spriteIndex;
+};
+
+struct WebTransitionAnmCacheEntry
+{
+    const char *path;
+    i32 startIdx;
+    i32 spriteIdxOffset;
+    i32 childCount = 0;
+    bool loaded = false;
+    bool active = false;
+    std::vector<WebTransitionAnmSpriteBinding> sprites;
+    std::vector<WebTransitionAnmScriptBinding> scripts;
+};
+
+static WebTransitionAnmCacheEntry g_WebTransitionAnmCache[] = {
+    {"data/title01.anm", ANM_FILE_TITLE, ANM_OFFSET_TITLE},
+    {"data/result00.anm", ANM_FILE_RESULT, ANM_OFFSET_RESULT},
+    {"data/music00.anm", ANM_FILE_MUSIC, ANM_OFFSET_MUSIC},
+};
+
+static WebTransitionAnmCacheEntry *FindWebTransitionAnm(i32 startIdx, const char *path = nullptr)
+{
+    for (WebTransitionAnmCacheEntry &entry : g_WebTransitionAnmCache)
+    {
+        if (entry.startIdx == startIdx && (!path || std::strcmp(entry.path, path) == 0))
+            return &entry;
+    }
+    return nullptr;
+}
+
+static WebTransitionAnmCacheEntry *FindWebTransitionAnmContaining(i32 anmIdx)
+{
+    for (WebTransitionAnmCacheEntry &entry : g_WebTransitionAnmCache)
+    {
+        if (entry.loaded && anmIdx >= entry.startIdx && anmIdx < entry.startIdx + entry.childCount)
+            return &entry;
+    }
+    return nullptr;
+}
+
+static void CaptureWebTransitionAnmBindings(AnmManager *manager, WebTransitionAnmCacheEntry *entry)
+{
+    entry->sprites.clear();
+    entry->scripts.clear();
+    entry->childCount = manager->anmFiles[entry->startIdx].childCount;
+
+    for (i32 anmIdx = entry->startIdx; anmIdx < entry->startIdx + entry->childCount; anmIdx++)
+    {
+        AnmRawEntry *raw = manager->anmFiles[anmIdx].raw;
+        if (!raw)
+            continue;
+
+        const i32 spriteIdxOffset = manager->anmFiles[anmIdx].spriteIndexOffset;
+        i32 *offset = raw->dataOffsets;
+        for (i32 i = 0; i < raw->numSprites; i++, offset++)
+        {
+            const AnmRawSprite *rawSprite = reinterpret_cast<const AnmRawSprite *>(
+                reinterpret_cast<const u8 *>(raw) + *offset);
+            const i32 target = rawSprite->id + spriteIdxOffset;
+            entry->sprites.push_back({target, manager->sprites[target]});
+        }
+        for (i32 i = 0; i < raw->numScripts; i++, offset += 2)
+        {
+            const i32 target = offset[0] + spriteIdxOffset;
+            entry->scripts.push_back({target, manager->scripts[target], manager->spriteIndices[target]});
+        }
+    }
+
+    entry->loaded = true;
+    entry->active = true;
+}
+
+static void RestoreWebTransitionAnmBindings(AnmManager *manager, WebTransitionAnmCacheEntry *entry)
+{
+    for (const WebTransitionAnmSpriteBinding &binding : entry->sprites)
+        manager->sprites[binding.index] = binding.sprite;
+    for (const WebTransitionAnmScriptBinding &binding : entry->scripts)
+    {
+        manager->scripts[binding.index] = binding.script;
+        manager->spriteIndices[binding.index] = binding.spriteIndex;
+    }
+    entry->active = true;
+}
+
+static void ClearWebTransitionAnmBindings(AnmManager *manager, WebTransitionAnmCacheEntry *entry)
+{
+    for (const WebTransitionAnmSpriteBinding &binding : entry->sprites)
+    {
+        std::memset(&manager->sprites[binding.index], 0, sizeof(manager->sprites[binding.index]));
+        manager->sprites[binding.index].sourceFileIndex = -1;
+    }
+    for (const WebTransitionAnmScriptBinding &binding : entry->scripts)
+    {
+        manager->scripts[binding.index] = nullptr;
+        manager->spriteIndices[binding.index] = 0;
+    }
+    entry->active = false;
+}
+#endif
 
 enum class RgbaAlphaState
 {
@@ -443,6 +890,18 @@ ZunResult AnmManager::CreateEmptyTexture(i32 textureIdx, u32 width, u32 height)
 
 i32 AnmManager::LoadAnms(i32 anmIdx, const char *path, i32 spriteIdxOffset)
 {
+#ifdef __EMSCRIPTEN__
+    if (WebTransitionAnmCacheEntry *cache = FindWebTransitionAnm(anmIdx, path); cache && cache->loaded)
+    {
+        RestoreWebTransitionAnmBindings(this, cache);
+        this->currentBlendMode = 255;
+        this->currentColorOp = 255;
+        this->currentVertexShader = 0;
+        this->currentTexture = 0;
+        return ZUN_SUCCESS;
+    }
+#endif
+
     i32 res;
     u32 ownsMemory;
     AnmRawEntry *entry;
@@ -467,6 +926,10 @@ i32 AnmManager::LoadAnms(i32 anmIdx, const char *path, i32 spriteIdxOffset)
         if (entry->nextOffset == 0)
         {
             this->anmFiles[startIdx].childCount = anmIdx - startIdx;
+#ifdef __EMSCRIPTEN__
+            if (WebTransitionAnmCacheEntry *cache = FindWebTransitionAnm(startIdx, path))
+                CaptureWebTransitionAnmBindings(this, cache);
+#endif
             return ZUN_SUCCESS;
         }
         entry = (AnmRawEntry *)((u8 *)entry + entry->nextOffset);
@@ -474,6 +937,23 @@ i32 AnmManager::LoadAnms(i32 anmIdx, const char *path, i32 spriteIdxOffset)
         spriteIdxOffset = spriteIdxOffset + res;
     }
 }
+
+#ifdef __EMSCRIPTEN__
+i32 AnmManager::PreloadTransitionAnms(i32 anmIdx, const char *path, i32 spriteIdxOffset)
+{
+    WebTransitionAnmCacheEntry *cache = FindWebTransitionAnm(anmIdx, path);
+    if (!cache)
+        return ZUN_ERROR;
+    if (cache->loaded)
+        return ZUN_SUCCESS;
+
+    const i32 result = LoadAnms(anmIdx, path, spriteIdxOffset);
+    if (result != ZUN_SUCCESS)
+        return result;
+    ReleaseAnm(anmIdx);
+    return ZUN_SUCCESS;
+}
+#endif
 
 i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffset, u32 ownsMemory)
 {
@@ -506,6 +986,7 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
     data->textureIdx = textureIdx;
     data->ownsMemory = ownsMemory;
     name = (char *)((u8 *)data + data->nameOffset);
+    const bool isMutableTexture = *name == '@';
     const bool isUpstreamAsciiAtlas = strcmp(name, "data/ascii/ascii.png") == 0;
     bool textureWasRuntimeOverride = false;
     bool runtimeTextureUsesOwnBounds = false;
@@ -613,6 +1094,8 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
         this->textureHeights[textureIdx] ? this->textureHeights[textureIdx] : data->height;
 
     data->spriteIdxOffset = spriteIdxOffset;
+    std::vector<i32> loadedSpriteIndices;
+    loadedSpriteIndices.reserve(data->numSprites);
     curSprite = data->dataOffsets;
     for (i = 0; i < data->numSprites; i++, curSprite++)
     {
@@ -666,8 +1149,16 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
             g_GameErrorContext.Fatal("スプライトが格納できません。テーブルが不足しています\n");
             return ZUN_ERROR;
         }
-        LoadSprite(rawSprite->id + spriteIdxOffset, &loadedSprite);
+        const i32 loadedSpriteIdx = rawSprite->id + spriteIdxOffset;
+        LoadSprite(loadedSpriteIdx, &loadedSprite);
+        loadedSpriteIndices.push_back(loadedSpriteIdx);
     }
+    // '@' entries are runtime write targets used by text/screenshot paths and
+    // must retain their source texture layout. Static ANM textures are copied
+    // into a draw-only atlas with a one-texel extruded gutter around each
+    // sprite cell. Atlas creation failure is only a compatibility fallback.
+    if (!isMutableTexture)
+        BuildSpriteExtrusionAtlas(this, data->textureIdx, loadedSpriteIndices);
     for (i = 0; i < data->numScripts; i++, curSprite += 2)
     {
         if (*curSprite + spriteIdxOffset >= 2560)
@@ -689,6 +1180,19 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
 
 void AnmManager::ReleaseAnm(i32 anmIdx)
 {
+#ifdef __EMSCRIPTEN__
+    if (WebTransitionAnmCacheEntry *cache = FindWebTransitionAnmContaining(anmIdx))
+    {
+        if (cache->active)
+            ClearWebTransitionAnmBindings(this, cache);
+        this->currentBlendMode = 255;
+        this->currentColorOp = 255;
+        this->currentVertexShader = 0;
+        this->currentTexture = 0;
+        return;
+    }
+#endif
+
     AnmRawEntry *rawEntry;
     i32 *afterHdr;
     i32 uvX;
@@ -744,6 +1248,15 @@ void AnmManager::ReleaseTexture(i32 textureIdx)
         return;
     }
 
+    if (this->spriteAtlasTextures[textureIdx])
+    {
+        if (this->currentTexture == this->spriteAtlasTextures[textureIdx])
+            this->currentTexture = 0;
+        g_Supervisor.gfxDevice->DeleteTexture(this->spriteAtlasTextures[textureIdx]);
+        this->spriteAtlasTextures[textureIdx] = 0;
+        this->currentSprite = nullptr;
+    }
+
     g_Supervisor.gfxDevice->DeleteTexture(this->textures[textureIdx]);
     this->textures[textureIdx].id = 0;
     this->textureWidths[textureIdx] = 0;
@@ -767,6 +1280,9 @@ void AnmManager::LoadSprite(u32 spriteIdx, AnmLoadedSprite *sprite)
         this->sprites[spriteIdx].startPixelInclusive.y / (this->sprites[spriteIdx].textureHeight);
     this->sprites[spriteIdx].uvEnd.y =
         this->sprites[spriteIdx].endPixelInclusive.y / (this->sprites[spriteIdx].textureHeight);
+    this->sprites[spriteIdx].extrudedUvStart = this->sprites[spriteIdx].uvStart;
+    this->sprites[spriteIdx].extrudedUvEnd = this->sprites[spriteIdx].uvEnd;
+    this->sprites[spriteIdx].hasExtrudedUv = false;
     this->sprites[spriteIdx].widthPx = (this->sprites[spriteIdx].endPixelInclusive.x -
                                         this->sprites[spriteIdx].startPixelInclusive.x) /
                                        sprite->cols;
@@ -924,6 +1440,10 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, u32 drawFlags)
     f32 triangleX1, triangleX2, triangleY1, triangleY2;
 
     Float2 drawUv = vm->prevUvScrollPos.LerpUv(vm->uvScrollPos, g_RenderAlpha);
+    Float2 drawUvStart;
+    Float2 drawUvEnd;
+    GfxTextureHandle drawTexture;
+    ResolveSpriteDrawSampling(this, vm->sprite, drawUv, drawUvStart, drawUvEnd, drawTexture);
     g_QuadVertices[0].pos.x += this->offset.x;
     g_QuadVertices[0].pos.y += this->offset.y;
     g_QuadVertices[1].pos.x += this->offset.x;
@@ -933,24 +1453,12 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, u32 drawFlags)
     g_QuadVertices[3].pos.x += this->offset.x;
     g_QuadVertices[3].pos.y += this->offset.y;
 
-    if ((drawFlags & 1) != 0)
-    {
-        g_QuadVertices[0].pos.x = floorf(g_QuadVertices[0].pos.x + 0.5f);
-        g_QuadVertices[1].pos.x = floorf(g_QuadVertices[1].pos.x + 0.5f);
-        g_QuadVertices[0].pos.y = floorf(g_QuadVertices[0].pos.y + 0.5f);
-        g_QuadVertices[2].pos.y = floorf(g_QuadVertices[2].pos.y + 0.5f);
-        g_QuadVertices[1].pos.y = g_QuadVertices[0].pos.y;
-        g_QuadVertices[2].pos.x = g_QuadVertices[0].pos.x;
-        g_QuadVertices[3].pos.x = g_QuadVertices[1].pos.x;
-        g_QuadVertices[3].pos.y = g_QuadVertices[2].pos.y;
-    }
-
     g_QuadVertices[0].textureUV.x = g_QuadVertices[2].textureUV.x =
-        vm->sprite->uvStart.x + drawUv.x;
-    g_QuadVertices[1].textureUV.x = g_QuadVertices[3].textureUV.x = vm->sprite->uvEnd.x + drawUv.x;
+        drawUvStart.x;
+    g_QuadVertices[1].textureUV.x = g_QuadVertices[3].textureUV.x = drawUvEnd.x;
     g_QuadVertices[0].textureUV.y = g_QuadVertices[1].textureUV.y =
-        vm->sprite->uvStart.y + drawUv.y;
-    g_QuadVertices[2].textureUV.y = g_QuadVertices[3].textureUV.y = vm->sprite->uvEnd.y + drawUv.y;
+        drawUvStart.y;
+    g_QuadVertices[2].textureUV.y = g_QuadVertices[3].textureUV.y = drawUvEnd.y;
 
     triangleX1 = std::max(g_QuadVertices[0].pos.x, g_QuadVertices[1].pos.x);
     triangleX1 = std::max(g_QuadVertices[2].pos.x, triangleX1);
@@ -975,9 +1483,9 @@ ZunResult AnmManager::DrawInner(AnmVm *vm, u32 drawFlags)
         return ZUN_SUCCESS;
     }
 
-    if (this->currentTexture != this->textures[vm->sprite->sourceFileIndex])
+    if (this->currentTexture != drawTexture)
     {
-        this->currentTexture = this->textures[vm->sprite->sourceFileIndex];
+        this->currentTexture = drawTexture;
         this->Flush();
         g_Supervisor.gfxDevice->BindTexture(this->currentTexture);
     }
@@ -1099,7 +1607,7 @@ ZunResult AnmManager::DrawNoRotation(AnmVm *vm)
     g_QuadVertices[0].pos.z = g_QuadVertices[1].pos.z = g_QuadVertices[2].pos.z =
         g_QuadVertices[3].pos.z = vm->pos.z;
 
-    return DrawInner(vm, 1);
+    return DrawInner(vm, 0);
 }
 
 void AnmManager::TranslateRotation(VertexTex1DiffuseXyzrhw *vertex, f32 width, f32 height, f32 sine,
@@ -1521,23 +2029,30 @@ ZunResult AnmManager::Draw3(AnmVm *vm)
 
     g_Supervisor.gfxDevice->SetTransformMatrix(MATRIX_MODEL, world);
 
-    if (this->currentSprite != vm->sprite)
+    const Float2 drawUv = vm->prevUvScrollPos.LerpUv(vm->uvScrollPos, g_RenderAlpha);
+    Float2 drawUvStart;
+    Float2 drawUvEnd;
+    GfxTextureHandle drawTexture;
+    ResolveSpriteDrawSampling(this, vm->sprite, drawUv, drawUvStart, drawUvEnd, drawTexture);
+    const bool useExtrusion = UseSpriteExtrusionAtlas(this, vm->sprite, drawUv);
+
+    // Texture selection may change on the same sprite when UV scrolling starts
+    // or stops, so the matrix/binding cannot be cached solely by sprite ptr.
+    this->currentSprite = vm->sprite;
+    uv = vm->uvMatrix;
+    if (useExtrusion)
     {
-        this->currentSprite = vm->sprite;
-        uv = vm->uvMatrix;
+        uv.m[0][0] = drawUvEnd.x - drawUvStart.x;
+        uv.m[1][1] = drawUvEnd.y - drawUvStart.y;
+    }
+    uv.m[2][0] = drawUvStart.x;
+    uv.m[2][1] = drawUvStart.y;
+    g_Supervisor.gfxDevice->SetTransformMatrix(MATRIX_TEXTURE, uv);
 
-        Float2 drawUv = vm->prevUvScrollPos.LerpUv(vm->uvScrollPos, g_RenderAlpha);
-
-        uv.m[2][0] = vm->sprite->uvStart.x + drawUv.x;
-        uv.m[2][1] = vm->sprite->uvStart.y + drawUv.y;
-
-        g_Supervisor.gfxDevice->SetTransformMatrix(MATRIX_TEXTURE, uv);
-
-        if (this->currentTexture != this->textures[vm->sprite->sourceFileIndex])
-        {
-            this->currentTexture = this->textures[vm->sprite->sourceFileIndex];
-            g_Supervisor.gfxDevice->BindTexture(this->currentTexture);
-        }
+    if (this->currentTexture != drawTexture)
+    {
+        this->currentTexture = drawTexture;
+        g_Supervisor.gfxDevice->BindTexture(this->currentTexture);
     }
 
     if (this->currentVertexShader != 2)
@@ -2325,6 +2840,8 @@ void AnmManager::DrawTextToSprite(u32 spriteDstIdx, i32 x, i32 y, i32 width, i32
     {
         fontHeight = 15;
     }
+
+    InvalidateSpriteExtrusionAtlas(this, static_cast<i32>(spriteDstIdx));
     TextHelper::RenderTextToTextureBold(x, y, width, height, (f32)fontWidth * scaleY,
                                         (f32)fontHeight * scaleX, textColor, outlineType,
                                         strToPrint, this->textures[spriteDstIdx]);
@@ -2500,6 +3017,28 @@ void AnmManager::DrawStringFormat2(AnmVm *vm, u32 textColor, u32 outlineType, co
 
 ZunResult AnmManager::LoadSurface(i32 surfaceIdx, const char *path)
 {
+#ifdef __EMSCRIPTEN__
+    u8 ownerId = 0;
+    if (WebTransitionSurfaceCacheEntry *entry = FindWebTransitionSurface(path, &ownerId))
+    {
+        if (!EnsureWebTransitionSurface(entry))
+        {
+            g_GameErrorContext.Fatal("%sが読み込めないです。\n", path);
+            return ZUN_ERROR;
+        }
+
+        ReleaseSurface(surfaceIdx);
+        this->surfaces[surfaceIdx] = entry->surface;
+        this->surfacesBis[surfaceIdx] = entry->surfaceBis;
+        this->surfaceSourceInfo[surfaceIdx].width = entry->width;
+        this->surfaceSourceInfo[surfaceIdx].height = entry->height;
+        this->surfaceTextures[surfaceIdx] = entry->texture;
+        this->currentTexture = entry->texture;
+        g_WebTransitionSurfaceOwner[surfaceIdx] = ownerId;
+        return ZUN_SUCCESS;
+    }
+#endif
+
     if (this->surfaces[surfaceIdx])
     {
         ReleaseSurface(surfaceIdx);
@@ -2541,8 +3080,27 @@ ZunResult AnmManager::LoadSurface(i32 surfaceIdx, const char *path)
     return ZUN_SUCCESS;
 }
 
+#ifdef __EMSCRIPTEN__
+ZunResult AnmManager::PreloadTransitionSurface(const char *path)
+{
+    WebTransitionSurfaceCacheEntry *entry = FindWebTransitionSurface(path);
+    return entry && EnsureWebTransitionSurface(entry) ? ZUN_SUCCESS : ZUN_ERROR;
+}
+#endif
+
 void AnmManager::ReleaseSurface(i32 surfaceIdx)
 {
+#ifdef __EMSCRIPTEN__
+    if (g_WebTransitionSurfaceOwner[surfaceIdx] != 0)
+    {
+        this->surfaces[surfaceIdx] = nullptr;
+        this->surfacesBis[surfaceIdx] = nullptr;
+        this->surfaceTextures[surfaceIdx] = 0;
+        g_WebTransitionSurfaceOwner[surfaceIdx] = 0;
+        return;
+    }
+#endif
+
     if (this->surfaces[surfaceIdx])
     {
         SDL_DestroySurface(this->surfaces[surfaceIdx]);
@@ -2668,6 +3226,7 @@ void AnmManager::TakeScreenshot(i32 textureId, i32 srcLeft, i32 srcTop, i32 srcW
     }
 
     Flush();
+    InvalidateSpriteExtrusionAtlas(this, textureId);
 
     u32 *pixelData = new u32[srcWidth * srcHeight];
     g_Supervisor.gfxDevice->ReadPixels(srcLeft, srcTop, srcWidth, srcHeight, pixelData);
@@ -2716,6 +3275,7 @@ void AnmManager::CopyTexture(i32 dstIdx, i32 srcIdx, SDL_Rect *dstRect, SDL_Rect
     }
 
     this->Flush();
+    InvalidateSpriteExtrusionAtlas(this, dstIdx);
 
     u8 *dstPixels = (u8 *)this->imageDataArray[dstIdx];
     u8 *srcPixels = (u8 *)this->imageDataArray[srcIdx];

@@ -1,5 +1,6 @@
 #include "SoundPlayer.hpp"
 
+#include <climits>
 #include <cstdio>
 
 #ifdef __EMSCRIPTEN__
@@ -52,6 +53,60 @@ static ma_result ThBgmDataSource_read(ma_data_source *pDataSource, void *pFrames
     }
 
     ma_uint32 frameSize = ma_get_bytes_per_frame(pBgm->format, pBgm->channels);
+#ifdef __EMSCRIPTEN__
+    if (pBgm->isOgg)
+    {
+        stb_vorbis *decoder = static_cast<stb_vorbis *>(pBgm->oggDecoder);
+        if (!decoder || !pFramesOut)
+        {
+            *pFramesRead = 0;
+            return MA_INVALID_ARGS;
+        }
+
+        ma_uint64 totalFramesRead = 0;
+        short *pShortOut = static_cast<short *>(pFramesOut);
+        while (totalFramesRead < frameCount)
+        {
+            if (pBgm->segmentBytesRemaining == 0)
+            {
+                const ma_uint64 loopStartFrame =
+                    static_cast<ma_uint64>(pBgm->pFmt->introLength) / frameSize;
+                if (!stb_vorbis_seek(decoder, static_cast<unsigned int>(loopStartFrame)))
+                {
+                    break;
+                }
+                pBgm->currentOffset = pBgm->pFmt->introLength;
+                pBgm->segmentBytesRemaining =
+                    pBgm->pFmt->totalLength - pBgm->pFmt->introLength;
+            }
+
+            const ma_uint64 framesAvailable = pBgm->segmentBytesRemaining / frameSize;
+            const ma_uint64 framesRequested =
+                std::min(frameCount - totalFramesRead, framesAvailable);
+            if (framesRequested == 0)
+            {
+                break;
+            }
+
+            const int framesDecoded = stb_vorbis_get_samples_short_interleaved(
+                decoder, static_cast<int>(pBgm->channels),
+                pShortOut + totalFramesRead * pBgm->channels,
+                static_cast<int>(framesRequested * pBgm->channels));
+            if (framesDecoded <= 0)
+            {
+                break;
+            }
+
+            const u32 bytesDecoded = static_cast<u32>(framesDecoded * frameSize);
+            pBgm->currentOffset += bytesDecoded;
+            pBgm->segmentBytesRemaining -= bytesDecoded;
+            totalFramesRead += static_cast<ma_uint64>(framesDecoded);
+        }
+
+        *pFramesRead = totalFramesRead;
+        return totalFramesRead > 0 || frameCount == 0 ? MA_SUCCESS : MA_AT_END;
+    }
+#endif
     ma_uint64 totalFramesRead = 0;
     u8 *pByteOut = (u8 *)pFramesOut;
 
@@ -163,6 +218,17 @@ static ma_result ThBgmDataSource_seek(ma_data_source *pDataSource, ma_uint64 fra
     if (targetByteOffset < (ma_uint64)pBgm->pFmt->totalLength)
     {
         pBgm->currentOffset = (u32)targetByteOffset;
+#ifdef __EMSCRIPTEN__
+        if (pBgm->isOgg)
+        {
+            if (!stb_vorbis_seek(static_cast<stb_vorbis *>(pBgm->oggDecoder),
+                                 static_cast<unsigned int>(frameIndex)))
+            {
+                return MA_ERROR;
+            }
+        }
+        else
+#endif
         if (!pBgm->isMemory && pBgm->file)
         {
             SDL_SeekIO(pBgm->file,
@@ -186,6 +252,17 @@ static ma_result ThBgmDataSource_seek(ma_data_source *pDataSource, ma_uint64 fra
         ma_uint64 finalByteOffset = loopStart + (relativeOffset % loopLen);
 
         pBgm->currentOffset = (u32)finalByteOffset;
+#ifdef __EMSCRIPTEN__
+        if (pBgm->isOgg)
+        {
+            if (!stb_vorbis_seek(static_cast<stb_vorbis *>(pBgm->oggDecoder),
+                                 static_cast<unsigned int>(finalByteOffset / frameSize)))
+            {
+                return MA_ERROR;
+            }
+        }
+        else
+#endif
         if (!pBgm->isMemory && pBgm->file)
         {
             SDL_SeekIO(pBgm->file,
@@ -239,6 +316,13 @@ static ma_result ThBgmDataSource_get_cursor(ma_data_source *pDataSource, ma_uint
     }
 
     ma_uint32 frameSize = ma_get_bytes_per_frame(pBgm->format, pBgm->channels);
+#ifdef __EMSCRIPTEN__
+    if (pBgm->isOgg)
+    {
+        *pCursor = pBgm->currentOffset / frameSize;
+        return MA_SUCCESS;
+    }
+#endif
     if (pBgm->isMemory)
     {
         *pCursor = pBgm->currentOffset / frameSize;
@@ -339,6 +423,54 @@ static bool ThBgmDataSource_init_memory(ThBgmDataSource *pBgm, const u8 *pData, 
     return true;
 }
 
+#ifdef __EMSCRIPTEN__
+static bool ThBgmDataSource_init_ogg(ThBgmDataSource *pBgm, const char *path, ThBgmFormat *pFmt)
+{
+    memset(pBgm, 0, sizeof(*pBgm));
+
+    int error = 0;
+    stb_vorbis *decoder = stb_vorbis_open_filename(path, &error, nullptr);
+    if (!decoder)
+    {
+        return false;
+    }
+
+    const stb_vorbis_info info = stb_vorbis_get_info(decoder);
+    const unsigned int totalFrames = stb_vorbis_stream_length_in_samples(decoder);
+    if (info.channels != 2 || info.sample_rate != 44100 || totalFrames == 0 ||
+        static_cast<u64>(totalFrames) * 4 > UINT32_MAX)
+    {
+        stb_vorbis_close(decoder);
+        return false;
+    }
+
+    pFmt->startOffset = 0;
+    pFmt->preloadAllocSize = totalFrames * 4;
+    pFmt->totalLength = static_cast<i32>(totalFrames * 4);
+    if (pFmt->introLength < 0 || pFmt->introLength >= pFmt->totalLength ||
+        (pFmt->introLength % 4) != 0)
+    {
+        stb_vorbis_close(decoder);
+        return false;
+    }
+
+    InitBgmData(pBgm, pFmt);
+    pBgm->isMemory = false;
+    pBgm->isOgg = true;
+    pBgm->oggDecoder = decoder;
+
+    ma_data_source_config config = ma_data_source_config_init();
+    config.vtable = &g_ThBgmDataSourceVtable;
+    if (ma_data_source_init(&config, &pBgm->base) != MA_SUCCESS)
+    {
+        stb_vorbis_close(decoder);
+        pBgm->oggDecoder = nullptr;
+        return false;
+    }
+    return true;
+}
+#endif
+
 SoundPlayer::SoundPlayer()
 {
     memset(this, 0, sizeof(SoundPlayer));
@@ -346,6 +478,9 @@ SoundPlayer::SoundPlayer()
     {
         this->unusedSoundVolRelated[i] = -1;
     }
+#ifdef __EMSCRIPTEN__
+    this->webAudioMinQueuedFrames = UINT_MAX;
+#endif
 }
 
 #ifdef __EMSCRIPTEN__
@@ -361,7 +496,8 @@ void SoundPlayer::UpdateWebAudioPlaybackState()
     {
         EM_ASM({
             const sdl = Module['SDL3'];
-            const node = sdl && sdl.audio_playback && sdl.audio_playback.scriptProcessorNode;
+            const playback = sdl && sdl.audio_playback;
+            const node = playback && playback.scriptProcessorNode;
             if (node) {
                 try { node.disconnect(); } catch (_) {}
             }
@@ -379,7 +515,8 @@ void SoundPlayer::UpdateWebAudioPlaybackState()
         }
         EM_ASM({
             const sdl = Module['SDL3'];
-            const node = sdl && sdl.audio_playback && sdl.audio_playback.scriptProcessorNode;
+            const playback = sdl && sdl.audio_playback;
+            const node = playback && playback.scriptProcessorNode;
             if (node && sdl.audioContext) {
                 try { node.connect(sdl.audioContext.destination); } catch (_) {}
             }
@@ -415,37 +552,67 @@ bool SoundPlayer::PumpWebAudio()
         return true;
     }
 
-    constexpr ma_uint64 FRAMES_PER_CHUNK = 2048;
+    // Keep the verified low-latency streaming envelope. This path only
+    // replenishes the SDL stream; browser playback remains owned by SDL's
+    // Emscripten backend.
+    constexpr ma_uint64 FRAMES_PER_CHUNK = 1024;
+    constexpr ma_uint64 LOW_WATER_FRAMES = 2048;
+    constexpr ma_uint64 HIGH_WATER_FRAMES = 3072;
     float pcm[FRAMES_PER_CHUNK * 2];
-    constexpr int TARGET_QUEUED_BYTES = sizeof(pcm);
+    constexpr int BYTES_PER_FRAME = 2 * sizeof(float);
 
-    while (true)
+    const f64 nowMs = emscripten_get_now();
+    const int queuedBytes = SDL_GetAudioStreamQueued(this->webAudioStream);
+    if (queuedBytes < 0)
+        return false;
+    const ma_uint64 queuedFrames = static_cast<ma_uint64>(queuedBytes / BYTES_PER_FRAME);
+
+    this->webAudioMinQueuedFrames = std::min(this->webAudioMinQueuedFrames, static_cast<u32>(queuedFrames));
+
+    if (this->webAudioLastDiagnosticMs == 0.0 || nowMs - this->webAudioLastDiagnosticMs >= 500.0)
     {
-        const int queuedBytes = SDL_GetAudioStreamQueued(this->webAudioStream);
-        if (queuedBytes < 0)
-        {
-            return false;
-        }
-        if (queuedBytes >= TARGET_QUEUED_BYTES)
-        {
-            return true;
-        }
-
-        ma_uint64 framesRead = 0;
-        if (ma_engine_read_pcm_frames(this->engine, pcm, FRAMES_PER_CHUNK, &framesRead) != MA_SUCCESS)
-        {
-            return false;
-        }
-        if (framesRead == 0)
-        {
-            return true;
-        }
-        const int bytesRead = static_cast<int>(framesRead * 2 * sizeof(float));
-        if (!SDL_PutAudioStreamData(this->webAudioStream, pcm, bytesRead))
-        {
-            return false;
-        }
+        const u32 minFrames = this->webAudioMinQueuedFrames == UINT_MAX
+                                  ? static_cast<u32>(queuedFrames)
+                                  : this->webAudioMinQueuedFrames;
+        EM_ASM({
+            globalThis.EaglerTouhouAudioHealth?.($0, $1, $2);
+        }, static_cast<double>(queuedFrames) * 1000.0 / 44100.0,
+           static_cast<double>(minFrames) * 1000.0 / 44100.0, 0);
+        this->webAudioLastDiagnosticMs = nowMs;
+        this->webAudioMinQueuedFrames = static_cast<u32>(queuedFrames);
     }
+
+    if (!this->webAudioRefilling)
+    {
+        if (queuedFrames >= LOW_WATER_FRAMES)
+        {
+            return true;
+        }
+        this->webAudioRefilling = true;
+    }
+
+    if (queuedFrames >= HIGH_WATER_FRAMES)
+    {
+        this->webAudioRefilling = false;
+        return true;
+    }
+
+    const ma_uint64 framesToRead = std::min(FRAMES_PER_CHUNK, HIGH_WATER_FRAMES - queuedFrames);
+    if (framesToRead == 0)
+    {
+        this->webAudioRefilling = false;
+        return true;
+    }
+
+    ma_uint64 framesRead = 0;
+    if (ma_engine_read_pcm_frames(this->engine, pcm, framesToRead, &framesRead) != MA_SUCCESS)
+        return false;
+    if (framesRead == 0)
+        return true;
+    if (!SDL_PutAudioStreamData(this->webAudioStream, pcm,
+                                static_cast<int>(framesRead * BYTES_PER_FRAME)))
+        return false;
+    return true;
 }
 #endif
 
@@ -460,6 +627,7 @@ ZunResult SoundPlayer::InitializeSound()
     }
 #ifdef __EMSCRIPTEN__
     this->webAudioWindowActive = true;
+    this->webAudioMinQueuedFrames = UINT_MAX;
 #endif
 
     this->engine = new ma_engine;
@@ -728,9 +896,6 @@ ZunResult SoundPlayer::OpenOggBGM(const char *name)
     }
     strcpy(extension, ".ogg");
 
-    int channels = 0;
-    int sampleRate = 0;
-    short *decoded = NULL;
 #ifdef __EMSCRIPTEN__
     struct WebAudioTransitionGuard
     {
@@ -740,7 +905,40 @@ ZunResult SoundPlayer::OpenOggBGM(const char *name)
     this->SetWebAudioBgmTransition(true);
 #endif
     StopBGM();
+
     std::string fullPath = FileSystem::GetBasePath(oggPath);
+    const i32 fmtIdx = GetFmtIndexByName(name);
+    this->oggFormat = this->bgmFmtData[fmtIdx];
+
+#ifdef __EMSCRIPTEN__
+    // Web used to decode the complete Vorbis stream here on the 60 Hz game
+    // thread. A stage BGM transition could therefore consume an entire frame
+    // budget (or much more) before playback even started. Keep the compressed
+    // stream open and let the existing pull-based miniaudio data source decode
+    // only the small chunks requested by PumpWebAudio().
+    this->bgmDataSource = new ThBgmDataSource;
+    if (!ThBgmDataSource_init_ogg(this->bgmDataSource, fullPath.c_str(), &this->oggFormat))
+    {
+        SAFE_DELETE(this->bgmDataSource);
+        return ZUN_ERROR;
+    }
+
+    this->backgroundMusic = new ma_sound;
+    if (ma_sound_init_from_data_source(this->engine, &this->bgmDataSource->base, 0, NULL,
+                                       this->backgroundMusic) != MA_SUCCESS)
+    {
+        SAFE_DELETE(this->backgroundMusic);
+        ma_data_source_uninit(&this->bgmDataSource->base);
+        stb_vorbis_close(static_cast<stb_vorbis *>(this->bgmDataSource->oggDecoder));
+        this->bgmDataSource->oggDecoder = nullptr;
+        SAFE_DELETE(this->bgmDataSource);
+        return ZUN_ERROR;
+    }
+    return ZUN_SUCCESS;
+#else
+    int channels = 0;
+    int sampleRate = 0;
+    short *decoded = NULL;
     const int frames = stb_vorbis_decode_filename(fullPath.c_str(), &channels, &sampleRate, &decoded);
     if (frames <= 0 || !decoded || channels != 2 || sampleRate != 44100 ||
         static_cast<u64>(frames) * 4 > UINT32_MAX)
@@ -749,19 +947,16 @@ ZunResult SoundPlayer::OpenOggBGM(const char *name)
         return ZUN_ERROR;
     }
 
-    const i32 fmtIdx = GetFmtIndexByName(name);
-    ThBgmFormat format = this->bgmFmtData[fmtIdx];
-    format.startOffset = 0;
-    format.preloadAllocSize = static_cast<u32>(frames) * 4;
-    format.totalLength = static_cast<i32>(static_cast<u32>(frames) * 4);
-    if (format.introLength < 0 || format.introLength >= format.totalLength)
+    this->oggFormat.startOffset = 0;
+    this->oggFormat.preloadAllocSize = static_cast<u32>(frames) * 4;
+    this->oggFormat.totalLength = static_cast<i32>(static_cast<u32>(frames) * 4);
+    if (this->oggFormat.introLength < 0 || this->oggFormat.introLength >= this->oggFormat.totalLength)
     {
         free(decoded);
         return ZUN_ERROR;
     }
 
     this->oggPcmData = decoded;
-    this->oggFormat = format;
     this->bgmDataSource = new ThBgmDataSource;
     if (!ThBgmDataSource_init_memory(this->bgmDataSource, reinterpret_cast<const u8 *>(decoded),
                                      static_cast<u32>(frames) * 4, &this->oggFormat))
@@ -784,6 +979,7 @@ ZunResult SoundPlayer::OpenOggBGM(const char *name)
         return ZUN_ERROR;
     }
     return ZUN_SUCCESS;
+#endif
 }
 
 ZunResult SoundPlayer::PreloadBGM(i32 idx, const char *path)
@@ -910,6 +1106,13 @@ void SoundPlayer::StopBGM()
             SDL_CloseIO(this->bgmDataSource->file);
         }
         ma_data_source_uninit(&this->bgmDataSource->base);
+#ifdef __EMSCRIPTEN__
+        if (this->bgmDataSource->oggDecoder)
+        {
+            stb_vorbis_close(static_cast<stb_vorbis *>(this->bgmDataSource->oggDecoder));
+            this->bgmDataSource->oggDecoder = nullptr;
+        }
+#endif
         SAFE_DELETE(this->bgmDataSource);
     }
     free(this->oggPcmData);
@@ -1208,12 +1411,6 @@ loop_breakout:
             ma_sound_start(this->soundBuffers[curSound]);
         }
     }
-#ifdef __EMSCRIPTEN__
-    if (!this->PumpWebAudio())
-    {
-        SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "th07: SDL audio pump failed: %s", SDL_GetError());
-    }
-#endif
     return this->commandQueue[0].opcode;
 }
 

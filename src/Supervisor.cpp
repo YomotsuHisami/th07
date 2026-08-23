@@ -635,6 +635,18 @@ ZunResult Supervisor::AddedCallback(Supervisor *arg)
         }
     }
     g_AnmManager->ReleaseSurface(0);
+#ifdef __EMSCRIPTEN__
+    // Runtime menu/result transitions run on the browser main thread. Decode
+    // and upload their immutable backgrounds during startup, before
+    // high-refresh menu presentation begins.
+    // LoadSurface() will subsequently borrow these cached resources instead of
+    // synchronously JPEG-decoding and uploading them in the transition frame.
+    (void)g_AnmManager->PreloadTransitionSurface("data/title/title00.jpg");
+    (void)g_AnmManager->PreloadTransitionSurface("data/title/select00.jpg");
+    (void)g_AnmManager->PreloadTransitionSurface("data/result/music.jpg");
+    (void)g_AnmManager->PreloadTransitionSurface("data/result/result.jpg");
+    (void)g_AnmManager->PreloadTransitionSurface("data/title/phantasm.jpg");
+#endif
     arg->isInEnding = 0;
     arg->renderSkipFrames = 0;
     arg->lastTotalPlayTimeUpdate = SDL_GetTicks();

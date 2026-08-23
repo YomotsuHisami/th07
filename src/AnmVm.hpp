@@ -128,6 +128,13 @@ struct AnmLoadedSprite
     f32 textureWidth;
     Float2 uvStart;
     Float2 uvEnd;
+    // Optional UVs into AnmManager's runtime sprite atlas. Each packed sprite
+    // receives a one-texel edge extrusion so linear filtering remains safe at
+    // arbitrary subpixel positions. Original UVs remain authoritative for
+    // UV-scroll/trail paths that intentionally sample the source texture.
+    Float2 extrudedUvStart;
+    Float2 extrudedUvEnd;
+    bool hasExtrudedUv;
     f32 heightPx;
     f32 widthPx;
     f32 cols;

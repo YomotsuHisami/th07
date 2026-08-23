@@ -2601,6 +2601,22 @@ ZunResult MainMenu::ActualAddedCallback()
     {
         GameManager::DrawLoadingSprite();
     }
+#ifdef __EMSCRIPTEN__
+    static bool s_WebTransitionAnmsPrewarmed = false;
+    if (!s_WebTransitionAnmsPrewarmed)
+    {
+        if (g_AnmManager->PreloadTransitionAnms(ANM_FILE_TITLE, "data/title01.anm", ANM_OFFSET_TITLE) !=
+                ZUN_SUCCESS ||
+            g_AnmManager->PreloadTransitionAnms(ANM_FILE_MUSIC, "data/music00.anm", ANM_OFFSET_MUSIC) !=
+                ZUN_SUCCESS ||
+            g_AnmManager->PreloadTransitionAnms(ANM_FILE_RESULT, "data/result00.anm", ANM_OFFSET_RESULT) !=
+                ZUN_SUCCESS)
+        {
+            return ZUN_ERROR;
+        }
+        s_WebTransitionAnmsPrewarmed = true;
+    }
+#endif
     if (g_AnmManager->LoadAnms(ANM_FILE_TITLE, "data/title01.anm", ANM_OFFSET_TITLE) != ZUN_SUCCESS)
     {
         return ZUN_ERROR;

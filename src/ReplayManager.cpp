@@ -716,7 +716,9 @@ void ReplayManager::SaveReplay(const char *filename, char *replayName)
                 {
                     slowdown = 1.0f;
                 }
-                replayCopy.data.slowdownRate = (1.0f - slowdown) * 100.0f;
+                replayCopy.data.slowdownRate = Touch::UsedCheatMovementThisRun()
+                                                   ? 100.0f
+                                                   : (1.0f - slowdown) * 100.0f;
                 replayCopy.head.replaySize = replaySize;
                 strcpy(replayCopy.data.name, replayName);
                 ResultScreen::GetDate(replayCopy.data.date);
@@ -851,6 +853,8 @@ void ReplayManager::SaveReplay2(const char *filename)
             replayCopy.head.key = g_Rng.GetRandomU16InRange(128) + 64;
             replayCopy.data.rngValue3 = g_Rng.GetRandomU16InRange(256);
             replayCopy.head.rngValue1 = g_Rng.GetRandomU16InRange(256);
+            if (Touch::UsedCheatMovementThisRun())
+                replayCopy.data.slowdownRate = 100.0f;
             replayCopy.data.slowdownRate2 = replayCopy.data.slowdownRate + 1.12f;
             replayCopy.data.slowdownRate3 = replayCopy.data.slowdownRate + 2.34f;
             replayCopy.data.magic30 = 30;

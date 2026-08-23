@@ -94,6 +94,10 @@ struct ThBgmDataSource
     ma_uint32 sampleRate;
     ThBgmFormat *pFmt;
     bool isMemory;
+#ifdef __EMSCRIPTEN__
+    bool isOgg;
+    void *oggDecoder;
+#endif
 
     SDL_IOStream *file;
     const u8 *pData;
@@ -146,6 +150,9 @@ struct SoundPlayer
     bool webAudioWindowActive;
     bool webAudioBgmTransition;
     bool webAudioPlaybackSuspended;
+    bool webAudioRefilling;
+    f64 webAudioLastDiagnosticMs;
+    u32 webAudioMinQueuedFrames;
 #endif
     ma_audio_buffer *duplicateSfxData[128];
     ma_audio_buffer *sfxData[128];

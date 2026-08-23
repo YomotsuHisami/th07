@@ -148,8 +148,14 @@ struct AnmManager
     void Flush();
     i32 LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffset, u32 ownsMemory);
     i32 LoadAnms(i32 anmIdx, const char *path, i32 spriteIdxOffset);
+#ifdef __EMSCRIPTEN__
+    i32 PreloadTransitionAnms(i32 anmIdx, const char *path, i32 spriteIdxOffset);
+#endif
     void LoadSprite(u32 spriteIdx, AnmLoadedSprite *sprite);
     ZunResult LoadSurface(i32 surfaceIdx, const char *path);
+#ifdef __EMSCRIPTEN__
+    ZunResult PreloadTransitionSurface(const char *path);
+#endif
     ZunResult LoadTexture(i32 textureIdx, const char *texturePath, u32 colorKey);
     ZunResult LoadTextureAlphaChannel(i32 textureIdx, const char *texturePath);
     ZunResult LoadTextureEmbedded(u32 textureIdx, ZunImageInfoEmbedded *imageInfo);
@@ -189,16 +195,7 @@ struct AnmManager
     {
         for (i32 i = 0; i < 32; i++)
         {
-            if (this->surfaces[i])
-            {
-                SDL_DestroySurface(this->surfaces[i]);
-                this->surfaces[i] = nullptr;
-            }
-            if (this->surfacesBis[i])
-            {
-                SDL_DestroySurface(this->surfacesBis[i]);
-                this->surfacesBis[i] = nullptr;
-            }
+            ReleaseSurface(i);
         }
     }
 
@@ -394,6 +391,10 @@ struct AnmManager
     struct AnmLoadedSprite sprites[2560];
     struct AnmVm vm;
     GfxTextureHandle textures[264];
+    // Draw-only copies of immutable ANM textures, repacked with one-texel
+    // edge extrusion around every sprite cell. The source textures remain
+    // untouched for dynamic writes and UV-scrolling compatibility paths.
+    GfxTextureHandle spriteAtlasTextures[264];
     void *imageDataArray[256];
     char *textureNames[264];
     i32 loadedSpriteCount;
