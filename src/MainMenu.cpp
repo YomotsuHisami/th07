@@ -23,6 +23,9 @@
 #include "Supervisor.hpp"
 #include "ZunResult.hpp"
 #include "dxutil.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
 
 namespace fs = std::filesystem;
 
@@ -69,6 +72,17 @@ const char *g_CharacterAndShottypeReplayStrings[6] = {
 };
 
 i16 g_LastJoystickInput = 32;
+
+static u32 StartSelectedGame(i32 stageBeforeIncrement)
+{
+    g_GameManager.currentStage = stageBeforeIncrement;
+    g_GameManager.SetReplay(0);
+    g_Supervisor.curState = 2;
+    g_Supervisor.StopAudio();
+    while (g_SoundPlayer.ProcessQueues())
+        ;
+    return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
+}
 
 const char *g_KeyConfigStrings[12] = {
     "ショット、決定ボタンを設定します",
@@ -246,6 +260,10 @@ u32 MainMenu::OnUpdatePreInput()
         }
     case 1: {
         i = MoveCursorVertical(8);
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (MultiplayerGameplay::IsMultiplayer() && this->cursor == 6)
+            this->cursor = 7;
+#endif
         if (i != 0)
         {
             while (g_GameManager.HasReachedMaxClearsAllShotTypes() == 0 && this->cursor == 1)
@@ -393,6 +411,13 @@ u32 MainMenu::OnUpdatePreInput()
                 this->cursorVm->SetInterrupt(2);
                 return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
             case 6:
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                if (MultiplayerGameplay::IsMultiplayer())
+                {
+                    this->cursor = 7;
+                    break;
+                }
+#endif
                 this->menuSubState = 0;
                 this->cursor = 0;
                 this->stateTimer = 0;
@@ -1686,20 +1711,9 @@ u32 MainMenu::OnUpdateSelectShotType()
             if (!g_GameManager.practice)
             {
                 g_GameManager.difficulty = g_Supervisor.cfg.defaultDifficulty;
-                if (g_GameManager.difficulty < DIFF_EXTRA)
-                {
-                    g_GameManager.currentStage = 0;
-                }
-                else
-                {
-                    g_GameManager.currentStage = g_GameManager.difficulty + DIFF_HARD;
-                }
-                g_Supervisor.curState = 2;
-                g_GameManager.SetReplay(0);
-                g_Supervisor.StopAudio();
-                while (g_SoundPlayer.ProcessQueues())
-                    ;
-                return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
+                return StartSelectedGame(g_GameManager.difficulty < DIFF_EXTRA
+                                             ? 0
+                                             : g_GameManager.difficulty + DIFF_HARD);
             }
             this->cursor = 0;
             SetGameState(STATE_SELECT_PRACTICE_STAGE);
@@ -1866,6 +1880,10 @@ u32 MainMenu::OnUpdateSelectPracticeStage()
     case 1:
         local_8 = g_GameManager.clrd[g_GameManager.character * 2 + g_GameManager.shotType]
                       .difficultyClearedWithoutRetries[g_Supervisor.cfg.defaultDifficulty];
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (MultiplayerGameplay::ShouldForceContentUnlocks())
+            local_8 = 99;
+#endif
         if (local_8 < 0)
         {
             local_8 = 1;
@@ -2080,6 +2098,8 @@ u32 MainMenu::OnUpdateSelectReplay()
             this->vmHead[this->chosenReplay % 15 + 135].SetInterrupt(17);
             this->currentReplay =
                 (ReplayFile *)FileSystem::OpenFile(this->replayFilenames[this->chosenReplay], 1);
+            ReplayExtension::LoadPlayback(reinterpret_cast<const u8 *>(this->currentReplay),
+                                          g_LastFileSize);
             this->currentReplay =
                 ReplayManager::ValidateReplayData(this->currentReplay, g_LastFileSize);
             // th07_rep_menu_2 / THGuiRep::State(2): inspect PRAC metadata but
@@ -2173,6 +2193,38 @@ u32 MainMenu::OnUpdateSelectReplay()
             g_GameManager.character = this->currentReplay->data.shotType / 2;
             g_GameManager.shotType = this->currentReplay->data.shotType % 2;
             g_GameManager.shotTypeAndCharacter = this->currentReplay->data.shotType;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            ReplayExtension::MultiplayerReplayConfig replayConfig;
+            if (ReplayExtension::GetMultiplayerPlaybackConfig(&replayConfig))
+            {
+                MultiplayerGameplay::SessionState session;
+                session.playerCount = replayConfig.playerCount;
+                session.localPlayer = 0;
+                session.showStagePlayerNames = true;
+                for (u8 playerId = 0; playerId < replayConfig.playerCount; ++playerId)
+                {
+                    session.players[playerId].active = true;
+                    session.players[playerId].character = replayConfig.characters[playerId];
+                    session.players[playerId].shot = replayConfig.shots[playerId];
+                }
+                if (!MultiplayerGameplay::Configure(session))
+                {
+                    g_GameErrorContext.Fatal("Multiplayer replay configuration is invalid\n");
+                    return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
+                }
+                g_GameManager.difficulty = replayConfig.difficulty;
+                g_GameManager.character = replayConfig.characters[0];
+                g_GameManager.shotType = replayConfig.shots[0];
+                g_GameManager.shotTypeAndCharacter =
+                    g_GameManager.character * 2 + g_GameManager.shotType;
+            }
+            else
+            {
+                MultiplayerGameplay::ResetToSinglePlayer(
+                    static_cast<u8>(g_GameManager.character),
+                    static_cast<u8>(g_GameManager.shotType));
+            }
+#endif
             ReplayManager::FreeReplay(this->currentReplay);
             this->currentReplay = NULL;
             g_GameManager.currentStage = g_GameManager.difficulty >= 5 ? 7 : this->selectedStage;
@@ -2330,6 +2382,10 @@ i32 MainMenu::DrawPracticeMenu()
     local_1c.y += 16.0f;
     local_10 = g_GameManager.clrd[g_GameManager.character * 2 + g_GameManager.shotType]
                    .difficultyClearedWithoutRetries[g_Supervisor.cfg.defaultDifficulty];
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::ShouldForceContentUnlocks())
+        local_10 = 99;
+#endif
 
     for (i = 0; i < 6; i++)
     {

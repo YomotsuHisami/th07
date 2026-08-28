@@ -18,6 +18,12 @@ struct VertexDiffuseXyzrhw
     ZunColor diffuse;
 };
 
+// Multiplayer adds independent P2/P3 player and face blocks.  LoadAnms also
+// consumes consecutive child-file slots, so FACE3 cannot safely live at id 50
+// while the original table ends at 49.
+constexpr i32 ANM_SPRITE_SLOT_COUNT = 2816;
+constexpr i32 ANM_FILE_SLOT_COUNT = 56;
+
 struct VertexTex1DiffuseXyz
 {
     ZunVec3 pos;
@@ -388,7 +394,7 @@ struct AnmManager
     Float2 shakeOffset;
     Float2 prevShakeOffset;
     ZunMatrix matrix;
-    struct AnmLoadedSprite sprites[2560];
+    struct AnmLoadedSprite sprites[ANM_SPRITE_SLOT_COUNT];
     struct AnmVm vm;
     GfxTextureHandle textures[264];
     // Draw-only copies of immutable ANM textures, repacked with one-texel
@@ -398,9 +404,9 @@ struct AnmManager
     void *imageDataArray[256];
     char *textureNames[264];
     i32 loadedSpriteCount;
-    struct AnmRawInstr *scripts[2560];
-    i32 spriteIndices[2560];
-    struct AnmEntry anmFiles[50];
+    struct AnmRawInstr *scripts[ANM_SPRITE_SLOT_COUNT];
+    i32 spriteIndices[ANM_SPRITE_SLOT_COUNT];
+    struct AnmEntry anmFiles[ANM_FILE_SLOT_COUNT];
     SDL_Surface *surfaces[32];
     SDL_Surface *surfacesBis[32];
     GfxTextureHandle surfaceTextures[32];

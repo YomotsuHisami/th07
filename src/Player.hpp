@@ -5,6 +5,9 @@
 #include "EffectManager.hpp"
 #include "GameManager.hpp"
 #include "inttypes.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "Multiplayer.hpp"
+#endif
 
 extern const char *g_ShooterTable[6];
 extern const char *g_ShooterTableFocus[6];
@@ -17,7 +20,13 @@ typedef enum PlayerState
     PLAYER_STATE_SPAWNING = 1,
     PLAYER_STATE_DEAD = 2,
     PLAYER_STATE_INVULNERABLE = 3,
-    PLAYER_STATE_BORDER = 4
+    PLAYER_STATE_BORDER = 4,
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    // Imported multiplayer gameplay states.  They exist only in netplay
+    // builds so an ordinary Eagler build retains the original state surface.
+    PLAYER_STATE_SPIRIT = 5,
+    PLAYER_STATE_ELIMINATED = 6
+#endif
 } PlayerState;
 
 typedef enum PlayerDirection
@@ -338,8 +347,15 @@ struct Player
     ZunTimer fireBulletTimer;
     ZunTimer invulnerabilityTimer;
     ZunTimer borderTimer;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    // Reuse the original two unused words so multiplayer life-transfer state
+    // does not grow Player or disturb the surrounding Eagler additions.
+    i32 lifeGiveTimer;
+    i32 lifeGiveTargetToken;
+#else
     i32 unused_16a18;
     i32 unused_16a1c;
+#endif
     PlayerBombInfo bombInfo;
     ZunVec3 bombStartPos;
     f32 optionAngle;
@@ -352,7 +368,46 @@ struct Player
     struct ShtData *shooterDataFocus;
 };
 
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+extern Player g_Players[TH07_MULTI_MAX_PLAYERS];
+extern bool g_PlayerActive[TH07_MULTI_MAX_PLAYERS];
+extern i32 g_cherryMaxGrazeGrowth[TH07_MULTI_MAX_PLAYERS];
+extern i32 g_cherryMaxBreakGrowth[TH07_MULTI_MAX_PLAYERS];
+
+// Compatibility aliases keep the decompiled single-player code readable.
+// Multiplayer-specific code should prefer slot-indexed helpers below.
+#define g_Player (g_Players[0])
+#define g_Player2 (g_Players[1])
+#define g_Player3 (g_Players[2])
+#define g_Player2Active (g_PlayerActive[1])
+#define g_Player3Active (g_PlayerActive[2])
+
+Player *GetPlayerById(u8 playerId);
+const Player *GetPlayerByIdConst(u8 playerId);
+bool IsPlayerSlotActive(u8 playerId);
+
+constexpr i32 POWER_GIVE_TAPS_REQUIRED = 8;
+constexpr i32 POWER_GIVE_TAP_WINDOW = 24;
+constexpr i32 POWER_GIVE_AMOUNT = 20;
+constexpr i32 POWER_GIVE_PROMPT_AFTER = 4;
+extern i32 g_powerGiveTaps[TH07_MULTI_MAX_PLAYERS];
+extern i32 g_powerGiveWindow[TH07_MULTI_MAX_PLAYERS];
+extern i32 g_teamWipeRetryFrames;
+
+u8 GetActivePlayerMask();
+i32 GetActivePlayerCount();
+bool IsAnyActivePlayerBombing();
+bool VerifyThreePlayerLifeTransferSelectionRules();
+Player *GetClosestActivePlayer(ZunVec3 *position);
+u8 GetPlayerOverlapAlpha(const Player *player);
+ZunVec3 GetPlayerPresentationOffset(u8 playerId);
+bool IsSharedBorderActive();
+void ActivateSharedBorder();
+i32 GetPlayerAnmScript(const Player *player, i32 script);
+i32 GetPlayerEffectSlot(const Player *player, i32 p1Slot);
+#else
 extern Player g_Player;
+#endif
 
 typedef i32 (*ShtFunc1)(Player *, PlayerBullet *, i32, struct ShtEntry *);
 extern ShtFunc1 g_ShtFireFuncs[6];

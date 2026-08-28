@@ -13,6 +13,12 @@
 #include "SoundPlayer.hpp"
 #include "ZunResult.hpp"
 #include "utils.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
+#ifdef TH_ENABLE_NETPLAY
+#include "netplay/Th07RollbackState.hpp"
+#endif
 
 u32 g_SpellcardScore[141] = {
     0x1E8480, 0x1E8480, 0x2191C0, 0x2191C0, 0x249F00, 0x249F00, 0x249F00, 0x249F00, 0x249F00,
@@ -39,6 +45,33 @@ EnemyManager g_EnemyManager;
 ChainElem g_EnemyManagerCalcChain;
 
 ChainElem g_EnemyManagerDrawChain2;
+
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+static bool ShouldFreezeEnemyEclForPlayers()
+{
+    if (IsAnyActivePlayerBombing())
+        return true;
+
+    bool hasParticipant = false;
+    for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+    {
+        if (!IsPlayerSlotActive(playerId) ||
+            MultiplayerGameplay::IsPlayerTemporarilyAbsent(playerId))
+        {
+            continue;
+        }
+
+        hasParticipant = true;
+        if (g_Players[playerId].playerState == PLAYER_STATE_ALIVE)
+            return false;
+    }
+
+    // If nobody can currently participate, holding the ECL is safer than
+    // advancing a bomb/death-sensitive script with no live player. With one
+    // player this preserves TH07's original non-ALIVE freeze semantics.
+    return hasParticipant || MultiplayerGameplay::IsMultiplayer();
+}
+#endif
 
 void Enemy::Move()
 {
@@ -151,6 +184,10 @@ Enemy *EnemyManager::SpawnEnemy(i32 eclSubId, ZunVec3 *pos, i32 life, i32 itemDr
             continue;
         }
 
+#ifdef TH_ENABLE_NETPLAY
+        Netplay::Th07Rollback::TouchEnemy(enemy);
+#endif
+
         *enemy = this->enemyTemplate;
         enemy->mirror = mirror;
         if (life >= 0)
@@ -192,6 +229,10 @@ Enemy *EnemyManager::SpawnEnemyEx(i32 eclSubId, ZunVec3 *pos, i32 life, i32 item
         {
             continue;
         }
+
+#ifdef TH_ENABLE_NETPLAY
+        Netplay::Th07Rollback::TouchEnemy(enemy);
+#endif
 
         *enemy = this->enemyTemplate;
         if (life >= 0)
@@ -515,6 +556,10 @@ i32 Enemy::HandleTimerCallback()
     }
     if (this->timer >= this->timerCallbackThreshold)
     {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (Stage4ChainRestartPhase(this, 1))
+            return 1;
+#endif
         max = 0;
         for (i = 0; i < 4; i++)
         {
@@ -641,15 +686,36 @@ void Enemy::ClampPos()
 void Enemy::CheckBulletPlayerCollision(ZunVec3 *bulletCenter, ZunVec3 *bulletSize)
 {
     ZunVec3 grazeSize;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    bool hitPlayer = false;
+#endif
 
     grazeSize = *bulletSize / 0.7f;
     if (this->isProjectile && this->timer.HasTicked() && this->timer.current % 6 == 0)
     {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            if (IsPlayerSlotActive(playerId))
+                g_Players[playerId].CheckGraze(bulletCenter, &grazeSize);
+        }
+#else
         g_Player.CheckGraze(bulletCenter, &grazeSize);
+#endif
     }
     grazeSize = *bulletSize / 1.5f;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+    {
+        if (IsPlayerSlotActive(playerId) &&
+            g_Players[playerId].CalcKillboxCollision(bulletCenter, &grazeSize) == 1)
+            hitPlayer = true;
+    }
+    if (hitPlayer && this->canDie && (!this->isBoss && !this->isProjectile))
+#else
     if (g_Player.CalcKillboxCollision(bulletCenter, &grazeSize) == 1 && this->canDie &&
         (!this->isBoss && !this->isProjectile))
+#endif
     {
         this->life = this->life - 10;
     }
@@ -675,6 +741,15 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
     i32 collisionOut;
     i32 stageFactor;
     ZunVec3 enemyDiff;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    i32 playerDamage[TH07_MULTI_MAX_PLAYERS] = {};
+    i32 playerCollision[TH07_MULTI_MAX_PLAYERS] = {};
+    i32 damageOwnerId;
+    i32 damageTotal;
+    i32 damageAttributed;
+    i32 contribution;
+    Player *targetingPlayer;
+#endif
 
     collisionOut = 0;
     stageFactor = g_GameManager.currentStage >= 5 ? 10 : g_GameManager.currentStage * 2;
@@ -728,7 +803,11 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
         enemy->prevPosition = enemy->pos;
         arg->enemyCountReal++;
         if (enemy->freezeEclDuringBombs &&
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            ShouldFreezeEnemyEclForPlayers())
+#else
             (g_Player.bombInfo.isInUse || g_Player.playerState != PLAYER_STATE_ALIVE))
+#endif
         {
             enemy->timer--;
             goto LAB_00421da7;
@@ -812,6 +891,12 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
         }
         collisionOut = 0;
         playedDamageSound = 0;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        damage = 0;
+        damageOwnerId = 0;
+        damageTotal = 0;
+        damageAttributed = 0;
+#endif
         if (!enemy->hasNoCollision && !enemy->invisibleOnBomb)
         {
             if (enemy->canDie && enemy->hasContactHitbox)
@@ -835,6 +920,39 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
             enemy->lastDamage = 0;
             if (enemy->canDie && enemy->isHittable)
             {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                damage = 0;
+                collisionOut = 0;
+                damageOwnerId = 0;
+                for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+                {
+                    playerDamage[playerId] = 0;
+                    playerCollision[playerId] = 0;
+                    if (!IsPlayerSlotActive(playerId))
+                        continue;
+
+                    playerDamage[playerId] = g_Players[playerId].CalcDamageToEnemy(
+                        &enemy->pos, &enemy->hitboxSize, &playerCollision[playerId]);
+                    if (enemy->grazeSize.x > 0.0f)
+                    {
+                        grazeDamage = g_Players[playerId].CalcDamageToEnemy(
+                            &enemy->pos, &enemy->grazeSize, &playerCollision[playerId]);
+                        if (playerCollision[playerId] == 0)
+                            playerDamage[playerId] = (i32)((f32)playerDamage[playerId] +
+                                                           (f32)grazeDamage / 2.5f);
+                    }
+                    damage += playerDamage[playerId];
+                    if (playerCollision[playerId] != 0)
+                        collisionOut = playerCollision[playerId];
+                    // Keep exact ties with the lower slot, matching upstream.
+                    if (playerDamage[playerId] > playerDamage[damageOwnerId])
+                        damageOwnerId = playerId;
+                }
+                // Preserve the raw per-player split for contribution
+                // attribution after spell/invulnerability/boss scaling has
+                // produced the actual damage applied to the enemy.
+                damageTotal = damage;
+#else
                 damage = g_Player.CalcDamageToEnemy(&enemy->pos, &enemy->hitboxSize, &collisionOut);
                 if (enemy->grazeSize.x > 0.0f)
                 {
@@ -845,8 +963,42 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
                         damage = (i32)((f32)damage + (f32)grazeDamage / 2.5f);
                     }
                 }
+#endif
                 if (damage > 0)
                 {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                    Player &damageOwner = g_Players[damageOwnerId];
+                    if ((enemy->isBoss || !damageOwner.isFocus) && damageOwner.bombInfo.isInUse == 0)
+                    {
+                        if (enemy->isBoss && !damageOwner.isFocus)
+                            cherryGain = damage / (10 - stageFactor / 3) * 10;
+                        else
+                            cherryGain = damage / (30 - stageFactor) * 10;
+                        if (cherryGain > 70)
+                            cherryGain = 70;
+                        if (cherryGain == 0 &&
+                            (damageOwner.isFocus == 0 || (enemy->timer.GetCurrent() & 1) != 0))
+                            cherryGain = 10;
+
+                        switch (MultiplayerGameplay::GetPlayerCharacter((u8)damageOwnerId) * 2 +
+                                MultiplayerGameplay::GetPlayerShot((u8)damageOwnerId))
+                        {
+                        default:
+                            break;
+                        case SHOT_REIMU_A:
+                            if ((cherryGain == 20 || cherryGain == 30) &&
+                                (enemy->timer.GetCurrent() & 1) != 0)
+                                cherryGain -= 10;
+                            if (g_GameManager.currentStage >= 5 &&
+                                g_GameManager.currentStage <= 6 && !enemy->isBoss)
+                                damage = damage / 2;
+                            if (g_GameManager.currentStage == 4 && !enemy->isBoss)
+                                damage -= damage / 4 + damage / 16;
+                        }
+                        if (cherryGain != 0)
+                            g_GameManager.AddCherryPlusForPlayer(cherryGain, (u8)damageOwnerId);
+                    }
+#else
                     if ((enemy->isBoss || !g_Player.isFocus) && g_Player.bombInfo.isInUse == 0)
                     {
                         if (enemy->isBoss && !g_Player.isFocus)
@@ -893,6 +1045,7 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
                             g_GameManager.AddCherryPlus(cherryGain);
                         }
                     }
+#endif
                     if (damage >= 70)
                     {
                         damage = 70;
@@ -940,11 +1093,94 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
                                 damage = 0;
                             }
                         }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                        // Multiple ships add firepower, but boss phases should
+                        // not collapse proportionally faster.  The Stage 4
+                        // character chain is already lengthened by fighting
+                        // each distinct character card, so those copies retain
+                        // the original single-player damage scale.
+                        if (enemy->isBoss && !IsStage4ChainedCardActive())
+                            damage = (i32)((f32)damage * GetMultiplayerBossDamageMultiplier());
+
+                        if (damage > 0 && damageTotal > 0)
+                        {
+                            damageAttributed = 0;
+                            for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+                            {
+                                if (!IsPlayerSlotActive(playerId) || playerDamage[playerId] <= 0)
+                                    continue;
+                                contribution = (i32)((i64)damage * (i64)playerDamage[playerId] /
+                                                     (i64)damageTotal);
+                                if (contribution > 0)
+                                {
+                                    AddPlayerDamageDealt(playerId, (u32)contribution);
+                                    damageAttributed += contribution;
+                                }
+                            }
+                            // Integer division can leave a small remainder.
+                            // Give it to the same deterministic owner used for
+                            // cherry attribution and exact-tie handling.
+                            if (damageAttributed < damage)
+                                AddPlayerDamageDealt((u8)damageOwnerId,
+                                                     (u32)(damage - damageAttributed));
+                        }
+#endif
                         enemy->life -= damage;
                         enemy->lastDamage = damage;
                     }
                     playedDamageSound = 1;
                 }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+                {
+                    if (!IsPlayerSlotActive(playerId))
+                        continue;
+                    targetingPlayer = &g_Players[playerId];
+                    if (enemy->isBoss)
+                    {
+                        diffToPlayer = targetingPlayer->positionOfLastEnemyHit -
+                                       targetingPlayer->positionCenter;
+                        enemyDiff = enemy->pos - targetingPlayer->positionCenter;
+                        if (!targetingPlayer->targetingEnemy ||
+                            fabsf(diffToPlayer.x) > fabsf(enemyDiff.x))
+                        {
+                            targetingPlayer->positionOfLastEnemyHit = enemy->pos;
+                        }
+
+                        if (MultiplayerGameplay::GetPlayerCharacter(playerId) == CHAR_SAKUYA)
+                        {
+                            diffToPlayer = targetingPlayer->sakuyaTargetPosition -
+                                           targetingPlayer->positionCenter;
+                            angle = atan2f(enemy->pos.y - targetingPlayer->positionCenter.y,
+                                           enemy->pos.x - targetingPlayer->positionCenter.x);
+                            if (angle >= -2.0943952f && angle <= -1.0471976f &&
+                                (!targetingPlayer->targetingEnemy ||
+                                 fabsf(diffToPlayer.x) > fabsf(enemyDiff.x)))
+                            {
+                                targetingPlayer->sakuyaTargetPosition = enemy->pos;
+                                targetingPlayer->targetingEnemy = 1;
+                            }
+                        }
+                        else
+                        {
+                            targetingPlayer->targetingEnemy = 1;
+                        }
+                    }
+                    if (!targetingPlayer->targetingEnemy)
+                    {
+                        if (targetingPlayer->positionOfLastEnemyHit.y < enemy->pos.y)
+                            targetingPlayer->positionOfLastEnemyHit = enemy->pos;
+                        if (MultiplayerGameplay::GetPlayerCharacter(playerId) == CHAR_SAKUYA &&
+                            targetingPlayer->sakuyaTargetPosition.y < -900.0f)
+                        {
+                            angle = atan2f(enemy->pos.y - targetingPlayer->positionCenter.y,
+                                           enemy->pos.x - targetingPlayer->positionCenter.x);
+                            if (angle >= -2.0943952f && angle <= -1.0471976f)
+                                targetingPlayer->sakuyaTargetPosition = enemy->pos;
+                        }
+                    }
+                }
+#else
                 if (enemy->isBoss)
                 {
                     diffToPlayer = g_Player.positionOfLastEnemyHit - g_Player.positionCenter;
@@ -991,10 +1227,15 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
                         }
                     }
                 }
+#endif
             }
         }
         if (enemy->life <= 0 && enemy->canDie)
         {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            if (enemy->deathType != 3 && enemy->canBeDamaged && damage > 0)
+                AddPlayerEnemiesDefeated((u8)damageOwnerId, 1);
+#endif
             for (k = 0; k < 4; k++)
             {
                 enemy->lifeCallbackThreshold[k] = -1;
@@ -1036,7 +1277,7 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
                 {
                     g_EffectManager.SpawnParticles(enemy->deathAnm2 + 4, &enemy->pos, 3,
                                                    0xffffffff);
-                    g_ItemManager.SpawnItem(&enemy->pos, enemy->itemDrop, collisionOut);
+                    g_ItemManager.SpawnEnemyDrop(&enemy->pos, enemy->itemDrop, collisionOut);
                 }
                 else if (enemy->itemDrop == -1)
                 {
@@ -1044,7 +1285,7 @@ u32 EnemyManager::OnUpdate(EnemyManager *arg)
                     {
                         g_EffectManager.SpawnParticles(enemy->deathAnm2 + 4, &enemy->pos, 6,
                                                        0xffffffff);
-                        g_ItemManager.SpawnItem(
+                        g_ItemManager.SpawnEnemyDrop(
                             &enemy->pos, g_ItemDropTable[arg->randomItemTableIdx], collisionOut);
                         arg->randomItemTableIdx++;
                         if (arg->randomItemTableIdx >= 32)
@@ -1468,6 +1709,9 @@ ZunResult EnemyManager::AddedCallback(EnemyManager *arg)
     arg->randomItemSpawnIdx = g_Rng.GetRandomU16InRange(3);
     arg->randomItemTableIdx = g_Rng.GetRandomU16InRange(8);
     arg->spellcardInfo.isActive = 0;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    ResetStage4BossChain();
+#endif
 
     ZunVec3 vec = ZunVec3(-999.0f, -999.0f, -999.0f);
     g_AsciiManager.GetBossMarker(0)->pos = vec;

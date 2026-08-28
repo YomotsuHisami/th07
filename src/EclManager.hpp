@@ -377,3 +377,21 @@ struct EclManager
     }
 };
 extern EclManager g_EclManager;
+
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+// Stage 4's character-specific spellcard chain is simulation state.  The
+// implementation is imported from the multiplayer feature branch, while the
+// transport/rollback machinery stays out of ECL.
+void ResetStage4BossChain();
+void NoteStage4ChainedSpellcard(struct Enemy *enemy);
+bool IsStage4ChainedCardActive();
+bool Stage4ChainRestartPhase(struct Enemy *enemy, i32 phaseOver);
+
+extern i32 g_stage4ChainQueue[3];
+extern i32 g_stage4ChainCount;
+extern i32 g_stage4ChainPos;
+extern i32 g_stage4ChainBossId;
+extern i32 g_stage4ChainCardActive;
+extern i32 g_stage4ChainPhaseLife;
+extern i32 g_stage4ChainSpellIdx;
+#endif

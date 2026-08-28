@@ -14,7 +14,11 @@ resources/th07.exe
 reccmp-user.yml
 reccmp-build.yml
 scripts/__pycache__/
+**/__pycache__/
+tools/netplay/node_modules/
+tools/rebase-preview/
 compile_commands.json
+netplay-rollback-probe.enable
 
 android/.gradle
 android/.idea

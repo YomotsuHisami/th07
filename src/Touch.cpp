@@ -994,12 +994,11 @@ void Touch::ApplyReplayTouchEvent(i32 fingerId, f32 x, f32 y, u32 action, u32 ro
         return;
     }
 
-    ReplayPlaybackFingerSlot *slot = AcquireReplayPlaybackFinger(fingerId);
-    if (!slot)
-        return;
-
     if (action == ReplayExtension::TOUCH_ACTION_DOWN)
     {
+        ReplayPlaybackFingerSlot *slot = AcquireReplayPlaybackFinger(fingerId);
+        if (!slot)
+            return;
         slot->active = true;
         slot->releasedThisFrame = false;
         slot->x = x;
@@ -1008,6 +1007,15 @@ void Touch::ApplyReplayTouchEvent(i32 fingerId, f32 x, f32 y, u32 action, u32 ro
         slot->flags = flags;
         return;
     }
+
+    // SDL finger motion/up only belongs to an already-active finger lifetime.
+    // Never synthesize a replay finger from an orphan MOTION/UP: a restart can
+    // intentionally cut the previous run's touch stream before the browser has
+    // emitted the physical UP, and creating here turns that stale tail into a
+    // persistent ghost crosshair in the next replay.
+    ReplayPlaybackFingerSlot *slot = FindReplayPlaybackFinger(fingerId);
+    if (!slot || !slot->active)
+        return;
 
     if (action == ReplayExtension::TOUCH_ACTION_MOTION)
     {
@@ -1051,6 +1059,11 @@ void Touch::ResetReplayTouch()
 {
     for (ReplayPlaybackFingerSlot &slot : g_ReplayPlaybackFingers)
         slot = {};
+}
+
+void Touch::ResetReplayRecordingState()
+{
+    ResetReplayRecordFingerIds();
 }
 
 #ifdef TH_DEV_TOOLS

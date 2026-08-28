@@ -23,6 +23,9 @@
 #include "Supervisor.hpp"
 #include "ZunResult.hpp"
 #include "dxutil.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
 
 u32 g_SpellcardTimeColors[4] = {
     0xa0d0ff,
@@ -36,6 +39,32 @@ Gui g_Gui;
 ChainElem g_GuiCalcChain;
 
 ChainElem g_GuiDrawChain;
+
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+namespace
+{
+const char *GetPlayerFacePath(u8 playerId)
+{
+    switch (MultiplayerGameplay::GetPlayerCharacter(playerId))
+    {
+    case CHAR_REIMU: return "data/face_rm00.anm";
+    case CHAR_MARISA: return "data/face_mr00.anm";
+    case CHAR_SAKUYA: return "data/face_sk00.anm";
+    default: return "data/face_rm00.anm";
+    }
+}
+
+const char *GetMultiplayerHudLoadoutName(u8 playerId)
+{
+    static const char *names[6] = {
+        "ReimuA", "ReimuB", "MarisaA", "MarisaB", "SakuyaA", "SakuyaB",
+    };
+    const i32 index = MultiplayerGameplay::GetPlayerCharacter(playerId) * 2 +
+                      MultiplayerGameplay::GetPlayerShot(playerId);
+    return index >= 0 && index < 6 ? names[index] : "Unknown";
+}
+} // namespace
+#endif
 
 i32 Gui::IsStageFinished()
 {
@@ -353,7 +382,25 @@ u32 Gui::OnDraw(Gui *arg)
 
 void Gui::ShowBombNamePortrait(i32 sprite, const char *name)
 {
-    g_AnmManager->SetAnmIdxAndExecuteScript(&this->impl->bombSpellcardPortrait, 1185);
+    i32 portraitScript = 1185;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (sprite >= ANM_OFFSET_FACE2 && sprite < ANM_OFFSET_FRONT)
+        portraitScript += ANM_OFFSET_FACE2 - ANM_OFFSET_FACE;
+    else if (sprite >= ANM_OFFSET_FACE3)
+        portraitScript += ANM_OFFSET_FACE3 - ANM_OFFSET_FACE;
+
+    // A missing secondary face must not turn a cosmetic cut-in into an array
+    // underflow. The normal P1 face is already loaded at this point.
+    if (sprite < 0 || sprite >= (i32)(sizeof(g_AnmManager->sprites) /
+                                      sizeof(g_AnmManager->sprites[0])) ||
+        g_AnmManager->sprites[sprite].sourceFileIndex < 0)
+    {
+        portraitScript = 1185;
+        sprite = ANM_OFFSET_FACE + 1;
+    }
+#endif
+    g_AnmManager->SetAnmIdxAndExecuteScript(&this->impl->bombSpellcardPortrait,
+                                             portraitScript);
     g_AnmManager->SetActiveSprite(&this->impl->bombSpellcardPortrait, sprite);
     g_AnmManager->SetAnmIdxAndExecuteScript(&this->impl->bombSpellcardDecorLeft, 1188);
     g_AnmManager->SetActiveSprite(&this->impl->bombSpellcardDecorLeft, 1196);
@@ -460,6 +507,24 @@ ZunResult Gui::ActualAddedCallback()
             }
             break;
         }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        // Secondary player face ANMs are GUI-lifetime resources. Loading
+        // them from OnDraw during the stage-clear screen repeatedly released
+        // and rebound the same raw ANM data until LoadAnm observed corrupted
+        // string offsets. Match the upstream multiplayer ownership: load once
+        // when the GUI is first registered and preserve them across stages.
+        if (MultiplayerGameplay::IsMultiplayer())
+        {
+            if (MultiplayerGameplay::GetPlayerCount() >= 2 &&
+                g_AnmManager->LoadAnms(ANM_FILE_FACE2, GetPlayerFacePath(1),
+                                       ANM_OFFSET_FACE2) != ZUN_SUCCESS)
+                return ZUN_ERROR;
+            if (MultiplayerGameplay::GetPlayerCount() >= 3 &&
+                g_AnmManager->LoadAnms(ANM_FILE_FACE3, GetPlayerFacePath(2),
+                                       ANM_OFFSET_FACE3) != ZUN_SUCCESS)
+                return ZUN_ERROR;
+        }
+#endif
     }
     else
     {
@@ -795,6 +860,23 @@ ZunResult GuiImpl::RunMsg()
     {
         this->msg.timer = (u32)this->msg.curInstr->time;
     }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::IsMultiplayer())
+    {
+        for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            if (IsPlayerSlotActive(playerId) &&
+                g_Players[playerId].hasBorder != BORDER_NONE)
+            {
+                // Shared-border propagation inside Player clears every
+                // participant, so one call is sufficient and deterministic.
+                g_Players[playerId].BreakBorderNaturally();
+                break;
+            }
+        }
+    }
+    else
+#endif
     if (g_Player.hasBorder != BORDER_NONE)
     {
         g_Player.BreakBorderNaturally();
@@ -1384,6 +1466,16 @@ void Gui::UpdateGui()
         this->impl->stageClearBonus = scoreBonus;
 
         g_GameManager.AddScore(scoreBonus * 10);
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        // These are per-stage contribution diagnostics in final sbrik. Keep
+        // their lifetime deterministic even when this endpoint hides the
+        // optional presentation-only readout.
+        for (i32 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            g_cherryMaxGrazeGrowth[playerId] = 0;
+            g_cherryMaxBreakGrowth[playerId] = 0;
+        }
+#endif
         this->impl->finishedStage++;
     }
     this->showLives = 2;
@@ -1416,6 +1508,25 @@ void Gui::DrawGameScene()
     i32 i;
     f32 x;
     f32 y;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    const bool compactMultiplayerHud = MultiplayerGameplay::IsMultiplayer();
+    const f32 multiplayerHudBaseY = 76.0f;
+    const f32 multiplayerHudOffsetX = 8.0f;
+    const f32 multiplayerScoreBaseY = 34.0f;
+    const f32 resourceIconStep = 11.0f;
+    i32 playerId;
+    i32 resourceCount;
+    f32 blockY;
+    AnmVm rowBackgroundVm;
+    AnmVm playerLabelVm;
+    AnmVm bombLabelVm;
+    AnmVm powerLabelVm;
+    Float2 savedIconScale;
+    u32 contributionKills;
+    u32 contributionDamage;
+#else
+    const bool compactMultiplayerHud = false;
+#endif
 
     g_AnmManager->Flush();
     g_Supervisor.viewport.x = 0;
@@ -1425,6 +1536,7 @@ void Gui::DrawGameScene()
     g_Supervisor.gfxDevice->SetViewport(g_Supervisor.viewport);
     vm = &this->impl->vms0[12];
     if (g_Supervisor.cfg.redrawEveryFrame || vm->currentInstruction ||
+        g_GameManager.isInPauseMenu || g_GameManager.isInRetryMenu ||
         g_Supervisor.renderSkipFrames != 0)
     {
         for (y = 0.0f; y < 464.0f; y = y + 32.0f)
@@ -1450,17 +1562,68 @@ void Gui::DrawGameScene()
         }
         g_AnmManager->DrawNoRotation(this->impl->vms0);
         g_AnmManager->Draw(this->impl->vms0 + 1);
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (compactMultiplayerHud)
+        {
+            this->impl->vms0[2].pos.y -= 14.0f;
+            this->impl->vms0[3].pos.y -= 14.0f;
+        }
+#endif
         g_AnmManager->DrawNoRotation(this->impl->vms0 + 2);
         g_AnmManager->DrawNoRotation(this->impl->vms0 + 3);
-        g_AnmManager->DrawNoRotation(this->impl->vms0 + 4);
-        g_AnmManager->DrawNoRotation(this->impl->vms0 + 5);
-        g_AnmManager->DrawNoRotation(this->impl->vms0 + 6);
-        g_AnmManager->DrawNoRotation(this->impl->vms0 + 7);
-        g_AnmManager->DrawNoRotation(this->impl->vms0 + 8);
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (compactMultiplayerHud)
+        {
+            this->impl->vms0[2].pos.y += 14.0f;
+            this->impl->vms0[3].pos.y += 14.0f;
+        }
+        else
+#endif
+        {
+            g_AnmManager->DrawNoRotation(this->impl->vms0 + 4);
+            g_AnmManager->DrawNoRotation(this->impl->vms0 + 5);
+            g_AnmManager->DrawNoRotation(this->impl->vms0 + 6);
+            g_AnmManager->DrawNoRotation(this->impl->vms0 + 7);
+            g_AnmManager->DrawNoRotation(this->impl->vms0 + 8);
+        }
+        this->showLives = 2;
+        this->showBombs = 2;
+        this->showGraze = 2;
+        this->showPoint = 2;
+        this->showPower = 2;
     }
     if (!g_Supervisor.cfg.disableItemDrawAroundPlayfield)
     {
         vm = &this->impl->vms0[13];
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (compactMultiplayerHud)
+        {
+            x = 512.0f;
+            vm->pos = ZunVec3(x, multiplayerScoreBaseY, 0.49f);
+            g_AnmManager->DrawNoRotation(vm);
+            vm->pos = ZunVec3(x, multiplayerScoreBaseY + 16.0f, 0.49f);
+            g_AnmManager->DrawNoRotation(vm);
+
+            // Compact multiplayer rows are cleared every draw. This keeps
+            // independent life/bomb/power values from leaving stale glyphs
+            // when one player's resource count shrinks.
+            for (playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+            {
+                blockY = multiplayerHudBaseY + 48.0f * playerId;
+                for (x = 416.0f; x < 528.0f; x += 16.0f)
+                {
+                    vm->pos = ZunVec3(x, blockY, 0.48f);
+                    g_AnmManager->DrawNoRotation(vm);
+                    vm->pos = ZunVec3(x, blockY + 12.0f, 0.48f);
+                    g_AnmManager->DrawNoRotation(vm);
+                    vm->pos = ZunVec3(x, blockY + 24.0f, 0.48f);
+                    g_AnmManager->DrawNoRotation(vm);
+                }
+            }
+        }
+        else
+#endif
+        {
         x = 496.0f;
         vm->pos = ZunVec3(x, 48.0f, 0.49f);
         g_AnmManager->DrawNoRotation(vm);
@@ -1491,9 +1654,114 @@ void Gui::DrawGameScene()
             vm->pos = ZunVec3(x, 176.0f, 0.48f);
             g_AnmManager->DrawNoRotation(vm);
         }
+        }
         vm->pos = ZunVec3(512.0f, 464.0f, 0.48f);
         g_AnmManager->DrawNoRotation(vm);
     }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (compactMultiplayerHud &&
+        !g_Supervisor.cfg.disableItemDrawAroundPlayfield &&
+        (this->showGraze || this->showPoint))
+    {
+        // The lower Graze/Point value area needs clearing without erasing the
+        // adjacent logo. Match the upstream half-width tile and publish the
+        // temporary scale to Eagler's interpolation state as well.
+        g_AnmManager->Flush();
+        rowBackgroundVm = this->impl->vms0[13];
+        rowBackgroundVm.scale.x *= 0.5f;
+        rowBackgroundVm.prevScale = rowBackgroundVm.scale;
+        if (this->showGraze)
+        {
+            rowBackgroundVm.pos = ZunVec3(480.0f, 224.0f, 0.48f);
+            g_AnmManager->DrawNoRotation(&rowBackgroundVm);
+        }
+        if (this->showPoint)
+        {
+            rowBackgroundVm.pos = ZunVec3(480.0f, 240.0f, 0.48f);
+            g_AnmManager->DrawNoRotation(&rowBackgroundVm);
+        }
+        g_AnmManager->Flush();
+    }
+    if (compactMultiplayerHud)
+    {
+        playerLabelVm = this->impl->vms0[4];
+        bombLabelVm = this->impl->vms0[5];
+        powerLabelVm = this->impl->vms0[6];
+        playerLabelVm.scale = Float2{0.80f, 0.80f};
+        bombLabelVm.scale = Float2{0.80f, 0.80f};
+        powerLabelVm.scale = Float2{0.80f, 0.80f};
+        playerLabelVm.prevScale = playerLabelVm.scale;
+        bombLabelVm.prevScale = bombLabelVm.scale;
+        powerLabelVm.prevScale = powerLabelVm.scale;
+
+        for (playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            if (!IsPlayerSlotActive((u8)playerId) ||
+                MultiplayerGameplay::IsPlayerTemporarilyAbsent((u8)playerId))
+                continue;
+            blockY = multiplayerHudBaseY + 48.0f * playerId;
+            playerLabelVm.pos = ZunVec3(481.0f + multiplayerHudOffsetX, blockY, 0.47f);
+            bombLabelVm.pos = ZunVec3(481.0f + multiplayerHudOffsetX, blockY + 12.0f, 0.47f);
+            powerLabelVm.pos = ZunVec3(481.0f + multiplayerHudOffsetX, blockY + 24.0f, 0.47f);
+            g_AnmManager->DrawNoRotation(&playerLabelVm);
+            g_AnmManager->DrawNoRotation(&bombLabelVm);
+            g_AnmManager->DrawNoRotation(&powerLabelVm);
+        }
+
+        // Graze/Point labels stay below the three player rows.
+        this->impl->vms0[7].pos.y += 60.0f;
+        this->impl->vms0[8].pos.y += 60.0f;
+        g_AnmManager->DrawNoRotation(this->impl->vms0 + 7);
+        g_AnmManager->DrawNoRotation(this->impl->vms0 + 8);
+        this->impl->vms0[7].pos.y -= 60.0f;
+        this->impl->vms0[8].pos.y -= 60.0f;
+
+        vm = &this->impl->vms0[9];
+        savedIconScale = vm->scale;
+        const Float2 savedIconPrevScale = vm->prevScale;
+        vm->scale = Float2{0.65f, 0.65f};
+        vm->prevScale = vm->scale;
+        for (playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            if (!IsPlayerSlotActive((u8)playerId) ||
+                MultiplayerGameplay::IsPlayerTemporarilyAbsent((u8)playerId))
+                continue;
+            resourceCount = GetPlayerLives((u8)playerId);
+            blockY = multiplayerHudBaseY + 48.0f * playerId;
+            for (i = 0, x = 532.0f + multiplayerHudOffsetX;
+                 i < resourceCount; ++i, x += resourceIconStep)
+            {
+                vm->pos = ZunVec3(x, blockY, 0.46f);
+                g_AnmManager->DrawNoRotation(vm);
+            }
+        }
+        vm->scale = savedIconScale;
+        vm->prevScale = savedIconPrevScale;
+
+        vm = &this->impl->vms0[10];
+        savedIconScale = vm->scale;
+        const Float2 savedBombIconPrevScale = vm->prevScale;
+        vm->scale = Float2{0.65f, 0.65f};
+        vm->prevScale = vm->scale;
+        for (playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            if (!IsPlayerSlotActive((u8)playerId) ||
+                MultiplayerGameplay::IsPlayerTemporarilyAbsent((u8)playerId))
+                continue;
+            resourceCount = GetPlayerBombs((u8)playerId);
+            blockY = multiplayerHudBaseY + 12.0f + 48.0f * playerId;
+            for (i = 0, x = 532.0f + multiplayerHudOffsetX;
+                 i < resourceCount; ++i, x += resourceIconStep)
+            {
+                vm->pos = ZunVec3(x, blockY, 0.46f);
+                g_AnmManager->DrawNoRotation(vm);
+            }
+        }
+        vm->scale = savedIconScale;
+        vm->prevScale = savedBombIconPrevScale;
+    }
+    else
+#endif
     if (this->showLives)
     {
         vm = &this->impl->vms0[9];
@@ -1503,7 +1771,7 @@ void Gui::DrawGameScene()
             g_AnmManager->DrawNoRotation(vm);
         }
     }
-    if (this->showBombs)
+    if (!compactMultiplayerHud && this->showBombs)
     {
         vm = &this->impl->vms0[10];
         for (i = 0, x = 496.0f; i < (i32)g_GameManager.globals->bombsRemaining; i++, x += 16.0f)
@@ -1519,7 +1787,11 @@ void Gui::DrawGameScene()
         g_AnmManager->DrawNoRotation(vm);
     }
     textDrawPos.x = 496.0f;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    textDrawPos.y = compactMultiplayerHud ? multiplayerScoreBaseY + 16.0f : 64.0f;
+#else
     textDrawPos.y = 64.0f;
+#endif
     textDrawPos.z = 0.0f;
     if (g_GameManager.globals->guiScore < 100000000)
     {
@@ -1541,7 +1813,13 @@ void Gui::DrawGameScene()
         g_AsciiManager.scale.x = 1.0f;
         g_AsciiManager.scale.y = 1.0f;
     }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    textDrawPos = ZunVec3(496.0f,
+                          compactMultiplayerHud ? multiplayerScoreBaseY : 48.0f,
+                          0.0f);
+#else
     textDrawPos = ZunVec3(496.0f, 48.0f, 0.0f);
+#endif
     if (g_GameManager.globals->highScore < 100000000)
     {
         AsciiManager::AddFormatText(&g_AsciiManager, &textDrawPos, "%.8d",
@@ -1562,24 +1840,169 @@ void Gui::DrawGameScene()
         g_AsciiManager.scale.x = 1.0f;
         g_AsciiManager.scale.y = 1.0f;
     }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (compactMultiplayerHud)
+    {
+        const Float2 savedScale = g_AsciiManager.scale;
+        const u32 savedColor = g_AsciiManager.color;
+        const i32 savedGui = g_AsciiManager.isGui;
+        const i32 savedSelected = g_AsciiManager.isSelected;
+        g_AsciiManager.isGui = 0;
+        g_AsciiManager.isSelected = 0;
+
+        for (playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            if (!IsPlayerSlotActive((u8)playerId))
+                continue;
+
+            blockY = multiplayerHudBaseY + 48.0f * playerId;
+            g_AsciiManager.scale = Float2{0.55f, 0.55f};
+            g_AsciiManager.color = 0xffffffff;
+            textDrawPos = ZunVec3(424.0f + multiplayerHudOffsetX, blockY, 0.0f);
+            AsciiManager::AddFormatText(&g_AsciiManager, &textDrawPos, "P%d", playerId + 1);
+
+            g_AsciiManager.scale = Float2{0.50f, 0.50f};
+            g_AsciiManager.color = 0xff80c0ff;
+            textDrawPos = ZunVec3(424.0f + multiplayerHudOffsetX,
+                                  blockY + 14.0f, 0.0f);
+            g_AsciiManager.AddString(&textDrawPos,
+                                     GetMultiplayerHudLoadoutName((u8)playerId));
+
+            if (MultiplayerGameplay::ShouldShowContributionStats())
+            {
+                contributionKills = GetPlayerEnemiesDefeated((u8)playerId);
+                contributionDamage = GetPlayerDamageDealt((u8)playerId);
+                g_AsciiManager.scale = Float2{0.42f, 0.42f};
+                g_AsciiManager.color = 0xffa0d8ff;
+                textDrawPos = ZunVec3(424.0f + multiplayerHudOffsetX,
+                                      blockY + 27.0f, 0.0f);
+                AsciiManager::AddFormatText(
+                    &g_AsciiManager, &textDrawPos, "K:%u D:%u",
+                    contributionKills, contributionDamage);
+            }
+
+            if (MultiplayerGameplay::IsPlayerTemporarilyAbsent((u8)playerId))
+            {
+                g_AsciiManager.scale = Float2{0.50f, 0.50f};
+                g_AsciiManager.color = 0xffffc080;
+                textDrawPos = ZunVec3(486.0f + multiplayerHudOffsetX,
+                                      blockY + 12.0f, 0.0f);
+                g_AsciiManager.AddString(&textDrawPos, "AWAY");
+            }
+        }
+
+        g_AsciiManager.scale = savedScale;
+        g_AsciiManager.color = savedColor;
+        g_AsciiManager.isGui = savedGui;
+        g_AsciiManager.isSelected = savedSelected;
+    }
+#endif
     if (this->showGraze || g_Supervisor.cfg.disableItemDrawAroundPlayfield)
     {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        const Float2 savedGrazeScale = g_AsciiManager.scale;
+        if (compactMultiplayerHud)
+            g_AsciiManager.scale = Float2{0.70f, 0.70f};
+        textDrawPos = ZunVec3(compactMultiplayerHud ? 488.0f : 496.0f,
+                              compactMultiplayerHud ? 224.0f : 160.0f, 0.0f);
+#else
         textDrawPos = ZunVec3(496.0f, 160.0f, 0.0f);
+#endif
         AsciiManager::AddFormatText(&g_AsciiManager, &textDrawPos, "%d",
                                     g_GameManager.globals->grazeInTotal);
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (compactMultiplayerHud)
+            g_AsciiManager.scale = savedGrazeScale;
+#endif
     }
     if (this->showPoint || g_Supervisor.cfg.disableItemDrawAroundPlayfield)
     {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        const Float2 savedPointScale = g_AsciiManager.scale;
+        if (compactMultiplayerHud)
+            g_AsciiManager.scale = Float2{0.70f, 0.70f};
+        textDrawPos = ZunVec3(compactMultiplayerHud ? 488.0f : 496.0f,
+                              compactMultiplayerHud ? 240.0f : 176.0f, 0.0f);
+#else
         textDrawPos = ZunVec3(496.0f, 176.0f, 0.0f);
+#endif
         AsciiManager::AddFormatText(&g_AsciiManager, &textDrawPos, "%d/%d",
                                     g_GameManager.globals->pointItemsCollectedForExtend,
                                     g_GameManager.globals->nextNeededPointItemsForExtend);
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (compactMultiplayerHud)
+            g_AsciiManager.scale = savedPointScale;
+#endif
     }
     g_AnmManager->Flush();
-    if (this->showPower || g_Supervisor.cfg.disableItemDrawAroundPlayfield)
+    if (this->showPower || compactMultiplayerHud ||
+        g_Supervisor.cfg.disableItemDrawAroundPlayfield)
     {
         VertexDiffuseXyzrhw powerBarVerts[4];
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (compactMultiplayerHud)
+        {
+            const Float2 savedScale = g_AsciiManager.scale;
+            const u32 savedColor = g_AsciiManager.color;
+            const i32 savedGui = g_AsciiManager.isGui;
+            const i32 savedSelected = g_AsciiManager.isSelected;
+            g_AsciiManager.scale = Float2{0.70f, 0.70f};
+            g_AsciiManager.color = 0xffffffff;
+            g_AsciiManager.isGui = 0;
+            g_AsciiManager.isSelected = 0;
 
+            for (playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+            {
+                if (!IsPlayerSlotActive((u8)playerId) ||
+                    MultiplayerGameplay::IsPlayerTemporarilyAbsent((u8)playerId))
+                    continue;
+
+                const i32 playerPower = GetPlayerPower((u8)playerId);
+                const f32 powerBarLeft = 532.0f + multiplayerHudOffsetX;
+                const f32 powerBarTop = multiplayerHudBaseY + 26.0f + 48.0f * playerId;
+                const f32 powerBarBottom = multiplayerHudBaseY + 36.0f + 48.0f * playerId;
+                const f32 powerBarRight = powerBarLeft + (f32)playerPower * 0.25f;
+
+                if (playerPower > 0)
+                {
+                    powerBarVerts[0].pos = ZunVec3(powerBarLeft, powerBarTop, 0.1f);
+                    powerBarVerts[1].pos = ZunVec3(powerBarRight, powerBarTop, 0.1f);
+                    powerBarVerts[2].pos = ZunVec3(powerBarLeft, powerBarBottom, 0.1f);
+                    powerBarVerts[3].pos = ZunVec3(powerBarRight, powerBarBottom, 0.1f);
+                    powerBarVerts[0].diffuse.color = powerBarVerts[2].diffuse.color = 0xe0e0e0ff;
+                    powerBarVerts[1].diffuse.color = powerBarVerts[3].diffuse.color = 0x80e0e0ff;
+                    powerBarVerts[0].w = powerBarVerts[1].w =
+                        powerBarVerts[2].w = powerBarVerts[3].w = 1.0f;
+                    g_Supervisor.gfxDevice->SetColorOp(COMPONENT_RGB, COLOR_OP_DISABLE);
+                    g_Supervisor.gfxDevice->SetColorOp(COMPONENT_ALPHA, COLOR_OP_DISABLE);
+                    if (!g_Supervisor.cfg.disableZBuffer)
+                        g_Supervisor.gfxDevice->SetDepthMask(false);
+                    g_Supervisor.gfxDevice->DrawPrimitiveUP(
+                        PRIM_TRIANGLE_STRIP, 2, &powerBarVerts,
+                        sizeof(VertexDiffuseXyzrhw));
+                    g_AnmManager->SetVertexShader(255);
+                    g_AnmManager->SetColorOp(255);
+                    g_AnmManager->SetBlendMode(255);
+                    g_AnmManager->SetZWriteDisable(255);
+                    g_Supervisor.gfxDevice->SetColorOp(COMPONENT_RGB, COLOR_OP_MODULATE);
+                    g_Supervisor.gfxDevice->SetColorOp(COMPONENT_ALPHA, COLOR_OP_MODULATE);
+                }
+
+                ZunVec3 pos(powerBarLeft, powerBarTop, 0.0f);
+                if (playerPower < 128)
+                    AsciiManager::AddFormatText(&g_AsciiManager, &pos, "%d", playerPower);
+                else
+                    g_AsciiManager.AddString(&pos, "MAX");
+            }
+
+            g_AsciiManager.scale = savedScale;
+            g_AsciiManager.color = savedColor;
+            g_AsciiManager.isGui = savedGui;
+            g_AsciiManager.isSelected = savedSelected;
+        }
+        else
+#endif
+        {
         if (0 < (i32)g_GameManager.globals->currentPower)
         {
             powerBarVerts[0].pos = ZunVec3(496.0f, 144.0f, 0.1f);
@@ -1621,6 +2044,7 @@ void Gui::DrawGameScene()
             pos = ZunVec3(496.0f, 144.0f, 0.0f);
             AsciiManager::AddFormatText(&g_AsciiManager, &pos, "MAX");
         }
+        }
     }
 }
 
@@ -1646,12 +2070,6 @@ void Gui::DrawStageElements()
     for (i = 0; i < 5; i++)
     {
         g_AnmManager->DrawInterp(&this->impl->vms1[i]);
-    }
-    if (this->impl->bombSpellcardPortrait.visible)
-    {
-        g_AnmManager->DrawInterpNoRotation(&this->impl->bombSpellcardPortrait);
-        g_AnmManager->DrawInterpNoRotation(&this->impl->bombSpellcardDecorLeft);
-        g_AnmManager->DrawInterp(&this->impl->bombSpellcardDecorRight);
     }
     if (this->impl->enemySpellcardPortrait.visible)
     {

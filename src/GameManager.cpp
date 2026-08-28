@@ -22,6 +22,9 @@
 #include "ZunResult.hpp"
 #include "dxutil.hpp"
 #include "graphics/ZunGraphics.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
 
 i32 g_RankArray[6][3] = {
     {16, 12, 20}, {16, 10, 32}, {16, 10, 32}, {16, 10, 32}, {16, 15, 16}, {16, 15, 16},
@@ -335,6 +338,13 @@ u32 GameManager::OnUpdate(GameManager *arg)
             g_GameManager.csumFloat = -9999.0f;
         }
     }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::IsMultiplayer())
+    {
+        g_GameManager.defaultCfg->slowMode = 0;
+        g_GameManager.slowModeSlowActive = 0;
+    }
+#endif
     if (g_GameManager.defaultCfg->slowMode)
     {
         g_GameManager.slowModeSlowActive = 0;
@@ -525,6 +535,16 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
         arg->globals = new ZunGlobals;
         InitializeRngAndCsum();
         *arg->defaultCfg = g_Supervisor.cfg;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (MultiplayerGameplay::IsMultiplayer())
+        {
+            // The room owns simulation-affecting startup options. Keep local
+            // controller/display preferences, but normalize lives and slow
+            // mode exactly as the upstream multiplayer branch does.
+            arg->defaultCfg->lifeCount = 2;
+            arg->defaultCfg->slowMode = 0;
+        }
+#endif
         free(arg->tmpBuffer);
         arg->powerItemCountForScore = 0;
         arg->cherry = arg->globals->cherryStart;
@@ -932,6 +952,13 @@ void GameManager::DecreaseSubrank(i32 amount)
 
 void GameManager::AddCherryPlus(i32 amount)
 {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::IsMultiplayer())
+    {
+        AddCherryPlusForPlayer(amount, 0);
+        return;
+    }
+#endif
     i32 oldCherry = this->cherry;
     this->cherry = this->cherry + amount;
     if (this->cherry > this->cherryMax)
@@ -987,6 +1014,12 @@ void GameManager::IncreaseCherryMax(i32 amount)
 
 i32 GameManager::HasReachedMaxClears(i32 shotType)
 {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::ShouldForceContentUnlocks())
+    {
+        return 1;
+    }
+#endif
     return this->clrd[shotType].difficultyClearedWithRetries[0] != 99 &&
                    this->clrd[shotType].difficultyClearedWithRetries[1] != 99 &&
                    this->clrd[shotType].difficultyClearedWithRetries[2] != 99 &&
@@ -997,6 +1030,12 @@ i32 GameManager::HasReachedMaxClears(i32 shotType)
 
 i32 GameManager::HasUnlockedPhantom(i32 shotType)
 {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::ShouldForceContentUnlocks())
+    {
+        return 1;
+    }
+#endif
     i32 local_8 = 0;
     for (i32 i = 0; i < 141; i++)
     {
@@ -1014,6 +1053,12 @@ i32 GameManager::HasUnlockedPhantom(i32 shotType)
 
 i32 GameManager::HasReachedMaxClearsAllShotTypes()
 {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::ShouldForceContentUnlocks())
+    {
+        return 1;
+    }
+#endif
     return HasReachedMaxClears(0) == 0 && HasReachedMaxClears(1) == 0 &&
                    HasReachedMaxClears(2) == 0 && HasReachedMaxClears(3) == 0 &&
                    HasReachedMaxClears(4) == 0 && HasReachedMaxClears(5) == 0
@@ -1023,6 +1068,12 @@ i32 GameManager::HasReachedMaxClearsAllShotTypes()
 
 i32 GameManager::HasUnlockedPhantomAndMaxClears()
 {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::ShouldForceContentUnlocks())
+    {
+        return 1;
+    }
+#endif
     i32 j;
     i32 i;
     i32 spellCardsCaptured;

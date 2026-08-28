@@ -30,6 +30,12 @@
 #ifdef TH_ENABLE_THPRAC
 #include "ThpracImGui.hpp"
 #endif
+#ifdef TH_ENABLE_NETPLAY
+#include "netplay/Th07DeterminismProbe.hpp"
+#include "netplay/Th07LanCoreProbe.hpp"
+#include "netplay/Th07LanStageProbe.hpp"
+#include "netplay/Th07RollbackProbe.hpp"
+#endif
 
 #if !defined(__EMSCRIPTEN__)
 static f64 GetNativePresentationHz()
@@ -179,7 +185,12 @@ RenderResult GameWindow::Render()
 
     GameWindow::RememberWindowedState();
 
-    const f64 targetDt = 1.0 / 60.0;
+    const f64 baseTargetDt = 1.0 / 60.0;
+#ifdef TH_ENABLE_NETPLAY
+    const f64 targetDt = baseTargetDt * Netplay::Th07LanStageProbe::SimulationIntervalScale();
+#else
+    const f64 targetDt = baseTargetDt;
+#endif
 
     u64 currentPerfCounter = SDL_GetPerformanceCounter();
     if (g_LastPerfCounter == 0)
@@ -213,6 +224,7 @@ RenderResult GameWindow::Render()
 
     i32 chainRes = CHAIN_CALLBACK_RESULT_CONTINUE;
     bool updated = false;
+    bool lastSimulationTickAdvanced = true;
 
     u64 timeToRender = SDL_GetTicksNS();
 
@@ -221,7 +233,23 @@ RenderResult GameWindow::Render()
 #ifndef __EMSCRIPTEN__
         const u64 calcStartNs = g_NativePerfTelemetry.enabled ? SDL_GetTicksNS() : 0;
 #endif
+#ifdef TH_ENABLE_NETPLAY
+        Netplay::Th07DeterminismProbe::BeforeSimulationTick();
+        if (Netplay::Th07LanStageProbe::Requested())
+        {
+            chainRes = Netplay::Th07LanStageProbe::RunCalcChain();
+            lastSimulationTickAdvanced = Netplay::Th07LanStageProbe::LastTickAdvanced();
+        }
+        else
+        {
+            chainRes = Netplay::Th07RollbackProbe::RunCalcChain();
+            lastSimulationTickAdvanced = true;
+        }
+        Netplay::Th07DeterminismProbe::AfterSimulationTick(chainRes);
+        Netplay::Th07LanCoreProbe::OnSimulationTick();
+#else
         chainRes = g_Chain.RunCalcChain();
+#endif
 #ifdef TH_ENABLE_THPRAC
         // th07_update @ 0x42fdf8 is a one-byte hook in the tail of
         // Chain::RunCalcChain (0x42fd60..0x42fe20), matching th07_render's
@@ -234,7 +262,8 @@ RenderResult GameWindow::Render()
         if (keyboard != nullptr && keyboard[SDL_SCANCODE_P] && g_ThcrapSnapshotRequests < 1000)
             ++g_ThcrapSnapshotRequests;
 #endif
-        g_SoundPlayer.ProcessQueues();
+        if (lastSimulationTickAdvanced)
+            g_SoundPlayer.ProcessQueues();
 
 #ifndef __EMSCRIPTEN__
         if (g_NativePerfTelemetry.enabled)
@@ -246,6 +275,35 @@ RenderResult GameWindow::Render()
         return chainRes;
     };
 
+#ifdef TH_ENABLE_NETPLAY
+    if (Netplay::Th07LanStageProbe::Requested())
+    {
+        // A stalled netplay tick has not consumed simulation time. Keep a
+        // bounded wall-clock backlog while presentation continues, then catch
+        // up several fixed ticks before the next draw once packets resume.
+        // This prevents a brief network stall from becoming lasting slow time.
+        constexpr i32 maxNetplayCatchupTicks = 6;
+        i32 catchupTicks = 0;
+        while (this->accumulator >= targetDt && catchupTicks < maxNetplayCatchupTicks)
+        {
+            const i32 res = runSimulationTick();
+            if (res == 0)
+                return RENDER_RESULT_EXIT_SUCCESS;
+            if (res == -1)
+                return RENDER_RESULT_EXIT_ERROR;
+            if (!lastSimulationTickAdvanced)
+            {
+                this->accumulator = std::min(
+                    this->accumulator, targetDt * (f64)maxNetplayCatchupTicks);
+                break;
+            }
+            this->accumulator -= targetDt;
+            updated = true;
+            ++catchupTicks;
+        }
+    }
+    else
+#endif
     if (limitPresentationTo60 || preserveReplayCadence)
     {
         if (this->accumulator >= targetDt)
@@ -265,7 +323,7 @@ RenderResult GameWindow::Render()
                 return RENDER_RESULT_EXIT_SUCCESS;
             if (res == -1)
                 return RENDER_RESULT_EXIT_ERROR;
-            updated = true;
+            updated = updated || lastSimulationTickAdvanced;
         }
     }
     else
@@ -278,7 +336,7 @@ RenderResult GameWindow::Render()
             if (res == -1)
                 return RENDER_RESULT_EXIT_ERROR;
             this->accumulator -= targetDt;
-            updated = true;
+            updated = updated || lastSimulationTickAdvanced;
         }
     }
 
@@ -327,6 +385,22 @@ RenderResult GameWindow::Render()
     g_AnmManager->ResetVertexBuffer();
     g_Supervisor.fogEnabled = 255;
     g_Supervisor.DisableFog();
+
+    // Pause/retry menu drawing restores the full 640x480 viewport at the end
+    // of the previous draw. On high-refresh presentation-only frames there is
+    // no intervening GameManager::OnUpdate() to put the playfield viewport
+    // back, so stage/background rendering can alternate between two viewports.
+    // Re-establish the authoritative playfield viewport for every paused draw.
+    if (g_GameManager.isInPauseMenu || g_GameManager.isInRetryMenu)
+    {
+        g_Supervisor.viewport.x = g_GameManager.arcadeRegionTopLeftPos.x;
+        g_Supervisor.viewport.y = g_GameManager.arcadeRegionTopLeftPos.y;
+        g_Supervisor.viewport.width = g_GameManager.arcadeRegionSize.x;
+        g_Supervisor.viewport.height = g_GameManager.arcadeRegionSize.y;
+        g_Supervisor.viewport.minZ = 0.0f;
+        g_Supervisor.viewport.maxZ = 1.0f;
+        g_Supervisor.gfxDevice->SetViewport(g_Supervisor.viewport);
+    }
 
     g_SuppressAnmAdvance = !updated;
 #ifdef TH_ENABLE_THPRAC

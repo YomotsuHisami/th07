@@ -10,6 +10,8 @@ option(TH_EXTERNAL_ASSETS "Do not bundle assets (on platforms that bundle them) 
 option(TH_WEB_SHARED_FONT "Let the Web host install runtime fonts instead of embedding them" OFF)
 option(TH_ENABLE_THPRAC "Build the archived thprac integration" OFF)
 option(TH_ENABLE_THCRAP "Build the archived thcrap localization integration" OFF)
+option(TH_ENABLE_NETPLAY "Build the isolated TH07 rollback-netplay core" OFF)
+option(TH_ENABLE_MULTIPLAYER_GAMEPLAY "Build TH07 multiplayer gameplay without requiring a transport" OFF)
 option(TH_DEV_TOOLS "Enable developer-only tools such as F5 fast-forward" OFF)
 set(THPRAC_IMGUI_ROOT "${CMAKE_SOURCE_DIR}/../thprac-reallyportable/thprac/src/3rdParties/ImGui" CACHE PATH "Dear ImGui 1.82 source used by the desktop thprac integration")
 set(TH_WEB_MUSIC "BASE" CACHE STRING "Bundled Web music payload: BASE, MIDI, WAV, or OGG")
@@ -87,6 +89,32 @@ else()
     list(APPEND SOURCES src/LocalizationStub.cpp)
 endif()
 
+if(TH_ENABLE_NETPLAY OR TH_ENABLE_MULTIPLAYER_GAMEPLAY)
+    list(APPEND SOURCES
+        src/multiplayer/GameplaySession.cpp
+        src/MultiplayerResources.cpp
+    )
+endif()
+
+if(TH_ENABLE_NETPLAY)
+    list(APPEND SOURCES
+        src/netplay/NetplayCore.cpp
+        src/netplay/NetplayInput.cpp
+        src/netplay/NetplayProtocol.cpp
+        src/netplay/NetplaySession.cpp
+        src/netplay/RollbackJournal.cpp
+        src/netplay/NetplaySideEffects.cpp
+        src/netplay/BrowserPeerTransport.cpp
+        src/netplay/WebSocketTransport.cpp
+        src/netplay/Th07CanonicalHash.cpp
+        src/netplay/Th07DeterminismProbe.cpp
+        src/netplay/Th07LanCoreProbe.cpp
+        src/netplay/Th07LanStageProbe.cpp
+        src/netplay/Th07RollbackProbe.cpp
+        src/netplay/Th07RollbackState.cpp
+    )
+endif()
+
 if(EMSCRIPTEN)
     list(APPEND SOURCES src/midi/MidiWeb.cpp)
 elseif(WIN32)
@@ -135,6 +163,12 @@ endif()
 if(TH_ENABLE_THCRAP)
     target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_ENABLE_THCRAP)
 endif()
+if(TH_ENABLE_NETPLAY OR TH_ENABLE_MULTIPLAYER_GAMEPLAY)
+    target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_ENABLE_MULTIPLAYER_GAMEPLAY)
+endif()
+if(TH_ENABLE_NETPLAY)
+    target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_ENABLE_NETPLAY)
+endif()
 if(TH_DEV_TOOLS)
     target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_DEV_TOOLS)
 endif()
@@ -161,7 +195,8 @@ if(EMSCRIPTEN)
     target_link_options(th07 PRIVATE
         "-sALLOW_MEMORY_GROWTH"
         "-sMAX_WEBGL_VERSION=2"
-        "--use-preload-cache"
+        "-sMIN_SAFARI_VERSION=140100"
+        "-sENVIRONMENT=web"
         "-O2"
         "-sINVOKE_RUN=0"
         "-sEXPORTED_RUNTIME_METHODS=['callMain']"
@@ -169,6 +204,9 @@ if(EMSCRIPTEN)
         "--shell-file"
         "${CMAKE_SOURCE_DIR}/resources/shell.html"
     )
+    if(TH_ENABLE_NETPLAY)
+        target_link_options(th07 PRIVATE "-lwebsocket")
+    endif()
     set_property(TARGET th07 APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/resources/shell.html")
     if(NOT TH_EXTERNAL_ASSETS)
         set(TH07_WEB_ASSET_STAGE "${CMAKE_BINARY_DIR}/web-assets-${TH_WEB_MUSIC}")

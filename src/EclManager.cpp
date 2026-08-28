@@ -19,6 +19,9 @@
 #include "Stage.hpp"
 #include "Supervisor.hpp"
 #include "ZunMath.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
 
 #define GET_INT_PTR(enemy, argIdx) GetVar(enemy, &instr->args[argIdx].i, instr->paramMask, argIdx)
 
@@ -40,6 +43,14 @@
 #define GET_FLOAT_VALUE_D(enemy, args, argIdx, bitIdx)                                             \
     (((instr->paramMask & (1 << bitIdx)) != 0) ? GetFloatVarValue(enemy, args[argIdx].f)           \
                                                : args[argIdx].f)
+
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#define ECL_TARGET_PLAYER(enemy) (*GetClosestActivePlayer(&(enemy)->pos))
+#define ECL_ANY_PLAYER_BOMBING() IsAnyActivePlayerBombing()
+#else
+#define ECL_TARGET_PLAYER(enemy) (g_Player)
+#define ECL_ANY_PLAYER_BOMBING() (g_Player.bombInfo.isInUse != 0)
+#endif
 
 const char *g_EclPaths[10] = {
     "dummy",
@@ -151,6 +162,9 @@ i32 EclManager::GetVarValue(Enemy *enemy, i32 eclVar)
     case ECL_VAR_CUR_TIME:
         return enemy->timer.current;
     case ECL_VAR_LIFE:
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        Stage4ChainRestartPhase(enemy, enemy->life <= 0 ? 1 : 0);
+#endif
         return enemy->life;
     case ECL_VAR_PLAYER_SHOTTYPE:
         return PracticeRuntime::EffectivePlayerShot(g_GameManager.shotTypeAndCharacter);
@@ -205,11 +219,11 @@ i32 EclManager::GetVarValue(Enemy *enemy, i32 eclVar)
     case ECL_VAR_POS_Z:
         return enemy->pos.z;
     case ECL_VAR_PLAYER_POS_X:
-        return g_Player.positionCenter.x;
+        return ECL_TARGET_PLAYER(enemy).positionCenter.x;
     case ECL_VAR_PLAYER_POS_Y:
-        return g_Player.positionCenter.y;
+        return ECL_TARGET_PLAYER(enemy).positionCenter.y;
     case ECL_VAR_PLAYER_POS_Z:
-        return g_Player.positionCenter.z;
+        return ECL_TARGET_PLAYER(enemy).positionCenter.z;
     case ECL_VAR_MOVE_INTERP_ORIGIN_X:
         return enemy->moveInterpStartPos.x;
     case ECL_VAR_MOVE_INTERP_ORIGIN_Y:
@@ -259,9 +273,9 @@ i32 EclManager::GetVarValue(Enemy *enemy, i32 eclVar)
     case ECL_VAR_SCORE:
         return enemy->score;
     case ECL_VAR_ANGLE_TO_PLAYER:
-        return g_Player.AngleToPlayer(&enemy->pos);
+        return ECL_TARGET_PLAYER(enemy).AngleToPlayer(&enemy->pos);
     case ECL_VAR_DISTANCE_FROM_PLAYER:
-        return (g_Player.positionCenter - enemy->pos).Length();
+        return (ECL_TARGET_PLAYER(enemy).positionCenter - enemy->pos).Length();
     default:
         return eclVar;
     }
@@ -360,6 +374,9 @@ f32 EclManager::GetFloatVarValue(Enemy *enemy, f32 eclVar)
     case ECL_VAR_CUR_TIME:
         return (f32)enemy->timer.current;
     case ECL_VAR_LIFE:
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        Stage4ChainRestartPhase(enemy, enemy->life <= 0 ? 1 : 0);
+#endif
         return (f32)enemy->life;
     case ECL_VAR_PLAYER_SHOTTYPE:
         return (f32)g_GameManager.shotTypeAndCharacter;
@@ -414,11 +431,11 @@ f32 EclManager::GetFloatVarValue(Enemy *enemy, f32 eclVar)
     case ECL_VAR_POS_Z:
         return enemy->pos.z;
     case ECL_VAR_PLAYER_POS_X:
-        return g_Player.positionCenter.x;
+        return ECL_TARGET_PLAYER(enemy).positionCenter.x;
     case ECL_VAR_PLAYER_POS_Y:
-        return g_Player.positionCenter.y;
+        return ECL_TARGET_PLAYER(enemy).positionCenter.y;
     case ECL_VAR_PLAYER_POS_Z:
-        return g_Player.positionCenter.z;
+        return ECL_TARGET_PLAYER(enemy).positionCenter.z;
     case ECL_VAR_LOCAL_FLOAT2_1:
         return enemy->currentContext.eclContextArgs.floatVars2[0];
     case ECL_VAR_LOCAL_FLOAT2_2:
@@ -450,7 +467,7 @@ f32 EclManager::GetFloatVarValue(Enemy *enemy, f32 eclVar)
     case ECL_VAR_BOSS_LIFE_THRESHOLD4:
         return (f32)enemy->lifeCallbackThreshold[3];
     case ECL_VAR_ANGLE_TO_PLAYER:
-        return g_Player.AngleToPlayer(&enemy->pos);
+        return ECL_TARGET_PLAYER(enemy).AngleToPlayer(&enemy->pos);
     case ECL_VAR_ANGLE:
         return enemy->angle;
     case ECL_VAR_ANGULAR_VELOCITY:
@@ -477,7 +494,7 @@ f32 EclManager::GetFloatVarValue(Enemy *enemy, f32 eclVar)
     case ECL_VAR_LAST_DAMAGE:
         return (f32)enemy->lastDamage;
     case ECL_VAR_DISTANCE_FROM_PLAYER:
-        return (g_Player.positionCenter - enemy->pos).Length();
+        return (ECL_TARGET_PLAYER(enemy).positionCenter - enemy->pos).Length();
     default:
         return eclVar;
     }
@@ -523,11 +540,11 @@ f32 *EclManager::GetFloatVar(Enemy *enemy, f32 *eclVar, u16 paramMask, i32 idx)
     case ECL_VAR_POS_Z:
         return &enemy->pos.z;
     case ECL_VAR_PLAYER_POS_X:
-        return &g_Player.positionCenter.x;
+        return &ECL_TARGET_PLAYER(enemy).positionCenter.x;
     case ECL_VAR_PLAYER_POS_Y:
-        return &g_Player.positionCenter.y;
+        return &ECL_TARGET_PLAYER(enemy).positionCenter.y;
     case ECL_VAR_PLAYER_POS_Z:
-        return &g_Player.positionCenter.z;
+        return &ECL_TARGET_PLAYER(enemy).positionCenter.z;
     case ECL_VAR_LOCAL_FLOAT2_1:
         return &enemy->currentContext.eclContextArgs.floatVars2[0];
     case ECL_VAR_LOCAL_FLOAT2_2:
@@ -640,6 +657,148 @@ void EclManager::MathCubicInterp(Enemy *enemy, EclInterp *interp, f32 t)
     *GetFloatVar(enemy, &interp->args[7].f, 0, -1) = h00 * p0 + h01 * p1 + h10 * m0 + h11 * m1;
 }
 
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+namespace
+{
+constexpr i32 STAGE4_DIFFICULTY_COUNT = 4;
+constexpr i32 g_Stage4ChainSpellSub[3][STAGE4_DIFFICULTY_COUNT] = {
+    {127, 127, 128, 128},
+    {145, 145, 145, 145},
+    {138, 138, 138, 138},
+};
+
+i32 Stage4ChainDifficulty()
+{
+    const i32 difficulty = (i32)g_GameManager.difficulty;
+    return difficulty >= 0 && difficulty < STAGE4_DIFFICULTY_COUNT ? difficulty : -1;
+}
+
+i32 Stage4CharacterForSpellSub(i32 subId)
+{
+    const i32 difficulty = Stage4ChainDifficulty();
+    if (difficulty < 0)
+        return -1;
+    for (i32 character = 0; character < 3; ++character)
+    {
+        if (g_Stage4ChainSpellSub[character][difficulty] == subId)
+            return character;
+    }
+    return -1;
+}
+} // namespace
+
+i32 g_stage4ChainQueue[3] = {0, 0, 0};
+i32 g_stage4ChainCount = 0;
+i32 g_stage4ChainPos = 0;
+i32 g_stage4ChainBossId = -1;
+i32 g_stage4ChainCardActive = 0;
+i32 g_stage4ChainPhaseLife = 0;
+i32 g_stage4ChainSpellIdx = -1;
+
+void ResetStage4BossChain()
+{
+    g_stage4ChainQueue[0] = 0;
+    g_stage4ChainQueue[1] = 0;
+    g_stage4ChainQueue[2] = 0;
+    g_stage4ChainCount = 0;
+    g_stage4ChainPos = 0;
+    g_stage4ChainBossId = -1;
+    g_stage4ChainCardActive = 0;
+    g_stage4ChainPhaseLife = 0;
+    g_stage4ChainSpellIdx = -1;
+}
+
+bool IsStage4ChainedCardActive()
+{
+    return g_stage4ChainCardActive != 0 && g_EnemyManager.spellcardInfo.isActive != 0;
+}
+
+void NoteStage4ChainedSpellcard(Enemy *enemy)
+{
+    if (!MultiplayerGameplay::IsStage4BossChainEnabled() || !enemy || !enemy->isBoss ||
+        g_GameManager.currentStage != 4)
+        return;
+
+    const i32 character = Stage4CharacterForSpellSub(enemy->currentContext.subId);
+    if (character < 0)
+        return;
+
+    if (g_stage4ChainCardActive)
+    {
+        g_stage4ChainSpellIdx = (i32)g_EnemyManager.spellcardInfo.spellcardIdx;
+        return;
+    }
+
+    g_stage4ChainQueue[0] = character;
+    i32 queued = 1;
+    for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+    {
+        if (!IsPlayerSlotActive(playerId))
+            continue;
+        const i32 candidate = MultiplayerGameplay::GetPlayerCharacter(playerId);
+        if (candidate < 0 || candidate > 2)
+            continue;
+
+        i32 slot = 0;
+        for (; slot < queued; ++slot)
+        {
+            if (g_stage4ChainQueue[slot] == candidate)
+                break;
+        }
+        if (slot == queued && queued < TH07_MULTI_MAX_PLAYERS)
+            g_stage4ChainQueue[queued++] = candidate;
+    }
+
+    g_stage4ChainCount = queued;
+    g_stage4ChainPos = 0;
+    g_stage4ChainBossId = enemy->bossId;
+    g_stage4ChainPhaseLife =
+        g_EnemyManager.bosses[0] ? g_EnemyManager.bosses[0]->life : 0;
+    g_stage4ChainSpellIdx = (i32)g_EnemyManager.spellcardInfo.spellcardIdx;
+    g_stage4ChainCardActive =
+        queued > 1 && g_stage4ChainPhaseLife > 0 ? 1 : 0;
+}
+
+bool Stage4ChainRestartPhase(Enemy *enemy, i32 phaseOver)
+{
+    if (!phaseOver || !g_stage4ChainCardActive || !enemy || !enemy->isBoss)
+        return false;
+    if (enemy->bossId != 0)
+        return false;
+
+    if (!g_EnemyManager.spellcardInfo.isActive || g_stage4ChainSpellIdx < 0 ||
+        (i32)g_EnemyManager.spellcardInfo.spellcardIdx != g_stage4ChainSpellIdx)
+    {
+        g_stage4ChainCardActive = 0;
+        return false;
+    }
+    if (g_stage4ChainPos + 1 >= g_stage4ChainCount)
+    {
+        g_stage4ChainCardActive = 0;
+        return false;
+    }
+
+    Enemy *sister = (g_stage4ChainBossId >= 0 && g_stage4ChainBossId < 8)
+                        ? g_EnemyManager.bosses[g_stage4ChainBossId]
+                        : nullptr;
+    const i32 difficulty = Stage4ChainDifficulty();
+    if (!sister || !sister->active || difficulty < 0)
+    {
+        g_stage4ChainCardActive = 0;
+        return false;
+    }
+
+    ++g_stage4ChainPos;
+    const i32 next = g_Stage4ChainSpellSub[g_stage4ChainQueue[g_stage4ChainPos]][difficulty];
+    enemy->life = g_stage4ChainPhaseLife;
+    enemy->timer = 0;
+    EclManager::EndSpellcard();
+    sister->stackDepth = 0;
+    g_EclManager.CallEclSub(&sister->currentContext, (i16)next);
+    return true;
+}
+#endif
+
 void EclManager::BeginSpellcard(Enemy *enemy, EclRawInstr *instr)
 {
     i32 newCsum;
@@ -677,6 +836,9 @@ void EclManager::BeginSpellcard(Enemy *enemy, EclRawInstr *instr)
     g_EnemyManager.spellcardInfo.isActive = 1;
     g_EnemyManager.spellcardInfo.isCapturing = 1;
     g_EnemyManager.spellcardInfo.spellcardIdx = instr->args[0].us[1];
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    NoteStage4ChainedSpellcard(enemy);
+#endif
     g_EnemyManager.spellcardInfo.captureScore =
         g_SpellcardScore[g_EnemyManager.spellcardInfo.spellcardIdx];
     g_EnemyManager.spellcardInfo.grazeBonusScore = 0;
@@ -1202,7 +1364,7 @@ restart:
                 enemy->moveMode = 1;
                 break;
             case ECL_MOVE_AT_PLAYER:
-                enemy->angle = g_Player.AngleToPlayer(&enemy->pos) +
+                enemy->angle = ECL_TARGET_PLAYER(enemy).AngleToPlayer(&enemy->pos) +
                                GET_FLOAT_VALUE(enemy, 0);
                 enemy->moveSpeed = GET_FLOAT_VALUE(enemy, 1);
                 enemy->moveMode = 1;
@@ -1393,7 +1555,7 @@ restart:
                 if (enemy->lasers[arg])
                 {
                     enemy->lasers[arg]->angle =
-                        g_Player.AngleToPlayer(&enemy->lasers[arg]->pos) +
+                        ECL_TARGET_PLAYER(enemy).AngleToPlayer(&enemy->lasers[arg]->pos) +
                         GET_FLOAT_VALUE(enemy, 1);
                 }
                 break;
@@ -1551,7 +1713,7 @@ restart:
                     GET_FLOAT_VALUE(enemy, 1);
                 break;
             case ECL_GET_EXIT_ANGLE:
-                if (g_Player.positionCenter.x < enemy->pos.x)
+                if (ECL_TARGET_PLAYER(enemy).positionCenter.x < enemy->pos.x)
                 {
                     exitAngle = utils::AddNormalizeAngle(
                         g_Rng.GetRandomFloatInRange(1.5707964f) + 2.3561945f, 0.0f);
@@ -1766,8 +1928,8 @@ restart:
                 enemy->currentContext.time += GET_INT_VALUE(enemy, 0);
                 break;
             case ECL_SPAWN_ITEM:
-                g_ItemManager.SpawnItem(&enemy->pos,
-                                        GET_INT_VALUE(enemy, 0), 0);
+                g_ItemManager.SpawnEnemyDrop(&enemy->pos,
+                                             GET_INT_VALUE(enemy, 0), 0);
                 break;
             case ECL_SET_SCRIPT_WAIT_TIME:
                 g_Stage.scriptWaitTime = GET_INT_VALUE(enemy, 0);
@@ -1922,7 +2084,7 @@ restart:
                     cosf(GET_FLOAT_VALUE(enemy, 2)) * GET_FLOAT_VALUE(enemy, 3);
                 break;
             case ECL_RAND_EXIT_ANGLE:
-                if ((g_Player.positionCenter.x < enemy->pos.x &&
+                if ((ECL_TARGET_PLAYER(enemy).positionCenter.x < enemy->pos.x &&
                      enemy->pos.x > 96.0f) ||
                     enemy->pos.x > 288.0f)
                 {
@@ -2206,7 +2368,7 @@ restart:
             }
             if (enemy->isBoss && g_GameManager.currentStage >= 7)
             {
-                if (g_Player.bombInfo.isInUse && g_EnemyManager.spellcardInfo.isActive &&
+                if (ECL_ANY_PLAYER_BOMBING() && g_EnemyManager.spellcardInfo.isActive &&
                     g_EnemyManager.spellcardInfo.spellcardIdx >= 118)
                 {
                     enemy->invisibleOnBomb = 1;

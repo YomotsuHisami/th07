@@ -90,7 +90,8 @@ struct EffectManager
     f32 globalColorMultiplierG;
     f32 globalColorMultiplierB;
     f32 globalColorMultiplierA;
-    Effect effects[409];
+    // 0..399 particles, 400..412 fixed P1/P2/P3 player effects, 413 sentinel.
+    Effect effects[414];
     Effect layer0;
     Effect layer1;
     Effect layer2;

@@ -1,0 +1,9 @@
+{
+  "name": "th07-netplay-tools",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Local/LAN relay tools for TH07 netplay development",
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

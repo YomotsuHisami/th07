@@ -1,5 +1,8 @@
 #include "EaglerOptions.hpp"
 #include "Controller.hpp"
+#ifdef TH_ENABLE_NETPLAY
+#include "netplay/NetplayInput.hpp"
+#endif
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_events.h>
@@ -154,6 +157,14 @@ u8 *Controller::GetControllerState()
 
 u16 Controller::GetInput()
 {
+#ifdef TH_ENABLE_NETPLAY
+    // Resimulation consumes the already-sampled logical frame. Returning here
+    // is intentional: Touch::GetButtonBits() and host serials have edge/
+    // consumption semantics and must not be sampled twice for one game tick.
+    if (Netplay::Input::ReplayOverrideActive())
+        return Netplay::Input::ResolveLocal(0);
+#endif
+
     u16 buttons = 0;
 
     const bool *keys = SDL_GetKeyboardState(NULL);
@@ -210,7 +221,12 @@ u16 Controller::GetInput()
         if (y < -g_Supervisor.cfg.padAxisY)
             buttons |= TH_BUTTON_UP;
     }
-    return buttons | Touch::GetButtonBits();
+    buttons |= Touch::GetButtonBits();
+#ifdef TH_ENABLE_NETPLAY
+    return Netplay::Input::ResolveLocal(buttons);
+#else
+    return buttons;
+#endif
 }
 
 void Controller::SetEnterSuppressed(bool suppressed)

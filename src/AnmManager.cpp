@@ -119,7 +119,7 @@ bool BuildSpriteExtrusionAtlas(AnmManager *manager, i32 textureIdx,
     rects.reserve(spriteIndices.size());
     for (const i32 spriteIdx : spriteIndices)
     {
-        if (spriteIdx < 0 || spriteIdx >= 2560)
+        if (spriteIdx < 0 || spriteIdx >= ANM_SPRITE_SLOT_COUNT)
             continue;
         AnmLoadedSprite &sprite = manager->sprites[spriteIdx];
         sprite.extrudedUvStart = sprite.uvStart;
@@ -618,7 +618,7 @@ AnmManager::AnmManager()
 {
     memset((void *)this, 0, sizeof(AnmManager));
 
-    for (i32 i = 0; i < 2560; i++)
+    for (i32 i = 0; i < ANM_SPRITE_SLOT_COUNT; i++)
     {
         this->sprites[i].sourceFileIndex = -1;
     }
@@ -971,7 +971,7 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
         g_GameErrorContext.Fatal("アニメが読み込めません。データが失われてるか壊れています\n");
         return ZUN_ERROR;
     }
-    if (textureIdx >= 50)
+    if (textureIdx >= ANM_FILE_SLOT_COUNT)
     {
         g_GameErrorContext.Fatal("テクスチャ格納先が足りません\n");
         return ZUN_ERROR;
@@ -1144,7 +1144,7 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
         {
             id = rawSprite->id;
         }
-        if (rawSprite->id + spriteIdxOffset >= 2560)
+        if (rawSprite->id + spriteIdxOffset >= ANM_SPRITE_SLOT_COUNT)
         {
             g_GameErrorContext.Fatal("スプライトが格納できません。テーブルが不足しています\n");
             return ZUN_ERROR;
@@ -1161,7 +1161,7 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
         BuildSpriteExtrusionAtlas(this, data->textureIdx, loadedSpriteIndices);
     for (i = 0; i < data->numScripts; i++, curSprite += 2)
     {
-        if (*curSprite + spriteIdxOffset >= 2560)
+        if (*curSprite + spriteIdxOffset >= ANM_SPRITE_SLOT_COUNT)
         {
             g_GameErrorContext.Fatal("アニメが格納できません。テーブルが不足しています\n");
             return ZUN_ERROR;
@@ -1200,7 +1200,7 @@ void AnmManager::ReleaseAnm(i32 anmIdx)
     i32 spriteIdxOffset;
     i32 *spriteIdx;
 
-    if (anmIdx < 0 || (u32)anmIdx >= 50)
+    if (anmIdx < 0 || (u32)anmIdx >= ANM_FILE_SLOT_COUNT)
     {
         return;
     }

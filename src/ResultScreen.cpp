@@ -21,8 +21,34 @@
 #include "ZunResult.hpp"
 #include "dxutil.hpp"
 #include "pbg4/Lzss.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
 
 namespace fs = std::filesystem;
+
+namespace
+{
+bool ShouldSkipReplaySavePrompt()
+{
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    return MultiplayerGameplay::IsMultiplayer();
+#else
+    return false;
+#endif
+}
+
+bool ShouldSkipPersistentResultWrite()
+{
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    // Multiplayer score/life economy is intentionally different from vanilla
+    // TH07, so it must not overwrite the single-player score.dat tables.
+    return MultiplayerGameplay::IsMultiplayer();
+#else
+    return false;
+#endif
+}
+} // namespace
 
 #ifdef TH_DEV_TOOLS
 static ResultScreen *g_ReadOnlyResultAuditScreen = nullptr;
@@ -463,6 +489,8 @@ void ResultScreen::ReleaseScoreDat(ScoreDat *scoreDat)
 
 void ResultScreen::WriteScore()
 {
+    if (ShouldSkipPersistentResultWrite())
+        return;
     ScoreDat *sd;
     u8 *bytes;
     u8 xorValue;
@@ -1681,7 +1709,7 @@ ZunResult ResultScreen::CheckConfirmButton()
         if (this->frameTimer >= 30)
         {
             this->frameTimer = 59;
-            this->resultScreenState = 11;
+            this->resultScreenState = ShouldSkipReplaySavePrompt() ? 18 : 11;
         }
         break;
     }
@@ -2620,18 +2648,22 @@ ZunResult ResultScreen::AddedCallback(ResultScreen *arg)
     }
     if (arg->resultScreenState == 18)
     {
-        if ((u32)g_GameManager
-                .pscr[g_GameManager.character * 2 + g_GameManager.shotType]
-                     [g_GameManager.currentStage - 1][g_GameManager.difficulty]
-                .score < g_GameManager.globals->score)
+        if (!ShouldSkipPersistentResultWrite() &&
+            (u32)g_GameManager
+                    .pscr[g_GameManager.character * 2 + g_GameManager.shotType]
+                         [g_GameManager.currentStage - 1][g_GameManager.difficulty]
+                    .score < g_GameManager.globals->score)
         {
             g_GameManager
                 .pscr[g_GameManager.character * 2 + g_GameManager.shotType]
                      [g_GameManager.currentStage - 1][g_GameManager.difficulty]
                 .score = g_GameManager.globals->score;
         }
-        arg->resultScreenState = 11;
-        strcpy(arg->replayName, arg->lsnmHeader.name);
+        if (!ShouldSkipReplaySavePrompt())
+        {
+            arg->resultScreenState = 11;
+            strcpy(arg->replayName, arg->lsnmHeader.name);
+        }
     }
     for (i = 0; i < 7; i++)
     {

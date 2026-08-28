@@ -293,6 +293,18 @@ u32 AsciiManager::OnDrawMenus(AsciiManager *arg)
     {
         g_AnmManager->DrawNoRotation(&arg->vm);
     }
+    if (g_GameManager.isInPauseMenu || g_GameManager.isInRetryMenu)
+    {
+        // Pause/Retry draw in the playfield viewport. Flush their queued
+        // sprites before restoring the full portable framebuffer, otherwise
+        // the right-side HUD and later screen effects inherit the clip.
+        g_AnmManager->Flush();
+        g_Supervisor.viewport.x = 0;
+        g_Supervisor.viewport.y = 0;
+        g_Supervisor.viewport.width = 640;
+        g_Supervisor.viewport.height = 480;
+        g_Supervisor.gfxDevice->SetViewport(g_Supervisor.viewport);
+    }
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -717,7 +729,12 @@ i32 PauseMenu::OnUpdate()
 
     this->UpdatePrev();
 
-    if (WAS_PRESSED_RAW(TH_BUTTON_MENU) && this->curState != 4)
+    // The same synchronized Escape edge that opens the shared pause menu can
+    // reach PauseMenu on its first initialization tick.  State 0 has not built
+    // its sprites yet, so treating that edge as an immediate close skips menu
+    // setup on whichever peer happened to enter first.
+    if (WAS_PRESSED_RAW(TH_BUTTON_MENU) && this->curState != 0 &&
+        this->curState != 4)
     {
         g_SoundPlayer.PlaySoundByIdx(SOUND_SELECT, 0);
         this->curState = 4;
@@ -1247,6 +1264,16 @@ i32 RetryMenu::OnUpdate()
             g_GameManager.globals->pointItemsCollectedForExtend = 0;
             g_GameManager.globals->currentPower = 0.0f;
             g_GameManager.RegenerateGameIntegrityCsum();
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            if (GetActivePlayerCount() > 1)
+            {
+                for (i = 1; i < TH07_MULTI_MAX_PLAYERS; ++i)
+                {
+                    if (IsPlayerSlotActive((u8)i))
+                        ResetMultiplayerPlayerResources((u8)i);
+                }
+            }
+#endif
             g_GameManager.globals->extendsFromPointItems = 0;
             g_GameManager.globals->nextNeededPointItemsForExtend = 50;
             g_GameManager.cherry = g_GameManager.globals->cherryStart;
@@ -1502,7 +1529,17 @@ void AsciiManager::DrawPopups()
 
         cherry = g_GameManager.cherryPlus - g_GameManager.globals->cherryStart;
 
-        if (g_Player.hasBorder)
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        const bool borderActiveForHud =
+            GetActivePlayerCount() > 1 ? IsSharedBorderActive()
+                                       : g_Player.hasBorder != BORDER_NONE;
+        const i32 borderThresholdForHud =
+            GetActivePlayerCount() > 1 ? GetSharedBorderThreshold() : 50000;
+#else
+        const bool borderActiveForHud = g_Player.hasBorder != BORDER_NONE;
+        const i32 borderThresholdForHud = 50000;
+#endif
+        if (borderActiveForHud)
         {
             this->cherryDigit.color.bytes.r = 255;
             divisor = cherry % 4000;
@@ -1510,8 +1547,10 @@ void AsciiManager::DrawPopups()
             {
                 divisor = 4000 - divisor;
             }
-            this->cherryDigit.color.bytes.g = cherry * 192 / 50000 + divisor * 64 / 2000;
-            this->cherryDigit.color.bytes.b = cherry * 192 / 50000 + divisor * 64 / 2000;
+            this->cherryDigit.color.bytes.g =
+                cherry * 192 / borderThresholdForHud + divisor * 64 / 2000;
+            this->cherryDigit.color.bytes.b =
+                cherry * 192 / borderThresholdForHud + divisor * 64 / 2000;
             this->cherryDigit.scale.x = 1.41f;
             this->cherryDigit.scale.y = 1.41f;
             this->cherryDigit.prevScale = this->cherryDigit.scale;
@@ -1548,7 +1587,7 @@ void AsciiManager::DrawPopups()
         this->cherryDigit.scale.y = 1.0f;
         this->cherryDigit.prevScale = this->cherryDigit.scale;
 
-        if (g_Player.hasBorder == BORDER_ACTIVE)
+        if (borderActiveForHud)
         {
             this->cherryBorderActive.pos = this->cherryGauge.pos;
             this->cherryBorderActive.pos.x += 24.0f;

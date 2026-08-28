@@ -692,8 +692,14 @@ void EnemyEclInstr::ExInsYoumuRedirectBulletsToPlayer(Enemy *enemy, EclRawInstr 
 
         if (bullet->state2 == 1)
         {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            bullet->AddTargetVelocityCommand(
+                0, 0, 90, 0.026666667f,
+                GetClosestActivePlayer(&bullet->pos)->AngleToPlayer(&bullet->pos));
+#else
             bullet->AddTargetVelocityCommand(0, 0, 90, 0.026666667f,
                                              g_Player.AngleToPlayer(&bullet->pos));
+#endif
             bullet->ClearCommand(1);
             bullet->state2 = 2;
         }

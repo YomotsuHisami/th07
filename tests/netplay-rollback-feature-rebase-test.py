@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Focused contracts for mature sbrik rollback behavior on the Web host."""
+from __future__ import annotations
+
+import pathlib
+import re
+import subprocess
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+CORE_H = (ROOT / "src/netplay/NetplayCore.hpp").read_text(encoding="utf-8")
+CORE = (ROOT / "src/netplay/NetplayCore.cpp").read_text(encoding="utf-8")
+PROTOCOL = (ROOT / "src/netplay/NetplayProtocol.hpp").read_text(encoding="utf-8")
+DRIVER = (ROOT / "src/netplay/Th07LanStageProbe.cpp").read_text(encoding="utf-8")
+ROLLBACK = (ROOT / "src/netplay/Th07RollbackState.cpp").read_text(encoding="utf-8")
+JOURNAL_H = (ROOT / "src/netplay/RollbackJournal.hpp").read_text(encoding="utf-8")
+JOURNAL = (ROOT / "src/netplay/RollbackJournal.cpp").read_text(encoding="utf-8")
+SIDE_EFFECTS = (ROOT / "src/netplay/NetplaySideEffects.cpp").read_text(encoding="utf-8")
+WINDOW = (ROOT / "src/GameWindow.cpp").read_text(encoding="utf-8")
+TRANSPORT = (ROOT / "src/netplay/WebSocketTransport.cpp").read_text(encoding="utf-8")
+BASE = "5b9ebe892914ff5666ef68c0cd02719dde7d4ee9"
+FINAL = "022c533"
+
+
+def require(name: str, condition: bool) -> None:
+    if not condition:
+        raise AssertionError(name)
+    print(f"PASS: {name}")
+
+
+def git(*args: str) -> str:
+    return subprocess.check_output(["git", *args], cwd=ROOT).decode(
+        "utf-8", errors="replace"
+    ).replace("\r\n", "\n")
+
+
+def main() -> None:
+    frozen = git(
+        "diff", "--unified=0", f"{BASE}..{FINAL}", "--", "src/th07/Netplay.cpp"
+    )
+    require(
+        "retry or new-run gameplay starts a fresh rollback session generation",
+        "RetireGameplaySession()" in DRIVER
+        and "++g_SessionGeneration" in DRIVER
+        and "CurrentSessionId()" in DRIVER
+        and "packet.sessionId != CurrentSessionId()" in DRIVER,
+    )
+    require(
+        "upstream Netplay.cpp is one large new-file inventory hunk",
+        len(re.findall(r"^@@ ", frozen, re.MULTILINE)) == 1
+        and frozen.count("\n+") > 14000,
+    )
+    shell = CORE + PROTOCOL + DRIVER + ROLLBACK
+    require(
+        "browser gameplay ABI rejects runtimes without shared difficulty and Ending semantics",
+        "constexpr std::uint32_t GAMEPLAY_ABI = 2;" in DRIVER,
+    )
+    require(
+        "portable rollback path excludes WinSock threads LowLatency and UDP",
+        not any(token in shell for token in ("WinSock", "SOCKET", "CreateThread", "LowLatency", "sockaddr", "sendto(")),
+    )
+    require(
+        "input redundancy matches final upstream thirty-two-frame tail",
+        "MAX_REDUNDANT_INPUTS = 32" in PROTOCOL
+        and "packet.inputCount < MAX_REDUNDANT_INPUTS" in CORE,
+    )
+    require(
+        "prediction retains only TH07 held controls",
+        "coreConfig.predictableButtons" in DRIVER
+        and all(token in DRIVER for token in ("TH_BUTTON_DIRECTION", "TH_BUTTON_FOCUS", "TH_BUTTON_SHOOT", "TH_BUTTON_SKIP"))
+        and "predicted.buttons &= config_.predictableButtons" in CORE,
+    )
+    require(
+        "keyboard direction prediction has an independent three-frame horizon",
+        "coreConfig.directionButtons = TH_BUTTON_DIRECTION" in DRIVER
+        and "coreConfig.maxDirectionPredictionFrames = 3" in DRIVER
+        and "distance > config_.maxDirectionPredictionFrames" in CORE,
+    )
+    require(
+        "touch prediction keeps one delta but never repeats touch Bomb",
+        "predicted.touchBomb = false" in CORE
+        and "AnalogMode::DirectTouch && distance > 1" in CORE
+        and "predicted.x = 0.0f" in CORE
+        and "predicted.y = 0.0f" in CORE,
+    )
+    require(
+        "frame zero waits for exact remote input after the session barrier",
+        "g_SimFrame == 0 && ConfirmedThroughAllRemotes() == INVALID_FRAME" in DRIVER
+        and "g_Session.CanStart()" in DRIVER,
+    )
+    scheduled_sender = re.search(
+        r"bool SendScheduledLocalFrame\(std::uint32_t frame\)\s*\{(?P<body>.*?)\n\}",
+        DRIVER,
+        re.DOTALL,
+    )
+    require(
+        "stalled current input is retried without resampling keyboard controller or touch",
+        scheduled_sender is not None
+        and "CaptureLocalInput" not in scheduled_sender.group("body")
+        and "g_Core.BuildInputPacket" in scheduled_sender.group("body")
+        and "localPresent && (g_DriverTicks % 3u) == 0u" in DRIVER
+        and "SendScheduledLocalFrame(g_SimFrame)" in DRIVER,
+    )
+    require(
+        "production input packets carry peer-relative ACK and timing state",
+        "for (std::uint8_t peer = 0; peer < g_PlayerCount; ++peer)" in scheduled_sender.group("body")
+        and "TransportSendTo(peer" in scheduled_sender.group("body")
+        and "g_LastRemoteSenderFrame[peer]" in scheduled_sender.group("body")
+        and "packet.ackFrame = INVALID_FRAME" not in scheduled_sender.group("body").split("if (ProductionLanMode())", 1)[1].split("return true;", 1)[0],
+    )
+    require(
+        "multi-peer time sync keeps per-endpoint windows and uses the largest lead",
+        "g_PeerTimeSync[packet.senderPlayer]" in DRIVER
+        and "g_PeerTimeSync[player].averageLead > recommendedLead" in DRIVER
+        and "return ProductionLanMode() ? g_SimulationIntervalScale : 1.0" in DRIVER,
+    )
+    require(
+        "pause retry and transition UI wait for confirmed input",
+        "SharedUiNeedsConfirmedInputs()" in DRIVER
+        and "ConfirmedThroughAllRemotes() < g_SimFrame" in DRIVER,
+    )
+    require(
+        "Extra Phantasm and Ending remain inside the synchronized session",
+        "stage == 1 || stage == 7 || stage == 8" in DRIVER
+        and "g_GameManager.currentStage <= 8" in DRIVER
+        and "const bool endingScene = g_Supervisor.curState == 9" in DRIVER,
+    )
+    require(
+        "Ending input is confirmed and shared while local skip history is normalized",
+        "g_Supervisor.curState != 2 || g_Supervisor.wantedState != 2" in DRIVER
+        and "Input::SetReplayOverride(CombinedButtons(decision))" in DRIVER
+        and "NormalizeMultiplayerEndingSkipHistory();" in DRIVER
+        and "difficultyClearedWithRetries[difficulty] = 99" in DRIVER
+        and "difficultyClearedWithoutRetries[difficulty] = 99" in DRIVER,
+    )
+    require(
+        "rollback journal invalidates history on stage change",
+        "if (g_HistoryStage != stage)" in ROLLBACK
+        and "ResetHistoryForStage(stage)" in ROLLBACK,
+    )
+    require(
+        "rollback captures deterministic managers lanes and interpolation endpoints",
+        all(
+            token in ROLLBACK
+            for token in (
+                "TouchObject(&g_Rng)",
+                "TouchObject(&g_CurFrameGameInputs)",
+                "TouchObject(&g_LastFrameGameInputs)",
+                "TouchObject(&g_AnmManager->prevShakeOffset)",
+                "CapturePlayer(&g_Players[playerId])",
+                "TouchEffect(&g_EffectManager.effects[i])",
+            )
+        ),
+    )
+    require(
+        "three-player BombEffect rollback capacity matches final upstream",
+        "stateConfig.maxBombEffectsPerFrame = 1024" in DRIVER,
+    )
+    require(
+        "dense rollback overlap lookup remains logarithmic",
+        "std::map<std::uintptr_t, Block> blocks" in JOURNAL_H
+        and "record->blocks.lower_bound(start)" in JOURNAL
+        and "std::prev(next)->second" in JOURNAL
+        and "for (const Block &block : record->blocks)" not in JOURNAL,
+    )
+    require(
+        "evicted rollback byte buffers are reused",
+        "FrameRecord recycled = std::move(frames_.front())" in JOURNAL
+        and "recycled.bytes.clear()" in JOURNAL
+        and "frames_.push_back(std::move(recycled))" in JOURNAL,
+    )
+    require(
+        "production rollback keeps first-write state across two logical frames and replays from checkpoint start",
+        "CHECKPOINT_LOGICAL_FRAMES = 2" in ROLLBACK
+        and "g_Journal.BeginFrame(frame, true)" in ROLLBACK
+        and "Th07Rollback::RestoreTo(rollback, &replayFrom)" in DRIVER
+        and "frame = replayFrom" in DRIVER
+        and "snapshotInterval" not in DRIVER + ROLLBACK
+        and "FindRestoreFrame" not in DRIVER + ROLLBACK,
+    )
+    require(
+        "unavailable old snapshot is abandoned while journal corruption remains fatal",
+        "rollback correction abandoned" in DRIVER
+        and "if (Th07Rollback::Failed())" in DRIVER
+        and "g_Core.ClearRollbackRequest()" in DRIVER,
+    )
+    require(
+        "resimulation suppresses side effects and restores normal forward mode",
+        "SideEffects::SetSpeculative(resimulation)" in DRIVER
+        and "SideEffects::SetSpeculative(false)" in DRIVER
+        and "g_Speculative" in SIDE_EFFECTS,
+    )
+    require(
+        "network stalls keep bounded presentation catch-up",
+        "maxNetplayCatchupTicks = 6" in WINDOW
+        and "lastSimulationTickAdvanced" in WINDOW,
+    )
+    require(
+        "clean remote WebSocket close is surfaced instead of freezing silently",
+        "if (!self->closing_ && !self->failed_)" in TRANSPORT
+        and "remote WebSocket closed" in TRANSPORT
+        and "RemoteInputsTimedOut()" in DRIVER
+        and 'Fail("remote input timeout")' in DRIVER,
+    )
+    require(
+        "hash resync and automatic repair are absent from rollback core",
+        not any(token in CORE + ROLLBACK for token in ("ApplyRngResync", "SendPendingResync", "compatibilityHash", "automatic repair")),
+    )
+
+
+if __name__ == "__main__":
+    main()

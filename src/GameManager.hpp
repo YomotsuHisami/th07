@@ -5,6 +5,9 @@
 #include "Supervisor.hpp"
 #include "ZunResult.hpp"
 #include "inttypes.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "Multiplayer.hpp"
+#endif
 
 typedef enum Character
 {
@@ -56,6 +59,59 @@ struct ZunGlobals
     i32 csumAsSum;
     i32 csumData[5];
 };
+
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+// P1 stays in TH07's original integrity-checked globals.  Guest resources are
+// sidecar state so neither the save/replay layout nor the original globals are
+// enlarged by multiplayer.
+struct MultiplayerPlayerResources
+{
+    i32 livesRemaining;
+    i32 bombsRemaining;
+    i32 currentPower;
+};
+
+struct MultiplayerContributionStats
+{
+    u32 enemiesDefeated;
+    u32 damageDealt;
+};
+
+extern MultiplayerPlayerResources
+    g_MultiplayerPlayerResources[TH07_MULTI_MAX_GUESTS];
+extern MultiplayerContributionStats
+    g_MultiplayerContributionStats[TH07_MULTI_MAX_PLAYERS];
+
+#define g_Player2Resources (g_MultiplayerPlayerResources[0])
+#define g_Player3Resources (g_MultiplayerPlayerResources[1])
+
+i32 GetPlayerLives(u8 playerId);
+i32 GetPlayerBombs(u8 playerId);
+i32 GetPlayerPower(u8 playerId);
+i32 GetPlayerCherryPlus(u8 playerId);
+u32 GetPlayerEnemiesDefeated(u8 playerId);
+u32 GetPlayerDamageDealt(u8 playerId);
+void SetPlayerLives(u8 playerId, i32 amount);
+void SetPlayerBombs(u8 playerId, i32 amount);
+void SetPlayerPower(u8 playerId, i32 amount);
+void SetPlayerCherryPlus(u8 playerId, i32 amount);
+void AddPlayerLives(u8 playerId, i32 amount);
+void AddPlayerBombs(u8 playerId, i32 amount);
+void AddPlayerPower(u8 playerId, i32 amount);
+void AddPlayerCherryPlus(u8 playerId, i32 amount);
+void AddPlayerEnemiesDefeated(u8 playerId, u32 amount);
+void AddPlayerDamageDealt(u8 playerId, u32 amount);
+void ResetPlayerContributionStats();
+void ResetMultiplayerPlayerResources(u8 playerId);
+void ResetPlayer2Resources();
+void ExtendPlayerFromItem(u8 playerId);
+void ExtendAllPlayersFromPoints();
+i32 GetSharedBorderThreshold();
+f32 GetMultiplayerBossDamageMultiplier();
+f32 GetMultiplayerBombDamageMultiplier();
+i32 GetMultiplayerRankPenalty(i32 amount);
+void ApplyActivePlayerCountParameters(i32 previousCount, i32 newCount);
+#endif
 
 struct Rank
 {
@@ -168,6 +224,9 @@ struct GameManager
 
     void AddBombsRemaining(i32 amount);
     void AddCherryPlus(i32 amount);
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    void AddCherryPlusForPlayer(i32 amount, u8 playerId);
+#endif
     void AddCherry(i32 amount);
     void AddLivesRemaining(i32 amount);
     void ExtendFromPoints();

@@ -1,4 +1,7 @@
 #include "SoundPlayer.hpp"
+#ifdef TH_ENABLE_NETPLAY
+#include "netplay/NetplaySideEffects.hpp"
+#endif
 
 #include <climits>
 #include <cstdio>
@@ -42,6 +45,15 @@ const char *g_SFXList[30] = {
 };
 
 SoundPlayer g_SoundPlayer;
+
+#ifdef __EMSCRIPTEN__
+static bool UseWebFullTrackOggDecode()
+{
+    return EM_ASM_INT({
+        return Module.eaglerOptions?.oggDecodeMode === 'full' ? 1 : 0;
+    }) != 0;
+}
+#endif
 
 static ma_result ThBgmDataSource_read(ma_data_source *pDataSource, void *pFramesOut,
                                       ma_uint64 frameCount, ma_uint64 *pFramesRead)
@@ -552,12 +564,12 @@ bool SoundPlayer::PumpWebAudio()
         return true;
     }
 
-    // Keep the verified low-latency streaming envelope. This path only
-    // replenishes the SDL stream; browser playback remains owned by SDL's
-    // Emscripten backend.
+    // A/B robustness envelope paired with the Web SDL backend's 4096-frame
+    // ScriptProcessor block. Vorbis/miniaudio work stays in small 1024-frame
+    // slices; only the queued safety window is deeper.
     constexpr ma_uint64 FRAMES_PER_CHUNK = 1024;
-    constexpr ma_uint64 LOW_WATER_FRAMES = 2048;
-    constexpr ma_uint64 HIGH_WATER_FRAMES = 3072;
+    constexpr ma_uint64 LOW_WATER_FRAMES = 4096;
+    constexpr ma_uint64 HIGH_WATER_FRAMES = 6144;
     float pcm[FRAMES_PER_CHUNK * 2];
     constexpr int BYTES_PER_FRAME = 2 * sizeof(float);
 
@@ -911,11 +923,56 @@ ZunResult SoundPlayer::OpenOggBGM(const char *name)
     this->oggFormat = this->bgmFmtData[fmtIdx];
 
 #ifdef __EMSCRIPTEN__
-    // Web used to decode the complete Vorbis stream here on the 60 Hz game
-    // thread. A stage BGM transition could therefore consume an entire frame
-    // budget (or much more) before playback even started. Keep the compressed
-    // stream open and let the existing pull-based miniaudio data source decode
-    // only the small chunks requested by PumpWebAudio().
+    if (UseWebFullTrackOggDecode())
+    {
+        int channels = 0;
+        int sampleRate = 0;
+        short *decoded = NULL;
+        const int frames = stb_vorbis_decode_filename(fullPath.c_str(), &channels, &sampleRate, &decoded);
+        if (frames <= 0 || !decoded || channels != 2 || sampleRate != 44100 ||
+            static_cast<u64>(frames) * 4 > UINT32_MAX)
+        {
+            free(decoded);
+            return ZUN_ERROR;
+        }
+
+        this->oggFormat.startOffset = 0;
+        this->oggFormat.preloadAllocSize = static_cast<u32>(frames) * 4;
+        this->oggFormat.totalLength = static_cast<i32>(static_cast<u32>(frames) * 4);
+        if (this->oggFormat.introLength < 0 || this->oggFormat.introLength >= this->oggFormat.totalLength)
+        {
+            free(decoded);
+            return ZUN_ERROR;
+        }
+
+        this->oggPcmData = decoded;
+        this->bgmDataSource = new ThBgmDataSource;
+        if (!ThBgmDataSource_init_memory(this->bgmDataSource, reinterpret_cast<const u8 *>(decoded),
+                                         static_cast<u32>(frames) * 4, &this->oggFormat))
+        {
+            SAFE_DELETE(this->bgmDataSource);
+            free(this->oggPcmData);
+            this->oggPcmData = NULL;
+            return ZUN_ERROR;
+        }
+
+        this->backgroundMusic = new ma_sound;
+        if (ma_sound_init_from_data_source(this->engine, &this->bgmDataSource->base, 0, NULL,
+                                           this->backgroundMusic) != MA_SUCCESS)
+        {
+            SAFE_DELETE(this->backgroundMusic);
+            ma_data_source_uninit(&this->bgmDataSource->base);
+            SAFE_DELETE(this->bgmDataSource);
+            free(this->oggPcmData);
+            this->oggPcmData = NULL;
+            return ZUN_ERROR;
+        }
+        return ZUN_SUCCESS;
+    }
+
+    // Default Web mode: keep the compressed stream open and let the existing
+    // pull-based miniaudio data source decode only the small chunks requested
+    // by PumpWebAudio().
     this->bgmDataSource = new ThBgmDataSource;
     if (!ThBgmDataSource_init_ogg(this->bgmDataSource, fullPath.c_str(), &this->oggFormat))
     {
@@ -1167,6 +1224,10 @@ ZunResult SoundPlayer::InitSoundBuffers()
 
 void SoundPlayer::PlaySoundByIdx(i32 idx, u32 param_2)
 {
+#ifdef TH_ENABLE_NETPLAY
+    if (Netplay::SideEffects::IsSpeculative())
+        return;
+#endif
     (void)param_2;
 
     i32 iVar1;
@@ -1416,6 +1477,10 @@ loop_breakout:
 
 void SoundPlayer::PushCommand(AudioOpcode opcode, i32 arg1, const char *arg2)
 {
+#ifdef TH_ENABLE_NETPLAY
+    if (Netplay::SideEffects::IsSpeculative())
+        return;
+#endif
     // Upstream th07_soundplayer_queue_command hooks the exact function entry
     // (0x44D2F0), before the command reaches the queue. F7 uses this boundary
     // both to track START and to suppress selected commands/duplicate STARTs.

@@ -1,4 +1,8 @@
 #include "ReplayManager.hpp"
+#ifdef TH_ENABLE_NETPLAY
+#include "netplay/NetplayInput.hpp"
+#include "netplay/NetplaySideEffects.hpp"
+#endif
 
 #include "AsciiManager.hpp"
 #include "Chain.hpp"
@@ -17,7 +21,11 @@
 #include "dxutil.hpp"
 #include "pbg4/Lzss.hpp"
 #include <algorithm>
+#include <array>
 #include <cstdio>
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
 
 ReplayManager *g_ReplayManager;
 
@@ -85,8 +93,27 @@ u32 ReplayManager::OnUpdate(ReplayManager *arg)
         return CHAIN_CALLBACK_RESULT_CONTINUE;
     }
 
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#ifdef TH_ENABLE_NETPLAY
+    // Netplay installs current/previous logical lanes before the simulation
+    // chain starts.  Do not advance them a second time here or edge-triggered
+    // player actions would disappear.  The fallback below remains the exact
+    // non-netplay multiplayer behavior.
+    if (!Netplay::Input::PlayerButtonOverridesActive())
+    {
+#endif
+        for (i32 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+            g_LastFrameGameInputs[playerId] = g_CurFrameGameInputs[playerId];
+        g_CurFrameGameInputs[0] = g_CurFrameRawInput;
+        for (i32 playerId = 1; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+            g_CurFrameGameInputs[playerId] = 0;
+#ifdef TH_ENABLE_NETPLAY
+    }
+#endif
+#else
     g_LastFrameGameInput = g_CurFrameGameInput;
     g_CurFrameGameInput = g_CurFrameRawInput;
+#endif
     if (g_GameManager.defaultCfg->slowMode)
     {
         return CHAIN_CALLBACK_RESULT_CONTINUE;
@@ -96,12 +123,34 @@ u32 ReplayManager::OnUpdate(ReplayManager *arg)
         return CHAIN_CALLBACK_RESULT_CONTINUE;
     }
 
+#ifdef TH_ENABLE_NETPLAY
+    // The first pass of a rollback probe/prediction still needs to produce
+    // g_CurFrameGameInput for downstream game logic, but must not advance or
+    // write the persistent replay stream. The committed replay pass records it
+    // once after state restoration.
+    if (Netplay::SideEffects::IsSpeculative())
+        return CHAIN_CALLBACK_RESULT_CONTINUE;
+#endif
+
     stage = g_GameManager.currentStage - 1;
     if (stage >= 7)
     {
         stage = 6;
     }
-    g_CurFrameGameInput = curInput = g_CurFrameRawInput;
+    curInput = g_CurFrameGameInput;
+#if defined(TH_ENABLE_MULTIPLAYER_GAMEPLAY) && defined(TH_ENABLE_NETPLAY)
+    if (MultiplayerGameplay::IsMultiplayer())
+    {
+        std::array<Netplay::FrameInput, TH07_MULTI_MAX_PLAYERS> inputs{};
+        for (i32 playerId = 0; playerId < MultiplayerGameplay::GetPlayerCount(); ++playerId)
+        {
+            if (!Netplay::Input::PlayerInputOverride(playerId, &inputs[playerId]))
+                inputs[playerId].buttons = g_CurFrameGameInputs[playerId];
+        }
+        ReplayExtension::RecordMultiplayerFrame(stage, arg->frameId, inputs.data(),
+                                                MultiplayerGameplay::GetPlayerCount());
+    }
+#endif
     ReplayExtension::CaptureTouchState(Touch::WasUsedThisRun(), Touch::UsedTouchToBomb(),
                                        Touch::UsedCheatMovementThisRun());
     ReplayExtension::RecordFrame(stage, arg->frameId);
@@ -166,7 +215,35 @@ u32 ReplayManager::OnUpdateDemoHighPrio(ReplayManager *arg)
     g_LastFrameGameInput = g_CurFrameGameInput;
     ReplayExtension::SetPlaybackFrame(std::min(g_GameManager.currentStage - 1, 6), arg->frameId);
     ApplyReplayExtensionFrame();
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    std::array<Netplay::FrameInput, TH07_MULTI_MAX_PLAYERS> multiplayerInputs{};
+    if (ReplayExtension::GetMultiplayerPlaybackFrame(
+            std::min(g_GameManager.currentStage - 1, 6), arg->frameId,
+            multiplayerInputs.data(), multiplayerInputs.size()))
+    {
+#ifdef TH_ENABLE_NETPLAY
+        Netplay::Input::SetPlayerInputOverrides(multiplayerInputs.data(),
+                                                MultiplayerGameplay::GetPlayerCount());
+#else
+        for (i32 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            g_LastFrameGameInputs[playerId] = g_CurFrameGameInputs[playerId];
+            g_CurFrameGameInputs[playerId] = multiplayerInputs[playerId].buttons;
+        }
+#endif
+    }
+    else
+    {
+        g_CurFrameGameInput = arg->replayInputs->frameNum;
+        for (i32 playerId = 1; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            g_LastFrameGameInputs[playerId] = g_CurFrameGameInputs[playerId];
+            g_CurFrameGameInputs[playerId] = 0;
+        }
+    }
+#else
     g_CurFrameGameInput = arg->replayInputs->frameNum;
+#endif
     arg->replayInputs = arg->replayInputs + 1;
     g_IsEighthFrameOfHeldInput = 0;
     if (g_LastFrameGameInput == g_CurFrameGameInput)
@@ -207,6 +284,7 @@ ZunResult ReplayManager::AddedCallback(ReplayManager *arg)
 
     arg->frameId = 0;
     arg->unused_40 = NULL;
+    const bool freshReplayRun = !arg->data;
     if (!arg->data)
     {
         ReplayExtension::ClearPlayback();
@@ -244,9 +322,35 @@ ZunResult ReplayManager::AddedCallback(ReplayManager *arg)
     {
         i = 6;
     }
+    const bool restartingSameStage = !freshReplayRun && arg->data->stageReplayData[i] != NULL;
+    if (freshReplayRun || restartingSameStage)
+    {
+        // A new run/restart owns a new gesture stream. Unlike the vanilla key
+        // replay, touch recording has an extra finger-id sidecar that survives
+        // ReplayManager reuse unless it is explicitly reset. Do not do this on
+        // normal stage progression so a legitimately held finger can continue.
+        Touch::CancelTouches();
+        Touch::ResetReplayRecordingState();
+        Touch::ResetReplayTouch();
+    }
     SAFE_FREE(arg->data->stageReplayData[i]);
     SAFE_FREE(arg->data->stageEndData[i]);
     ReplayExtension::BeginStageRecording(i);
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::IsMultiplayer())
+    {
+        ReplayExtension::MultiplayerReplayConfig config;
+        config.playerCount = MultiplayerGameplay::GetPlayerCount();
+        config.difficulty = static_cast<u8>(g_GameManager.difficulty);
+        config.gameplayAbi = 2;
+        for (u8 playerId = 0; playerId < config.playerCount; ++playerId)
+        {
+            config.characters[playerId] = MultiplayerGameplay::GetPlayerCharacter(playerId);
+            config.shots[playerId] = MultiplayerGameplay::GetPlayerShot(playerId);
+        }
+        ReplayExtension::BeginMultiplayerRecording(config);
+    }
+#endif
     arg->data->stageReplayData[i] = (StageReplayData *)malloc(sizeof(StageReplayData));
     arg->data->stageEndData[i] = (StageReplayData *)malloc(sizeof(StageReplayData));
 
@@ -488,9 +592,15 @@ ZunResult ReplayManager::AddedCallbackDemo(ReplayManager *arg)
     g_GameManager.cherry = replayData->cherry + g_GameManager.globals->cherryStart;
     g_GameManager.cherryMax = replayData->cherryMax + g_GameManager.globals->cherryStart;
     g_GameManager.cherryPlus = replayData->cherryPlus + g_GameManager.globals->cherryStart;
-    if (g_GameManager.cherryPlus >= g_GameManager.globals->cherryStart + 50000)
+    const i32 borderThreshold =
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        GetSharedBorderThreshold();
+#else
+        50000;
+#endif
+    if (g_GameManager.cherryPlus >= g_GameManager.globals->cherryStart + borderThreshold)
     {
-        g_GameManager.cherryPlus = g_GameManager.globals->cherryStart + 50000;
+        g_GameManager.cherryPlus = g_GameManager.globals->cherryStart + borderThreshold;
         g_Player.ActivateBorder();
     }
     *g_GameManager.defaultCfg = arg->data->data.cfg;
@@ -555,8 +665,16 @@ ZunResult ReplayManager::DeletedCallback(ReplayManager *arg)
 
 ZunResult ReplayManager::RegisterChain(i32 isDemo, const char *replayFilename)
 {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    for (i32 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+    {
+        g_LastFrameGameInputs[playerId] = 0;
+        g_CurFrameGameInputs[playerId] = 0;
+    }
+#else
     g_LastFrameGameInput = 0;
     g_CurFrameGameInput = 0;
+#endif
     if (!g_ReplayManager)
     {
         ReplayManager *mgr = new ReplayManager();

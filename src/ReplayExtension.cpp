@@ -27,23 +27,42 @@ struct DirectTouchSample
     f32 y;
     u32 flags;
 };
+struct PackedFrameInput
+{
+    u16 buttons;
+    u8 analogMode;
+    u8 flags;
+    f32 x;
+    f32 y;
+};
+struct MultiplayerInputSample
+{
+    PackedFrameInput players[3];
+};
 static_assert(sizeof(InputSample) == 12);
 static_assert(sizeof(DirectTouchSample) == 12);
 static_assert(sizeof(TouchEvent) == 28);
+static_assert(sizeof(PackedFrameInput) == 12);
+static_assert(sizeof(MultiplayerInputSample) == 36);
 
 std::vector<InputSample> g_RecordInputs[7];
 std::vector<DirectTouchSample> g_RecordDirectTouch[7];
 std::vector<TouchEvent> g_RecordTouchEvents[7];
+std::vector<MultiplayerInputSample> g_RecordMultiplayerInputs[7];
 std::vector<TouchEvent> g_PendingTouchEvents;
 std::vector<InputSample> g_PlaybackInputs[7];
 std::vector<DirectTouchSample> g_PlaybackDirectTouch[7];
 std::vector<TouchEvent> g_PlaybackTouchEvents[7];
+std::vector<MultiplayerInputSample> g_PlaybackMultiplayerInputs[7];
 InputSample g_CapturedJoystick = {};
 DirectTouchSample g_CapturedDirectTouch = {};
 bool g_RecordUsesExtension = false;
 bool g_RecordHasTouchState = false;
+bool g_RecordHasMultiplayer = false;
+MultiplayerReplayConfig g_RecordMultiplayerConfig{};
 u32 g_PlaybackVersion = 0;
 u32 g_PlaybackFlags = 0;
+MultiplayerReplayConfig g_PlaybackMultiplayerConfig{};
 i32 g_PlaybackStage = -1;
 i32 g_PlaybackFrame = -1;
 std::size_t g_PlaybackTouchStart = 0;
@@ -55,6 +74,7 @@ constexpr u32 FLAG_JOYSTICK_INPUT = 1;
 constexpr u32 FLAG_TOUCH_EVENTS = 2;
 constexpr u32 FLAG_DIRECT_TOUCH_INPUT = 4;
 constexpr u32 FLAG_TOUCH_STATE = 8;
+constexpr u32 FLAG_MULTIPLAYER_INPUT = 32;
 constexpr u32 DIRECT_TOUCH_ACTIVE = 1;
 constexpr u32 DIRECT_TOUCH_UNLIMITED = 2;
 constexpr u32 TOUCH_STATE_USED_THIS_RUN = 4;
@@ -63,6 +83,40 @@ constexpr u32 TOUCH_STATE_CHEAT_MOVEMENT_USED = 16;
 constexpr u32 TOUCH_STATE_MASK = TOUCH_STATE_USED_THIS_RUN | TOUCH_STATE_BOMBED_WITH_TOUCH |
                                  TOUCH_STATE_CHEAT_MOVEMENT_USED;
 constexpr std::size_t HEADER_SIZE = 96;
+constexpr std::size_t MP_HEADER_SIZE = 160;
+constexpr std::size_t MP_PLAYER_COUNT_OFFSET = 96;
+constexpr std::size_t MP_DIFFICULTY_OFFSET = 100;
+constexpr std::size_t MP_GAMEPLAY_ABI_OFFSET = 104;
+constexpr std::size_t MP_LOADOUT_OFFSET = 108;
+constexpr std::size_t MP_COUNTS_OFFSET = 128;
+
+u8 PackInputFlags(const Netplay::FrameInput &input)
+{
+    return (input.unlimited ? 1u : 0u) |
+           (input.touchUsed ? 2u : 0u) |
+           (input.touchBomb ? 4u : 0u);
+}
+
+PackedFrameInput PackInput(const Netplay::FrameInput &input)
+{
+    return {input.buttons, static_cast<u8>(input.analogMode), PackInputFlags(input),
+            input.x, input.y};
+}
+
+Netplay::FrameInput UnpackInput(const PackedFrameInput &input)
+{
+    Netplay::FrameInput result;
+    result.buttons = input.buttons;
+    result.analogMode = input.analogMode <= static_cast<u8>(Netplay::AnalogMode::DirectTouch)
+                            ? static_cast<Netplay::AnalogMode>(input.analogMode)
+                            : Netplay::AnalogMode::None;
+    result.x = input.x;
+    result.y = input.y;
+    result.unlimited = (input.flags & 1u) != 0;
+    result.touchUsed = (input.flags & 2u) != 0;
+    result.touchBomb = (input.flags & 4u) != 0;
+    return result;
+}
 
 u32 ReadLe32(const u8 *bytes)
 {
@@ -83,7 +137,8 @@ void WriteLe32(u8 *bytes, u32 value)
 bool FindTrailer(const u8 *bytes, std::size_t size, std::size_t &payloadOffset, std::size_t &payloadSize,
                  u32 *outVersion = nullptr, u32 *outFlags = nullptr)
 {
-    if (bytes == nullptr || size < HEADER_SIZE + 8 || std::memcmp(bytes + size - 4, "EAGX", 4) != 0)
+    if (bytes == nullptr || size < HEADER_SIZE + 8 ||
+        std::memcmp(bytes + size - 4, "EAGX", 4) != 0)
         return false;
     payloadSize = ReadLe32(bytes + size - 8);
     if (payloadSize < HEADER_SIZE || payloadSize > size - 8)
@@ -91,11 +146,29 @@ bool FindTrailer(const u8 *bytes, std::size_t size, std::size_t &payloadOffset, 
     payloadOffset = size - 8 - payloadSize;
     const u32 version = ReadLe32(bytes + payloadOffset);
     const u32 flags = ReadLe32(bytes + payloadOffset + 4);
-    if (version != VERSION || ReadLe32(bytes + payloadOffset + 92) != DETERMINISM_ABI)
+    if (version != VERSION)
         return false;
-    if ((flags & (FLAG_JOYSTICK_INPUT | FLAG_TOUCH_EVENTS | FLAG_DIRECT_TOUCH_INPUT | FLAG_TOUCH_STATE)) == 0)
+    const bool hasMultiplayer = (flags & FLAG_MULTIPLAYER_INPUT) != 0;
+    const std::size_t headerSize = hasMultiplayer ? MP_HEADER_SIZE : HEADER_SIZE;
+    if (payloadSize < headerSize || ReadLe32(bytes + payloadOffset + 92) != DETERMINISM_ABI)
         return false;
-    std::size_t expected = HEADER_SIZE;
+    if ((flags & (FLAG_JOYSTICK_INPUT | FLAG_TOUCH_EVENTS | FLAG_DIRECT_TOUCH_INPUT |
+                  FLAG_TOUCH_STATE | FLAG_MULTIPLAYER_INPUT)) == 0)
+        return false;
+    if (hasMultiplayer)
+    {
+        const u32 playerCount = ReadLe32(bytes + payloadOffset + MP_PLAYER_COUNT_OFFSET);
+        const u32 difficulty = ReadLe32(bytes + payloadOffset + MP_DIFFICULTY_OFFSET);
+        if (playerCount < 2 || playerCount > 3 || difficulty > 5)
+            return false;
+        for (u32 player = 0; player < playerCount; ++player)
+        {
+            const u32 loadout = ReadLe32(bytes + payloadOffset + MP_LOADOUT_OFFSET + player * 4);
+            if ((loadout & 0xffu) > 2 || ((loadout >> 8) & 0xffu) > 1)
+                return false;
+        }
+    }
+    std::size_t expected = headerSize;
     for (i32 stage = 0; stage < 7; ++stage)
     {
         const u32 count = ReadLe32(bytes + payloadOffset + 8 + stage * 4);
@@ -117,6 +190,17 @@ bool FindTrailer(const u8 *bytes, std::size_t size, std::size_t &payloadOffset, 
             return false;
         expected += static_cast<std::size_t>(count) * sizeof(DirectTouchSample);
     }
+    if (hasMultiplayer)
+    {
+        for (i32 stage = 0; stage < 7; ++stage)
+        {
+            const u32 count = ReadLe32(bytes + payloadOffset + MP_COUNTS_OFFSET + stage * 4);
+            if (expected > payloadSize ||
+                count > (payloadSize - expected) / sizeof(MultiplayerInputSample))
+                return false;
+            expected += static_cast<std::size_t>(count) * sizeof(MultiplayerInputSample);
+        }
+    }
     if (expected != payloadSize)
         return false;
     if (outVersion)
@@ -128,7 +212,7 @@ bool FindTrailer(const u8 *bytes, std::size_t size, std::size_t &payloadOffset, 
 
 void RecomputeRecordUsage()
 {
-    g_RecordUsesExtension = false;
+    g_RecordUsesExtension = g_RecordHasMultiplayer;
     g_RecordHasTouchState = false;
     for (i32 stage = 0; stage < 7; ++stage)
     {
@@ -230,30 +314,32 @@ bool PrepareAppend(const char *path, std::vector<u8> &bytes)
 
 bool AppendInputEvents(const char *path, const std::vector<InputSample> (&inputs)[7],
                        const std::vector<TouchEvent> (&touchEvents)[7],
-                       const std::vector<DirectTouchSample> (&directTouch)[7])
+                       const std::vector<DirectTouchSample> (&directTouch)[7],
+                       const std::vector<MultiplayerInputSample> (&multiplayerInputs)[7],
+                       const MultiplayerReplayConfig &multiplayerConfig)
 {
     std::vector<u8> bytes;
     if (!PrepareAppend(path, bytes))
         return false;
 
     u32 flags = 0;
-    std::size_t payloadSize = HEADER_SIZE;
+    std::size_t bodySize = 0;
     for (const auto &stage : inputs)
     {
-        payloadSize += stage.size() * sizeof(InputSample);
+        bodySize += stage.size() * sizeof(InputSample);
         for (const InputSample &sample : stage)
             if (sample.active)
                 flags |= FLAG_JOYSTICK_INPUT;
     }
     for (const auto &stage : touchEvents)
     {
-        payloadSize += stage.size() * sizeof(TouchEvent);
+        bodySize += stage.size() * sizeof(TouchEvent);
         if (!stage.empty())
             flags |= FLAG_TOUCH_EVENTS;
     }
     for (const auto &stage : directTouch)
     {
-        payloadSize += stage.size() * sizeof(DirectTouchSample);
+        bodySize += stage.size() * sizeof(DirectTouchSample);
         for (const DirectTouchSample &sample : stage)
         {
             if (sample.flags & DIRECT_TOUCH_ACTIVE)
@@ -262,16 +348,43 @@ bool AppendInputEvents(const char *path, const std::vector<InputSample> (&inputs
                 flags |= FLAG_TOUCH_STATE;
         }
     }
+    const bool hasMultiplayer = multiplayerConfig.playerCount >= 2 &&
+                                multiplayerConfig.playerCount <= 3;
+    if (hasMultiplayer)
+    {
+        flags |= FLAG_MULTIPLAYER_INPUT;
+        for (const auto &stage : multiplayerInputs)
+            bodySize += stage.size() * sizeof(MultiplayerInputSample);
+    }
     if (flags == 0)
         return true;
+
+    const std::size_t headerSize = hasMultiplayer ? MP_HEADER_SIZE : HEADER_SIZE;
+    const std::size_t payloadSize = headerSize + bodySize;
 
     const std::size_t payloadOffset = bytes.size();
     bytes.resize(payloadOffset + payloadSize + 8, 0);
     WriteLe32(bytes.data() + payloadOffset, VERSION);
     WriteLe32(bytes.data() + payloadOffset + 4, flags);
     WriteLe32(bytes.data() + payloadOffset + 92, DETERMINISM_ABI);
+    if (hasMultiplayer)
+    {
+        WriteLe32(bytes.data() + payloadOffset + MP_PLAYER_COUNT_OFFSET,
+                  multiplayerConfig.playerCount);
+        WriteLe32(bytes.data() + payloadOffset + MP_DIFFICULTY_OFFSET,
+                  multiplayerConfig.difficulty);
+        WriteLe32(bytes.data() + payloadOffset + MP_GAMEPLAY_ABI_OFFSET,
+                  multiplayerConfig.gameplayAbi);
+        for (u32 player = 0; player < 3; ++player)
+        {
+            const u32 loadout = static_cast<u32>(multiplayerConfig.characters[player]) |
+                                (static_cast<u32>(multiplayerConfig.shots[player]) << 8);
+            WriteLe32(bytes.data() + payloadOffset + MP_LOADOUT_OFFSET + player * 4,
+                      loadout);
+        }
+    }
 
-    std::size_t cursor = payloadOffset + HEADER_SIZE;
+    std::size_t cursor = payloadOffset + headerSize;
     for (i32 stage = 0; stage < 7; ++stage)
     {
         WriteLe32(bytes.data() + payloadOffset + 8 + stage * 4, static_cast<u32>(inputs[stage].size()));
@@ -304,6 +417,21 @@ bool AppendInputEvents(const char *path, const std::vector<InputSample> (&inputs
             cursor += stageBytes;
         }
     }
+    if (hasMultiplayer)
+    {
+        for (i32 stage = 0; stage < 7; ++stage)
+        {
+            WriteLe32(bytes.data() + payloadOffset + MP_COUNTS_OFFSET + stage * 4,
+                      static_cast<u32>(multiplayerInputs[stage].size()));
+            const std::size_t stageBytes =
+                multiplayerInputs[stage].size() * sizeof(MultiplayerInputSample);
+            if (stageBytes != 0)
+            {
+                std::memcpy(bytes.data() + cursor, multiplayerInputs[stage].data(), stageBytes);
+                cursor += stageBytes;
+            }
+        }
+    }
     WriteLe32(bytes.data() + payloadOffset + payloadSize, static_cast<u32>(payloadSize));
     std::memcpy(bytes.data() + payloadOffset + payloadSize + 4, "EAGX", 4);
 
@@ -320,11 +448,15 @@ void ResetRecording()
         stage.clear();
     for (auto &stage : g_RecordTouchEvents)
         stage.clear();
+    for (auto &stage : g_RecordMultiplayerInputs)
+        stage.clear();
     g_PendingTouchEvents.clear();
     g_CapturedJoystick = {};
     g_CapturedDirectTouch = {};
     g_RecordUsesExtension = false;
     g_RecordHasTouchState = false;
+    g_RecordHasMultiplayer = false;
+    g_RecordMultiplayerConfig = {};
 }
 
 void BeginStageRecording(i32 stage)
@@ -333,10 +465,38 @@ void BeginStageRecording(i32 stage)
     g_RecordInputs[stage].clear();
     g_RecordDirectTouch[stage].clear();
     g_RecordTouchEvents[stage].clear();
+    g_RecordMultiplayerInputs[stage].clear();
     g_PendingTouchEvents.clear();
     g_CapturedJoystick = {};
     g_CapturedDirectTouch = {};
     RecomputeRecordUsage();
+}
+
+void BeginMultiplayerRecording(const MultiplayerReplayConfig &config)
+{
+    if (config.playerCount < 2 || config.playerCount > 3 || config.difficulty > 5)
+        return;
+    g_RecordMultiplayerConfig = config;
+    g_RecordHasMultiplayer = true;
+    g_RecordUsesExtension = true;
+}
+
+void RecordMultiplayerFrame(i32 stage, i32 frame, const Netplay::FrameInput *inputs,
+                            std::size_t count)
+{
+    if (!g_RecordHasMultiplayer || !inputs || frame < 0 ||
+        count < g_RecordMultiplayerConfig.playerCount)
+        return;
+    stage = std::clamp(stage, 0, 6);
+    auto &samples = g_RecordMultiplayerInputs[stage];
+    if (samples.size() <= static_cast<std::size_t>(frame))
+        samples.resize(static_cast<std::size_t>(frame) + 1, {});
+    MultiplayerInputSample &sample = samples[frame];
+    for (u32 player = 0; player < 3; ++player)
+        sample.players[player] = player < g_RecordMultiplayerConfig.playerCount
+                                     ? PackInput(inputs[player])
+                                     : PackedFrameInput{};
+    g_RecordUsesExtension = true;
 }
 
 void BeginInputFrame()
@@ -427,7 +587,8 @@ bool AppendRecording(const char *path)
 {
     if (!g_RecordUsesExtension)
         return true;
-    return AppendInputEvents(path, g_RecordInputs, g_RecordTouchEvents, g_RecordDirectTouch);
+    return AppendInputEvents(path, g_RecordInputs, g_RecordTouchEvents, g_RecordDirectTouch,
+                             g_RecordMultiplayerInputs, g_RecordMultiplayerConfig);
 }
 
 bool AppendPlayback(const char *path)
@@ -436,7 +597,8 @@ bool AppendPlayback(const char *path)
         return true;
     if (g_PlaybackVersion != VERSION)
         return false;
-    return AppendInputEvents(path, g_PlaybackInputs, g_PlaybackTouchEvents, g_PlaybackDirectTouch);
+    return AppendInputEvents(path, g_PlaybackInputs, g_PlaybackTouchEvents, g_PlaybackDirectTouch,
+                             g_PlaybackMultiplayerInputs, g_PlaybackMultiplayerConfig);
 }
 
 void ClearPlayback()
@@ -447,8 +609,11 @@ void ClearPlayback()
         stage.clear();
     for (auto &stage : g_PlaybackTouchEvents)
         stage.clear();
+    for (auto &stage : g_PlaybackMultiplayerInputs)
+        stage.clear();
     g_PlaybackVersion = 0;
     g_PlaybackFlags = 0;
+    g_PlaybackMultiplayerConfig = {};
     g_PlaybackStage = -1;
     g_PlaybackFrame = -1;
     g_PlaybackTouchStart = 0;
@@ -467,7 +632,25 @@ bool LoadPlayback(const u8 *bytes, std::size_t size)
     g_PlaybackVersion = version;
     g_PlaybackFlags = flags;
 
-    std::size_t cursor = payloadOffset + HEADER_SIZE;
+    const bool hasMultiplayer = (flags & FLAG_MULTIPLAYER_INPUT) != 0;
+    const std::size_t headerSize = hasMultiplayer ? MP_HEADER_SIZE : HEADER_SIZE;
+    if (hasMultiplayer)
+    {
+        g_PlaybackMultiplayerConfig.playerCount =
+            static_cast<u8>(ReadLe32(bytes + payloadOffset + MP_PLAYER_COUNT_OFFSET));
+        g_PlaybackMultiplayerConfig.difficulty =
+            static_cast<u8>(ReadLe32(bytes + payloadOffset + MP_DIFFICULTY_OFFSET));
+        g_PlaybackMultiplayerConfig.gameplayAbi =
+            ReadLe32(bytes + payloadOffset + MP_GAMEPLAY_ABI_OFFSET);
+        for (u32 player = 0; player < 3; ++player)
+        {
+            const u32 loadout = ReadLe32(bytes + payloadOffset + MP_LOADOUT_OFFSET + player * 4);
+            g_PlaybackMultiplayerConfig.characters[player] = static_cast<u8>(loadout & 0xffu);
+            g_PlaybackMultiplayerConfig.shots[player] = static_cast<u8>((loadout >> 8) & 0xffu);
+        }
+    }
+
+    std::size_t cursor = payloadOffset + headerSize;
     for (i32 stage = 0; stage < 7; ++stage)
     {
         const u32 count = ReadLe32(bytes + payloadOffset + 8 + stage * 4);
@@ -501,6 +684,21 @@ bool LoadPlayback(const u8 *bytes, std::size_t size)
             cursor += stageBytes;
         }
     }
+    if (hasMultiplayer)
+    {
+        for (i32 stage = 0; stage < 7; ++stage)
+        {
+            const u32 count = ReadLe32(bytes + payloadOffset + MP_COUNTS_OFFSET + stage * 4);
+            g_PlaybackMultiplayerInputs[stage].resize(count);
+            const std::size_t stageBytes =
+                static_cast<std::size_t>(count) * sizeof(MultiplayerInputSample);
+            if (stageBytes != 0)
+            {
+                std::memcpy(g_PlaybackMultiplayerInputs[stage].data(), bytes + cursor, stageBytes);
+                cursor += stageBytes;
+            }
+        }
+    }
     return true;
 }
 
@@ -527,6 +725,38 @@ bool PlaybackActive()
     return g_PlaybackVersion != 0;
 }
 
+bool MultiplayerPlaybackActive()
+{
+    return g_PlaybackVersion == VERSION &&
+           (g_PlaybackFlags & FLAG_MULTIPLAYER_INPUT) != 0 &&
+           g_PlaybackMultiplayerConfig.playerCount >= 2;
+}
+
+bool GetMultiplayerPlaybackConfig(MultiplayerReplayConfig *out)
+{
+    if (!out || !MultiplayerPlaybackActive())
+        return false;
+    *out = g_PlaybackMultiplayerConfig;
+    return true;
+}
+
+bool GetMultiplayerPlaybackFrame(i32 stage, i32 frame, Netplay::FrameInput *inputs,
+                                 std::size_t count)
+{
+    if (!inputs || !MultiplayerPlaybackActive() || frame < 0 ||
+        count < g_PlaybackMultiplayerConfig.playerCount)
+        return false;
+    stage = std::clamp(stage, 0, 6);
+    const auto &samples = g_PlaybackMultiplayerInputs[stage];
+    if (static_cast<std::size_t>(frame) >= samples.size())
+        return false;
+    for (u32 player = 0; player < g_PlaybackMultiplayerConfig.playerCount; ++player)
+        inputs[player] = UnpackInput(samples[frame].players[player]);
+    for (u32 player = g_PlaybackMultiplayerConfig.playerCount; player < count; ++player)
+        inputs[player] = {};
+    return true;
+}
+
 bool UsesFixedTickTouchPlayback()
 {
     return g_PlaybackVersion == VERSION;
@@ -534,6 +764,8 @@ bool UsesFixedTickTouchPlayback()
 
 bool GetPlaybackJoystick(f32 *x, f32 *y)
 {
+    if (MultiplayerPlaybackActive())
+        return false;
     if (g_PlaybackVersion != VERSION ||
         g_PlaybackStage < 0 || g_PlaybackFrame < 0 ||
         static_cast<std::size_t>(g_PlaybackFrame) >= g_PlaybackInputs[g_PlaybackStage].size())
@@ -548,6 +780,8 @@ bool GetPlaybackJoystick(f32 *x, f32 *y)
 
 bool GetPlaybackDirectTouch(f32 *x, f32 *y, bool *unlimited)
 {
+    if (MultiplayerPlaybackActive())
+        return false;
     if (g_PlaybackVersion != VERSION ||
         g_PlaybackStage < 0 || g_PlaybackFrame < 0 ||
         static_cast<std::size_t>(g_PlaybackFrame) >= g_PlaybackDirectTouch[g_PlaybackStage].size())
@@ -686,14 +920,73 @@ bool DebugRoundTrip(const char *path)
     const bool incompatibleRejected = abiPresent && !LoadPlayback(incompatible.data(), incompatible.size());
     std::vector<u8> developmentVersion = bytes;
     if (abiPresent)
-        WriteLe32(developmentVersion.data() + payloadOffset, VERSION - 1);
+        WriteLe32(developmentVersion.data() + payloadOffset, VERSION + 1);
     const bool developmentVersionRejected = abiPresent &&
                                             !LoadPlayback(developmentVersion.data(), developmentVersion.size());
 
+    // EAGX v1 multiplayer type round-trip: save and load all synchronized logical
+    // lanes, including analog/touch flags, rather than a local-controller
+    // approximation. This is the same payload SaveReplay uses in live MP.
+    ResetRecording();
+    MultiplayerReplayConfig mpConfig;
+    mpConfig.playerCount = 3;
+    mpConfig.difficulty = 3;
+    mpConfig.gameplayAbi = 2;
+    mpConfig.characters[0] = 0;
+    mpConfig.shots[0] = 1;
+    mpConfig.characters[1] = 1;
+    mpConfig.shots[1] = 0;
+    mpConfig.characters[2] = 2;
+    mpConfig.shots[2] = 1;
+    BeginMultiplayerRecording(mpConfig);
+    BeginStageRecording(0);
+    Netplay::FrameInput mpInputs[3]{};
+    mpInputs[0].buttons = 0x11;
+    mpInputs[1].buttons = 0x22;
+    mpInputs[1].analogMode = Netplay::AnalogMode::Joystick;
+    mpInputs[1].x = 0.25f;
+    mpInputs[1].y = -0.75f;
+    mpInputs[2].buttons = 0x44;
+    mpInputs[2].analogMode = Netplay::AnalogMode::DirectTouch;
+    mpInputs[2].x = 6.5f;
+    mpInputs[2].y = -2.25f;
+    mpInputs[2].unlimited = true;
+    mpInputs[2].touchUsed = true;
+    mpInputs[2].touchBomb = true;
+    RecordMultiplayerFrame(0, 0, mpInputs, 3);
+    const std::string multiplayerPath = ResolveSavePath(path);
+    const bool multiplayerWritten =
+        WriteWholeFile(multiplayerPath.c_str(), base) && AppendRecording(multiplayerPath.c_str());
+    std::vector<u8> multiplayerBytes;
+    const bool multiplayerRead = multiplayerWritten &&
+        ReadWholeFile(multiplayerPath.c_str(), multiplayerBytes) &&
+        LoadPlayback(multiplayerBytes.data(), multiplayerBytes.size());
+    MultiplayerReplayConfig loadedConfig;
+    Netplay::FrameInput loadedInputs[3]{};
+    const bool multiplayerRoundTrip = multiplayerRead &&
+        GetMultiplayerPlaybackConfig(&loadedConfig) && loadedConfig.playerCount == 3 &&
+        loadedConfig.difficulty == 3 && loadedConfig.gameplayAbi == 2 &&
+        loadedConfig.characters[0] == 0 && loadedConfig.shots[0] == 1 &&
+        loadedConfig.characters[1] == 1 && loadedConfig.shots[1] == 0 &&
+        loadedConfig.characters[2] == 2 && loadedConfig.shots[2] == 1 &&
+        GetMultiplayerPlaybackFrame(0, 0, loadedInputs, 3) &&
+        loadedInputs[0].buttons == mpInputs[0].buttons &&
+        loadedInputs[1].buttons == mpInputs[1].buttons &&
+        loadedInputs[1].analogMode == Netplay::AnalogMode::Joystick &&
+        std::abs(loadedInputs[1].x - mpInputs[1].x) < 0.0001f &&
+        std::abs(loadedInputs[1].y - mpInputs[1].y) < 0.0001f &&
+        loadedInputs[2].buttons == mpInputs[2].buttons &&
+        loadedInputs[2].analogMode == Netplay::AnalogMode::DirectTouch &&
+        loadedInputs[2].unlimited && loadedInputs[2].touchUsed && loadedInputs[2].touchBomb &&
+        std::abs(loadedInputs[2].x - mpInputs[2].x) < 0.0001f &&
+        std::abs(loadedInputs[2].y - mpInputs[2].y) < 0.0001f;
+
     std::remove(extendedPath.c_str());
+    std::remove(multiplayerPath.c_str());
     ResetRecording();
     ClearPlayback();
-    return frame0 && frame1 && oldAttemptGone && incompatibleRejected && developmentVersionRejected;
+    return frame0 && frame1 && oldAttemptGone && incompatibleRejected &&
+           developmentVersionRejected && multiplayerRoundTrip;
 }
 #endif
 } // namespace ReplayExtension

@@ -14,6 +14,9 @@
 #include "ZunMath.hpp"
 #include "utils.hpp"
 #include <algorithm>
+#ifdef TH_ENABLE_NETPLAY
+#include "netplay/Th07RollbackState.hpp"
+#endif
 
 const BulletTypeInfo g_BulletTypeInfos[11] = {
     {0x200, 0x212, 0x213, 0x214, 0x20f}, {0x201, 0x215, 0x216, 0x217, 0x210},
@@ -110,6 +113,10 @@ i32 BulletManager::SpawnSingleBullet(EnemyBulletShooter *bulletProps, i32 x, i32
     {
         return 1;
     }
+
+#ifdef TH_ENABLE_NETPLAY
+    Netplay::Th07Rollback::TouchBullet(bullet);
+#endif
 
     bulletAngle = 0.0f;
     if (bulletProps->count2 > 1)
@@ -563,7 +570,11 @@ i32 BulletManager::SpawnBulletPattern(EnemyBulletShooter *bulletProps)
     }
 
     bulletProps->sprites = this->bulletTypeTemplates + bulletProps->sprite;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    angle = GetClosestActivePlayer(&bulletProps->pos)->AngleToPlayer(&bulletProps->pos);
+#else
     angle = g_Player.AngleToPlayer(&bulletProps->pos);
+#endif
     for (x = 0; x < bulletProps->count2; x++)
     {
         for (y = 0; y < bulletProps->count1; y++)
@@ -600,6 +611,10 @@ Laser *BulletManager::SpawnLaserPattern(EnemyLaserShooter *laserShooter)
             continue;
         }
 
+#ifdef TH_ENABLE_NETPLAY
+        Netplay::Th07Rollback::TouchLaser(laser);
+#endif
+
         g_AnmManager->SetAnmIdxAndExecuteScript(&laser->vm0, laserShooter->sprite + 522);
         g_AnmManager->SetActiveSprite(&laser->vm0, (i32)laser->vm0.activeSpriteIdx +
                                                        (i32)laserShooter->spriteOffset);
@@ -612,8 +627,14 @@ Laser *BulletManager::SpawnLaserPattern(EnemyLaserShooter *laserShooter)
         laser->prevAngle = laser->angle = laserShooter->angle1;
         if (laserShooter->type == 0)
         {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            laser->prevAngle = laser->angle =
+                GetClosestActivePlayer(&laserShooter->pos)->AngleToPlayer(&laserShooter->pos) +
+                laser->angle;
+#else
             laser->prevAngle = laser->angle =
                 g_Player.AngleToPlayer(&laserShooter->pos) + laser->angle;
+#endif
         }
         laser->flags = laserShooter->flags;
         laser->timer = 0;
@@ -767,8 +788,14 @@ void Bullet::UpdateBulletDirChangeAimAtPlayer()
         {
             this->exFlags = this->exFlags & 0xffffff7f;
         }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        this->angle = utils::AddNormalizeAngle(
+            GetClosestActivePlayer(&this->pos)->AngleToPlayer(&this->pos),
+            this->commandStates[3].angle);
+#else
         this->angle = utils::AddNormalizeAngle(g_Player.AngleToPlayer(&this->pos),
                                                this->commandStates[3].angle);
+#endif
         this->speed = this->commandStates[3].speed;
         local_8 = this->speed;
         this->commandStates[3].timer = 0;
@@ -827,6 +854,10 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
     f32 width;
     i32 i;
     i32 collisionRes;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    Player *collisionPlayer;
+    i32 playerId;
+#endif
 
     for (i = 0; i < 1024; i++)
     {
@@ -940,7 +971,22 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
         do_collision:
             if (!bullet->grazed && bullet->timer2.GetCurrent() >= 16)
             {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                collisionPlayer = &g_Player;
+                collisionRes = 0;
+                for (playerId = 0;
+                     playerId < TH07_MULTI_MAX_PLAYERS && collisionRes == 0;
+                     ++playerId)
+                {
+                    if (!IsPlayerSlotActive((u8)playerId))
+                        continue;
+                    collisionPlayer = &g_Players[playerId];
+                    collisionRes = collisionPlayer->CheckGraze(
+                        &bullet->pos, &bullet->sprites.grazeSize);
+                }
+#else
                 collisionRes = g_Player.CheckGraze(&bullet->pos, &bullet->sprites.grazeSize);
+#endif
                 if (collisionRes == 1)
                 {
                     bullet->grazed = 1;
@@ -951,14 +997,33 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
                     if ((bullet->moreFlags & 0x1000) == 0)
                     {
                         bullet->state = BULLET_DESPAWN;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                        g_ItemManager.SpawnItem(&bullet->pos, collisionPlayer->itemType, 1);
+#else
                         g_ItemManager.SpawnItem(&bullet->pos, g_Player.itemType, 1);
+#endif
                     }
                 }
                 goto do_sprite_anim;
             }
 
         do_player_collision:
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            collisionPlayer = &g_Player;
+            collisionRes = 0;
+            for (playerId = 0;
+                 playerId < TH07_MULTI_MAX_PLAYERS && collisionRes == 0;
+                 ++playerId)
+            {
+                if (!IsPlayerSlotActive((u8)playerId))
+                    continue;
+                collisionPlayer = &g_Players[playerId];
+                collisionRes = collisionPlayer->CalcKillboxCollision(
+                    &bullet->pos, &bullet->sprites.grazeSize);
+            }
+#else
             collisionRes = g_Player.CalcKillboxCollision(&bullet->pos, &bullet->sprites.grazeSize);
+#endif
             if (collisionRes != 0)
             {
                 if (collisionRes != 2 || (bullet->moreFlags & 0x1000) == 0)
@@ -966,7 +1031,11 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
                     bullet->state = BULLET_DESPAWN;
                     if (collisionRes == 2)
                     {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                        g_ItemManager.SpawnItem(&bullet->pos, collisionPlayer->itemType, 1);
+#else
                         g_ItemManager.SpawnItem(&bullet->pos, g_Player.itemType, 1);
+#endif
                     }
                 }
             }
@@ -1108,8 +1177,19 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
             }
             if (laser->timer >= laser->hitboxStartTime)
             {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                for (playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+                {
+                    if (!IsPlayerSlotActive((u8)playerId))
+                        continue;
+                    g_Players[playerId].CalcLaserHitbox(
+                        &laserCenter, &laserHitbox, &laser->pos, laser->angle,
+                        laser->timer.GetCurrent() % 12 == 0);
+                }
+#else
                 g_Player.CalcLaserHitbox(&laserCenter, &laserHitbox, &laser->pos, laser->angle,
                                          laser->timer.GetCurrent() % 12 == 0);
+#endif
             }
             if (laser->timer < laser->startTime)
             {
@@ -1119,8 +1199,19 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
             laser->state++;
             laser->targetWidth = laser->width;
         case LASER_ACTIVE:
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            for (playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+            {
+                if (!IsPlayerSlotActive((u8)playerId))
+                    continue;
+                g_Players[playerId].CalcLaserHitbox(
+                    &laserCenter, &laserHitbox, &laser->pos, laser->angle,
+                    laser->timer.GetCurrent() % 12 == 0);
+            }
+#else
             g_Player.CalcLaserHitbox(&laserCenter, &laserHitbox, &laser->pos, laser->angle,
                                      laser->timer.GetCurrent() % 12 == 0);
+#endif
             if (laser->timer < laser->duration)
             {
                 break;
@@ -1157,8 +1248,19 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
             }
             if (laser->timer < laser->hitboxEndTime)
             {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+                for (playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+                {
+                    if (!IsPlayerSlotActive((u8)playerId))
+                        continue;
+                    g_Players[playerId].CalcLaserHitbox(
+                        &laserCenter, &laserHitbox, &laser->pos, laser->angle,
+                        laser->timer.GetCurrent() % 12 == 0);
+                }
+#else
                 g_Player.CalcLaserHitbox(&laserCenter, &laserHitbox, &laser->pos, laser->angle,
                                          laser->timer.GetCurrent() % 12 == 0);
+#endif
             }
             if (laser->timer < laser->endTime)
             {

@@ -17,6 +17,15 @@ inline bool LimitPresentationTo60()
 #endif
 }
 
+inline bool NetplayStage4BossChain()
+{
+#ifdef __EMSCRIPTEN__
+    return EM_ASM_INT({ return !!Module.eaglerOptions?.netplayStage4BossChain; }) != 0;
+#else
+    return false;
+#endif
+}
+
 inline bool TouchEnabled()
 {
 #ifdef __EMSCRIPTEN__

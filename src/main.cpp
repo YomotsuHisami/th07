@@ -14,6 +14,7 @@
 #include "AsciiManager.hpp"
 #include "Chain.hpp"
 #include "Controller.hpp"
+#include "EaglerOptions.hpp"
 #include "Ending.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
@@ -24,12 +25,19 @@
 #include "PracticeRuntime.hpp"
 #include "ReplayExtension.hpp"
 #include "ResultScreen.hpp"
+#include "Rng.hpp"
 #include "SoundPlayer.hpp"
 #include "Supervisor.hpp"
 #include "TextHelper.hpp"
 #include "Touch.hpp"
 #include "ZunResult.hpp"
 #include "dxutil.hpp"
+#ifdef TH_ENABLE_NETPLAY
+#include "netplay/Th07LanStageProbe.hpp"
+#endif
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
 #ifdef TH_ENABLE_THPRAC
 #include "ThpracImGui.hpp"
 #endif
@@ -47,6 +55,14 @@ static int g_ThpracVisualTestFrames = 0;
 #endif
 static bool g_OpenMusicRoomForVisualTest = false;
 static bool g_MusicRoomVisualTestDispatched = false;
+#ifdef TH_ENABLE_NETPLAY
+static bool g_NetplayStage1Harness = false;
+static bool g_NetplayDualStage1Harness = false;
+static bool g_NetplayLanStage1Harness = false;
+static bool g_NetplayLanProduction = false;
+static bool g_NetplayStage1HarnessDispatched = false;
+static bool g_NetplayStage1HarnessPrepared = false;
+#endif
 #ifdef TH_DEV_TOOLS
 static i32 g_StageVisualTestIndex = -1;
 static bool g_Stage1VisualTestDispatched = false;
@@ -205,6 +221,25 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
 #endif
 #ifdef __EMSCRIPTEN__
     g_OpenMusicRoomForVisualTest = EM_ASM_INT({ return Module.eaglerOptions?.debugHarness === 'music-room'; }) != 0;
+#ifdef TH_ENABLE_NETPLAY
+    g_NetplayDualStage1Harness = EM_ASM_INT({
+        return Module.eaglerOptions?.debugHarness === 'netplay-dual-stage1' ? 1 : 0;
+    }) != 0;
+    g_NetplayLanStage1Harness = EM_ASM_INT({
+        return Module.eaglerOptions?.debugHarness === 'netplay-lan-stage1' ? 1 : 0;
+    }) != 0;
+    g_NetplayLanProduction = EM_ASM_INT({
+        return Module.eaglerOptions?.netplayMode === 'lan' ? 1 : 0;
+    }) != 0;
+    g_NetplayStage1Harness = g_NetplayDualStage1Harness || g_NetplayLanStage1Harness ||
+        g_NetplayLanProduction || EM_ASM_INT({
+        return Module.eaglerOptions?.debugHarness === 'netplay-stage1' ? 1 : 0;
+    }) != 0;
+    if (g_NetplayLanProduction)
+        std::printf("th07 netplay: LAN session requested\n");
+    else if (g_NetplayStage1Harness)
+        std::printf("th07 netplay audit: app init harness requested\n");
+#endif
 #ifdef TH_DEV_TOOLS
     g_EndingViewerSelection = EM_ASM_INT({
         const id = Module.eaglerOptions?.debugHarness;
@@ -299,6 +334,10 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
     {
         return SDL_APP_FAILURE;
     }
+#ifdef TH_ENABLE_NETPLAY
+    if (g_NetplayStage1Harness)
+        std::printf("th07 netplay audit: config ready\n");
+#endif
 
     GameWindow::ChecksumExecutable();
     g_GameWindow.frequency = SDL_GetPerformanceFrequency();
@@ -308,16 +347,28 @@ start:
     {
         return SDL_APP_FAILURE;
     }
+#ifdef TH_ENABLE_NETPLAY
+    if (g_NetplayStage1Harness)
+        std::printf("th07 netplay audit: window ready\n");
+#endif
 
     if (GameWindow::InitInterface())
     {
         return SDL_APP_FAILURE;
     }
+#ifdef TH_ENABLE_NETPLAY
+    if (g_NetplayStage1Harness)
+        std::printf("th07 netplay audit: interface ready\n");
+#endif
 
     if (GameWindow::InitRendering())
     {
         return SDL_APP_FAILURE;
     }
+#ifdef TH_ENABLE_NETPLAY
+    if (g_NetplayStage1Harness)
+        std::printf("th07 netplay audit: rendering ready\n");
+#endif
 
     g_SoundPlayer.InitializeSound();
     Controller::ResetKeyboard();
@@ -327,6 +378,10 @@ start:
         SDL_HideCursor();
     }
     renderRes = g_Supervisor.RegisterChain();
+#ifdef TH_ENABLE_NETPLAY
+    if (g_NetplayStage1Harness)
+        std::printf("th07 netplay audit: supervisor chain result=%d\n", renderRes);
+#endif
     if (renderRes != ZUN_SUCCESS)
     {
         return SDL_APP_FAILURE;
@@ -348,6 +403,151 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         SDL_Log("th07 music room audit: dispatch requested");
 #endif
     }
+#ifdef TH_ENABLE_NETPLAY
+    if (g_NetplayStage1Harness && !g_NetplayStage1HarnessDispatched &&
+        g_MainMenuForDebug && g_MainMenuForDebug->calcChain &&
+        (!g_NetplayLanProduction ||
+         Netplay::Th07LanStageProbe::TransportReady()))
+    {
+        // Netplay determinism harness only. Enter the same real gameplay
+        // initialization path as the existing Stage visual audit, but keep
+        // ordinary resources, lives and the canonical 1x 60 Hz simulation.
+        i32 requestedDifficulty = 1;
+#ifdef __EMSCRIPTEN__
+        if (g_NetplayLanProduction)
+        {
+            requestedDifficulty = EM_ASM_INT({
+                const difficulty = Number(Module.eaglerOptions?.netplayDifficulty ?? 1);
+                return Number.isInteger(difficulty) && difficulty >= 0 && difficulty <= 5
+                    ? difficulty : 1;
+            });
+        }
+#endif
+        g_Supervisor.cfg.defaultDifficulty = (u8)requestedDifficulty;
+        g_GameManager.difficulty = requestedDifficulty;
+#ifdef __EMSCRIPTEN__
+        if (g_NetplayLanProduction)
+        {
+            EM_ASM({
+                globalThis.__eaglerNetplayRequestedDifficulty = $0;
+            }, requestedDifficulty);
+        }
+#endif
+        g_GameManager.character = CHAR_REIMU;
+        g_GameManager.shotType = 0;
+        g_GameManager.practice = 0;
+        g_GameManager.demo = 0;
+        g_GameManager.SetReplay(0);
+        if (g_NetplayLanProduction)
+        {
+#ifdef __EMSCRIPTEN__
+            const int requestedSeed = EM_ASM_INT({
+                const seed = Number(Module.eaglerOptions?.netplaySeed);
+                return Number.isInteger(seed) && seed >= 0 && seed <= 65535 ? seed : 0x4a3d;
+            });
+            g_Rng.seed = (u16)requestedSeed;
+            g_Rng.seedBackup = (u16)requestedSeed;
+            g_Rng.generationCount = 0;
+#endif
+        }
+        else if (g_NetplayDualStage1Harness || g_NetplayLanStage1Harness)
+        {
+            // Supervisor seeds from wall-clock during process startup. Online
+            // play instead needs a session-owned seed. Reset all RNG ownership
+            // immediately before GameManager consumes it for Stage 1 setup.
+            g_Rng.seed = 0x4a3d;
+            g_Rng.seedBackup = 0x4a3d;
+            g_Rng.generationCount = 0;
+        }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (g_NetplayLanStage1Harness || g_NetplayLanProduction)
+        {
+            MultiplayerGameplay::SessionState gameplaySession;
+            i32 requestedPlayerCount = 2;
+#ifdef __EMSCRIPTEN__
+            requestedPlayerCount = EM_ASM_INT({
+                const count = Number(Module.eaglerOptions?.netplayPlayerCount ?? 2);
+                return count === 3 ? 3 : 2;
+            });
+            const int localSlot = EM_ASM_INT({
+                return Module.eaglerOptions?.netplayPlayer ?? 0;
+            });
+            gameplaySession.localPlayer =
+                localSlot >= 0 && localSlot < requestedPlayerCount ? localSlot : 0;
+#else
+            gameplaySession.localPlayer = 0;
+#endif
+            gameplaySession.playerCount = (u8)requestedPlayerCount;
+            gameplaySession.showStagePlayerNames = true;
+            gameplaySession.stage4BossChain = EaglerOptions::NetplayStage4BossChain();
+            for (i32 playerId = 0; playerId < requestedPlayerCount; ++playerId)
+            {
+                i32 character = playerId == 0 ? CHAR_REIMU :
+                                playerId == 1 ? CHAR_MARISA : CHAR_SAKUYA;
+                i32 shot = 0;
+#ifdef __EMSCRIPTEN__
+                if (g_NetplayLanProduction)
+                {
+                    character = EM_ASM_INT({
+                        const entry = Module.eaglerOptions?.netplayLoadouts?.[$0];
+                        const value = Number(entry?.character);
+                        return Number.isInteger(value) && value >= 0 && value <= 2 ? value : $1;
+                    }, playerId, character);
+                    shot = EM_ASM_INT({
+                        const entry = Module.eaglerOptions?.netplayLoadouts?.[$0];
+                        const value = Number(entry?.shot);
+                        return Number.isInteger(value) && value >= 0 && value <= 1 ? value : 0;
+                    }, playerId);
+                }
+#endif
+                gameplaySession.players[playerId].active = true;
+                gameplaySession.players[playerId].character = (u8)character;
+                gameplaySession.players[playerId].shot = (u8)shot;
+            }
+            // TH07's original GameManager globals remain P1's compatibility
+            // owner. Match them to the negotiated P1 loadout before
+            // GameManager::RegisterChain consumes the values.
+            g_GameManager.character = gameplaySession.players[0].character;
+            g_GameManager.shotType = gameplaySession.players[0].shot;
+            if (!MultiplayerGameplay::Configure(gameplaySession))
+            {
+                SDL_Log("th07 netplay audit: multiplayer gameplay session rejected");
+                return SDL_APP_FAILURE;
+            }
+        }
+#endif
+        // MainMenu::StartSelectedGame uses 0 for the normal route, 6 for
+        // Extra and 7 for Phantasm; GameManager increments that value while
+        // registering the first stage. Preserve that original TH07 mapping.
+        g_GameManager.currentStage = requestedDifficulty < DIFF_EXTRA
+            ? 0 : requestedDifficulty + DIFF_HARD;
+        g_GameManager.finished = 0;
+        MainMenu *menu = g_MainMenuForDebug;
+        g_Chain.Cut(menu->calcChain);
+        g_Supervisor.curState = 2;
+        g_NetplayStage1HarnessDispatched = true;
+        SDL_Log(g_NetplayLanProduction
+                    ? "th07 netplay: dispatched real LAN Stage 1 at 1x"
+                    : "th07 netplay audit: dispatched real Stage 1 at 1x");
+    }
+    if (g_NetplayStage1HarnessDispatched && !g_NetplayStage1HarnessPrepared &&
+        g_Supervisor.curState == 2 && g_GameManager.notInMenu && g_GameManager.globals)
+    {
+        g_NetplayStage1HarnessPrepared = true;
+#ifdef __EMSCRIPTEN__
+        if (g_NetplayLanProduction)
+        {
+            EM_ASM({
+                globalThis.__eaglerNetplayGameplayDifficulty = $0;
+                globalThis.__eaglerNetplayGameplayStage = $1;
+            }, g_GameManager.difficulty, g_GameManager.currentStage);
+        }
+#endif
+        SDL_Log(g_NetplayLanProduction
+                    ? "th07 netplay: Stage 1 gameplay ready at canonical 60 Hz"
+                    : "th07 netplay audit: Stage 1 gameplay ready at canonical 60 Hz");
+    }
+#endif
 #ifdef TH_DEV_TOOLS
     if (g_MenuStringVisualTestState >= 0 && !g_MenuStringVisualTestDispatched &&
         g_MainMenuForDebug && g_MainMenuForDebug->calcChain)

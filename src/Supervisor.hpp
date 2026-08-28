@@ -4,13 +4,26 @@
 #include "ZunMath.hpp"
 #include "graphics/ZunGraphics.hpp"
 #include "inttypes.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "Multiplayer.hpp"
+#endif
 #include <SDL3/SDL_gamepad.h>
 #include <chrono>
 
 extern u16 g_CurFrameRawInput;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+extern u16 g_CurFrameGameInputs[TH07_MULTI_MAX_PLAYERS];
+#define g_CurFrameGameInput (g_CurFrameGameInputs[0])
+#else
 extern u16 g_CurFrameGameInput;
+#endif
 extern u16 g_LastFrameRawInput;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+extern u16 g_LastFrameGameInputs[TH07_MULTI_MAX_PLAYERS];
+#define g_LastFrameGameInput (g_LastFrameGameInputs[0])
+#else
 extern u16 g_LastFrameGameInput;
+#endif
 extern u16 g_IsEighthFrameOfHeldInput;
 extern u16 g_NumOfFramesInputsWereHeld;
 

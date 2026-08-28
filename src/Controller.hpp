@@ -35,6 +35,17 @@ enum TouhouButton
 
 #define IS_PRESSED_RAW(key) ((g_CurFrameRawInput & (key)) != 0)
 #define IS_PRESSED_GAME(key) ((g_CurFrameGameInput & (key)) != 0)
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#define IS_PRESSED_PLAYER(player, key) \
+    ((g_CurFrameGameInputs[(player)->initParam] & (key)) != 0)
+#define WAS_PRESSED_PLAYER(player, key)                                      \
+    (((g_CurFrameGameInputs[(player)->initParam] & (key)) != 0) &&          \
+     ((g_CurFrameGameInputs[(player)->initParam] & (key)) !=                \
+      (g_LastFrameGameInputs[(player)->initParam] & (key))))
+#else
+#define IS_PRESSED_PLAYER(player, key) IS_PRESSED_GAME(key)
+#define WAS_PRESSED_PLAYER(player, key) WAS_PRESSED_GAME(key)
+#endif
 #define WAS_PRESSED_RAW(key)                                                                       \
     (IS_PRESSED_RAW(key) && ((g_CurFrameRawInput & (key)) != (g_LastFrameRawInput & (key))))
 #define WAS_PRESSED_GAME(key)                                                                      \

@@ -11,6 +11,12 @@
 #include "ZunResult.hpp"
 #include "utils.hpp"
 #include <algorithm>
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
+#ifdef TH_ENABLE_NETPLAY
+#include "netplay/Th07RollbackState.hpp"
+#endif
 
 EffectTypeInfo g_EffectMapping[34] = {
     {0x2ab, NULL, NULL},
@@ -187,6 +193,22 @@ i32 EffectManager::UpdateAttachToPlayer(Effect *effect)
         return false;
     }
 
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::IsMultiplayer())
+    {
+        for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            Player *player = &g_Players[playerId];
+            if (IsPlayerSlotActive(playerId) &&
+                (player->effect == effect || player->focusEffect == effect ||
+                 player->borderEffect == effect))
+            {
+                effect->pos1 = player->positionCenter;
+                return true;
+            }
+        }
+    }
+#endif
     effect->pos1 = g_Player.positionCenter;
     return true;
 }
@@ -474,6 +496,9 @@ Effect *EffectManager::SpawnParticles(i32 effectId, ZunVec3 *pos, i32 numParticl
             continue;
         }
 
+#ifdef TH_ENABLE_NETPLAY
+        Netplay::Th07Rollback::TouchEffect(effect);
+#endif
         effect->is2D = 0;
         effect->inUseFlag = 1;
         effect->effectId = (u8)effectId;
@@ -508,7 +533,7 @@ Effect *EffectManager::SpawnParticles(i32 effectId, ZunVec3 *pos, i32 numParticl
         }
     }
 
-    return i >= 400 ? &this->effects[408] : effect;
+    return i >= 400 ? &this->effects[413] : effect;
 }
 
 Effect *EffectManager::SpawnMovingParticles(i32 effectId, ZunVec3 *pos, ZunVec3 *velocity,
@@ -539,6 +564,9 @@ Effect *EffectManager::SpawnMovingParticles(i32 effectId, ZunVec3 *pos, ZunVec3 
             continue;
         }
 
+#ifdef TH_ENABLE_NETPLAY
+        Netplay::Th07Rollback::TouchEffect(effect);
+#endif
         effect->is2D = 0;
         effect->inUseFlag = 1;
         effect->effectId = effectId;
@@ -572,7 +600,7 @@ Effect *EffectManager::SpawnMovingParticles(i32 effectId, ZunVec3 *pos, ZunVec3 
         }
     }
 
-    return i >= 400 ? &this->effects[408] : effect;
+    return i >= 400 ? &this->effects[413] : effect;
 }
 
 Effect *EffectManager::SpawnEffect(i32 effectId, ZunVec3 *pos, i32 param_3, i32 param_4, u32 color)
@@ -582,6 +610,9 @@ Effect *EffectManager::SpawnEffect(i32 effectId, ZunVec3 *pos, i32 param_3, i32 
     Effect *effect;
 
     effect = &this->effects[param_3 + 400];
+#ifdef TH_ENABLE_NETPLAY
+    Netplay::Th07Rollback::TouchEffect(effect);
+#endif
     effect->is2D = 0;
     effect->inUseFlag = 1;
     effect->effectId = effectId;
@@ -621,7 +652,7 @@ u32 EffectManager::OnUpdate(EffectManager *arg)
     arg->layer1.next = NULL;
     arg->layer2.next = NULL;
     arg->layer3.next = NULL;
-    for (i = 0; i < 408; i++, effect++)
+    for (i = 0; i < 413; i++, effect++)
     {
         if (!effect->inUseFlag)
         {
@@ -692,7 +723,7 @@ u32 EffectManager::OnUpdate(EffectManager *arg)
 u32 EffectManager::OnDraw(EffectManager *arg)
 {
     auto sortAndDraw = [](Effect *layerHead, bool isBillboard) {
-        Effect *active[409];
+        Effect *active[413];
         i32 count = 0;
         Effect *effect = layerHead->next;
         while (effect)
@@ -710,6 +741,28 @@ u32 EffectManager::OnDraw(EffectManager *arg)
         for (i32 i = 0; i < count; i++)
         {
             active[i]->vm.pos = active[i]->prevPos.Lerp(active[i]->pos1, g_RenderAlpha);
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            const u32 originalColor = active[i]->vm.color.color;
+            if (MultiplayerGameplay::IsMultiplayer())
+            {
+                for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+                {
+                    if (IsPlayerSlotActive(playerId) &&
+                        (active[i] == g_Players[playerId].effect ||
+                         active[i] == g_Players[playerId].focusEffect ||
+                         active[i] == g_Players[playerId].borderEffect))
+                    {
+                        active[i]->vm.pos += GetPlayerPresentationOffset(playerId);
+                        const u8 alpha = GetPlayerOverlapAlpha(&g_Players[playerId]);
+                        if (alpha < (u8)(active[i]->vm.color.color >> 24))
+                            active[i]->vm.color.color =
+                                (active[i]->vm.color.color & 0x00ffffff) |
+                                ((u32)alpha << 24);
+                        break;
+                    }
+                }
+            }
+#endif
             if (isBillboard)
             {
                 g_AnmManager->DrawBillboard(&active[i]->vm);
@@ -720,6 +773,9 @@ u32 EffectManager::OnDraw(EffectManager *arg)
                 active[i]->vm.pos.y += g_GameManager.arcadeRegionTopLeftPos.y;
                 g_AnmManager->Draw(&active[i]->vm);
             }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+            active[i]->vm.color.color = originalColor;
+#endif
         }
     };
 

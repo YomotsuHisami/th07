@@ -40,9 +40,17 @@ static char g_WebMidiPaths[32][256] = {};
 ControllerMapping g_ControllerMapping = {0, 1, 2, 4, -1, -1, -1, -1, 3};
 
 u16 g_CurFrameRawInput;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+u16 g_CurFrameGameInputs[TH07_MULTI_MAX_PLAYERS] = {};
+#else
 u16 g_CurFrameGameInput;
+#endif
 u16 g_LastFrameRawInput;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+u16 g_LastFrameGameInputs[TH07_MULTI_MAX_PLAYERS] = {};
+#else
 u16 g_LastFrameGameInput;
+#endif
 u16 g_IsEighthFrameOfHeldInput;
 u16 g_NumOfFramesInputsWereHeld;
 Supervisor g_Supervisor;
@@ -606,17 +614,35 @@ ZunResult Supervisor::AddedCallback(Supervisor *arg)
     ScoreDat *scoreDat;
     i32 i;
 
+#if defined(__EMSCRIPTEN__) && defined(TH_ENABLE_NETPLAY)
+    const bool netplayStage1Audit = EM_ASM_INT({
+        const harness = Module.eaglerOptions?.debugHarness;
+        return harness === 'netplay-stage1' || harness === 'netplay-lan-stage1' ? 1 : 0;
+    }) != 0;
+    auto netplayAudit = [netplayStage1Audit](const char *message) {
+        if (netplayStage1Audit)
+            std::printf("th07 netplay audit: supervisor %s\n", message);
+    };
+#else
+    auto netplayAudit = [](const char *) {};
+#endif
+
     arg->perfFrequency = SDL_GetPerformanceFrequency();
+    netplayAudit("added callback begin");
     g_Supervisor.gfxDevice->BeginFrame();
     g_Supervisor.gfxDevice->SetClearColor({0xff000000});
     g_Supervisor.gfxDevice->Clear(CLEAR_COLOR_BUFFER);
     g_Supervisor.gfxDevice->EndFrame();
     g_Supervisor.gfxDevice->SwapBuffers();
+    netplayAudit("initial clear done");
     if (LoadGameData() != ZUN_SUCCESS)
     {
+        netplayAudit("LoadGameData FAIL");
         return ZUN_ERROR;
     }
+    netplayAudit("LoadGameData PASS");
     g_AnmManager->LoadSurface(0, "data/title/th07logo.jpg");
+    netplayAudit("title logo loaded");
     g_Supervisor.isInEnding = 1;
     if (!g_Supervisor.vsyncEnabled)
     {
@@ -647,6 +673,7 @@ ZunResult Supervisor::AddedCallback(Supervisor *arg)
     (void)g_AnmManager->PreloadTransitionSurface("data/result/result.jpg");
     (void)g_AnmManager->PreloadTransitionSurface("data/title/phantasm.jpg");
 #endif
+    netplayAudit("transition preload done");
     arg->isInEnding = 0;
     arg->renderSkipFrames = 0;
     arg->lastTotalPlayTimeUpdate = SDL_GetTicks();
@@ -660,28 +687,39 @@ ZunResult Supervisor::AddedCallback(Supervisor *arg)
     {
         arg->midiOutput->ReadFileData(30, "bgm/init.mid");
     }
+    netplayAudit("input and midi ready");
     g_SoundPlayer.InitSoundBuffers();
+    netplayAudit("sound buffers ready");
     if (g_AnmManager->LoadAnms(ANM_FILE_TEXT, "data/text.anm", ANM_OFFSET_TEXT) != ZUN_SUCCESS)
     {
+        netplayAudit("LoadAnms text FAIL");
         return ZUN_ERROR;
     }
+    netplayAudit("LoadAnms text PASS");
 
     if (AsciiManager::RegisterChain() != ZUN_SUCCESS)
     {
+        netplayAudit("AsciiManager FAIL");
         g_GameErrorContext.Log("error : 文字の初期化に失敗しました\n");
         return ZUN_ERROR;
     }
+    netplayAudit("AsciiManager PASS");
 
     g_AnmManager->SetupVertexBuffer();
+    netplayAudit("vertex buffer ready");
     if (TextHelper::CreateTextBuffer() != ZUN_SUCCESS)
     {
+        netplayAudit("TextHelper FAIL");
         return ZUN_ERROR;
     }
+    netplayAudit("TextHelper PASS");
     if (g_SoundPlayer.LoadFmt("bgm/thbgm.fmt"))
     {
+        netplayAudit("LoadFmt FAIL");
         g_GameErrorContext.Log("error : BGM の初期化に失敗しました\n");
         return ZUN_ERROR;
     }
+    netplayAudit("LoadFmt PASS");
 
     if (g_SoundPlayer.bgmSeekOffset == 0)
     {
@@ -716,6 +754,7 @@ ZunResult Supervisor::AddedCallback(Supervisor *arg)
     {
         g_Supervisor.midiTimer->StartTimerDefault();
     }
+    netplayAudit("added callback PASS");
     return ZUN_SUCCESS;
 }
 
@@ -1069,10 +1108,11 @@ ZunResult Supervisor::LoadConfig(const char *configFilename)
     }
 #ifdef __EMSCRIPTEN__
     const int webMusicMode = EM_ASM_INT({
-        return Module.touhouMusicMode === 'midi' ? 2 :
-               (Module.touhouMusicMode === 'wav' || Module.touhouMusicMode === 'ogg' ? 1 : 0);
+        return Module.touhouMusicMode === 'none' ? 0 :
+               Module.touhouMusicMode === 'midi' ? 2 :
+               (Module.touhouMusicMode === 'wav' || Module.touhouMusicMode === 'ogg' ? 1 : -1);
     });
-    if (webMusicMode == MUSIC_MIDI || webMusicMode == MUSIC_WAV)
+    if (webMusicMode == MUSIC_OFF || webMusicMode == MUSIC_MIDI || webMusicMode == MUSIC_WAV)
     {
         g_Supervisor.cfg.musicMode = webMusicMode;
         // Dynamic Web resources are installed after the base data package;
