@@ -3,6 +3,7 @@
 #include "netplay/NetplaySideEffects.hpp"
 #endif
 
+#include <algorithm>
 #include <climits>
 #include <cstdio>
 
@@ -1233,6 +1234,13 @@ void SoundPlayer::PlaySoundByIdx(i32 idx, u32 param_2)
     i32 iVar1;
     i32 i;
 
+    constexpr i32 soundVolumeCount =
+        static_cast<i32>(sizeof(SOUND_BUFFER_IDX_VOL) / sizeof(SOUND_BUFFER_IDX_VOL[0]));
+    if (idx < 0 || idx >= soundVolumeCount)
+    {
+        return;
+    }
+
     iVar1 = SOUND_BUFFER_IDX_VOL[idx].field2_0x6;
     for (i = 0; i < 5; i++)
     {
@@ -1451,9 +1459,14 @@ loop:
     }
 
 loop_breakout:
-    if (g_Supervisor.cfg.playSounds)
+    if (!g_Supervisor.cfg.playSounds)
     {
-        for (i = 0; i < 5; i++)
+        std::fill_n(this->soundQueue,
+                    sizeof(this->soundQueue) / sizeof(this->soundQueue[0]), -1);
+    }
+    else
+    {
+        for (i = 0; i < static_cast<i32>(sizeof(this->soundQueue) / sizeof(this->soundQueue[0])); i++)
         {
             if (this->soundQueue[i] < 0)
             {
@@ -1462,7 +1475,9 @@ loop_breakout:
 
             curSound = this->soundQueue[i];
             this->soundQueue[i] = -1;
-            if (!this->soundBuffers[curSound])
+            if (curSound < 0 ||
+                curSound >= static_cast<i32>(sizeof(this->soundBuffers) / sizeof(this->soundBuffers[0])) ||
+                !this->soundBuffers[curSound])
             {
                 continue;
             }

@@ -19,8 +19,8 @@
       "use strict";
       const protocol = "eagler-touhou/1";
       const game = "th07";
-      const saveRoot = "/savesth07";
       const params = new URLSearchParams(location.search);
+      const saveRoot = params.get("runtimeVariant") === "multiplayer" ? "/savesth07-multiplayer" : "/savesth07";
       const hosted = params.get("hosted") === "1" && window.parent !== window;
       window.__eaglerManagedDataState = {
         enabled: params.get("managedData") === "1" && hosted,
@@ -324,7 +324,7 @@
         if (!Array.isArray(message.thpracCatalog ?? []) || (message.thpracCatalog?.length || 0) > 256) throw new Error("invalid thprac catalog");
         thpracCatalog = message.thpracCatalog ?? [];
         Module.eaglerThpracCatalog = thpracCatalog;
-        for (const key of ["thpracEnabled", "limitPresentationTo60", "touchEnabled", "unlimitedTouch", "touchBombZoneEnabled", "doubleTapBombEnabled", "alwaysHitbox", "th06FocusHitbox", "netplayRollbackProbe", "netplayPauseCycle", "netplayStageTransition", "netplayStage4BossChain"]) {
+        for (const key of ["thpracEnabled", "limitPresentationTo60", "touchEnabled", "unlimitedTouch", "touchBombZoneEnabled", "doubleTapBombEnabled", "alwaysHitbox", "enhanceLocalPlayerVisibility", "th06FocusHitbox", "replayViewer", "netplayRollbackProbe", "netplayScriptedInput", "netplayReplayPlaybackCycle", "netplayPauseCycle", "netplayRestartCycle", "netplayStageTransition", "netplayStage4BossChain", "netplaySpectator"]) {
           if (options[key] != null && typeof options[key] !== "boolean") throw new Error("invalid eagler-touhou option");
         }
         if (options.touchSensitivity != null && (!Number.isFinite(options.touchSensitivity) || options.touchSensitivity < 50 || options.touchSensitivity > 300)) throw new Error("invalid touch sensitivity");
@@ -335,6 +335,8 @@
         if (options.netplayUrl != null && (typeof options.netplayUrl !== "string" || options.netplayUrl.length > 511 || !/^wss?:\/\//.test(options.netplayUrl))) throw new Error("invalid netplay URL");
         if (options.netplayPlayer != null && (!Number.isInteger(options.netplayPlayer) || options.netplayPlayer < 0 || options.netplayPlayer > 2)) throw new Error("invalid netplay player");
         if (options.netplayPlayerCount != null && (!Number.isInteger(options.netplayPlayerCount) || options.netplayPlayerCount < 2 || options.netplayPlayerCount > 3)) throw new Error("invalid netplay player count");
+        if (options.netplaySpectatorId != null && (typeof options.netplaySpectatorId !== "string" || !/^[A-Za-z0-9_-]{0,64}$/.test(options.netplaySpectatorId))) throw new Error("invalid spectator id");
+        if (options.netplaySpectatorCount != null && (!Number.isInteger(options.netplaySpectatorCount) || options.netplaySpectatorCount < 0 || options.netplaySpectatorCount > 64)) throw new Error("invalid spectator count");
         if (options.netplayMode != null && options.netplayMode !== "lan") throw new Error("invalid netplay mode");
         if (options.netplaySeed != null && (!Number.isInteger(options.netplaySeed) || options.netplaySeed < 0 || options.netplaySeed > 65535)) throw new Error("invalid netplay seed");
         if (options.netplayDifficulty != null && (!Number.isInteger(options.netplayDifficulty) || options.netplayDifficulty < 0 || options.netplayDifficulty > 5)) throw new Error("invalid netplay difficulty");
@@ -369,6 +371,7 @@
         const session = options.thpracSession;
         if (options.debugHarness != null && ![
           "thprac-menu", "music-room", "netplay-stage1", "netplay-dual-stage1", "netplay-lan-core", "netplay-lan-stage1",
+          "replay-extension", "result-stats-phantasm",
           "ending-reimu-a", "ending-reimu-b", "ending-marisa-a", "ending-marisa-b",
           "ending-sakuya-a", "ending-sakuya-b",
           "ending-reimu-bad", "ending-marisa-bad", "ending-sakuya-bad"
@@ -385,8 +388,11 @@
           touchBombZoneEnabled: options.touchBombZoneEnabled !== false,
           doubleTapBombEnabled: !!options.touchEnabled && !!options.doubleTapBombEnabled,
           alwaysHitbox: !!options.alwaysHitbox,
+          enhanceLocalPlayerVisibility: !!options.enhanceLocalPlayerVisibility,
           th06FocusHitbox: false,
+          replayViewer: !!options.replayViewer,
           netplayRollbackProbe: !!options.netplayRollbackProbe,
+          netplayReplayPlaybackCycle: !!options.netplayReplayPlaybackCycle,
           thpracLocale: options.thpracLocale || "en-US",
           oggDecodeMode: options.oggDecodeMode || "stream",
           debugHarness: options.debugHarness || null,
@@ -394,6 +400,9 @@
           netplayUrl: options.netplayUrl || "",
           netplayPlayer: options.netplayPlayer ?? -1,
           netplayPlayerCount: options.netplayPlayerCount ?? 2,
+          netplaySpectator: !!options.netplaySpectator,
+          netplaySpectatorId: options.netplaySpectatorId || "",
+          netplaySpectatorCount: options.netplaySpectatorCount ?? 0,
           netplaySeed: options.netplaySeed ?? 0x4a3d,
           netplayDifficulty: options.netplayDifficulty ?? 1,
           netplayIceServers: Array.isArray(options.netplayIceServers) ? options.netplayIceServers.map(server => ({
@@ -404,7 +413,9 @@
           netplayLoadouts: Array.isArray(options.netplayLoadouts) ? options.netplayLoadouts.map(entry => ({ character: entry.character, shot: entry.shot })) : null,
           netplayStage4BossChain: !!options.netplayStage4BossChain,
           netplayPhysicalInput: !!options.netplayPhysicalInput,
+          netplayScriptedInput: !!options.netplayScriptedInput,
           netplayPauseCycle: !!options.netplayPauseCycle,
+          netplayRestartCycle: !!options.netplayRestartCycle,
           netplayStageTransition: !!options.netplayStageTransition,
           netplayTestFrames: options.netplayTestFrames ?? 300,
           thpracSession: session || null
@@ -647,13 +658,20 @@
           case "retry-music": await retryMusic(); reply(message.request, true); break;
           default: reply(message.request, false, { error: "unknown command" });
           }
-        } catch (error) { if (message.request) reply(message.request, false, { error: String(error && error.message || error) }); }
+        } catch (error) {
+          if (message.request) {
+            const detail = typeof error?.message === "string" && error.message ? error.message
+              : Number.isInteger(error?.errno) ? `Filesystem error (errno ${error.errno})`
+              : String(error);
+            reply(message.request, false, { error: detail, errno: Number.isInteger(error?.errno) ? error.errno : null });
+          }
+        }
       });
       window.Module = {
         canvas: document.getElementById("canvas"),
         locateFile: path => assetVersion ? `${path}?v=${encodeURIComponent(assetVersion)}` : path,
         touhouMusicMode: "",
-      eaglerOptions: { thpracEnabled: false, limitPresentationTo60: false, touchEnabled: false, touchMovementMode: "touch", touchSensitivity: 100, touchFocusMode: "hold-button", unlimitedTouch: false, touchBombZoneEnabled: true, doubleTapBombEnabled: false, alwaysHitbox: false, th06FocusHitbox: false, netplayRollbackProbe: new URLSearchParams(location.search).get("netplayProbe") === "1", thpracLocale: "en-US", oggDecodeMode: "stream", debugHarness: new URLSearchParams(location.search).get("debugHarness") || null, netplayUrl: new URLSearchParams(location.search).get("netplayUrl") || "", netplayPlayer: Number.parseInt(new URLSearchParams(location.search).get("netplayPlayer") || "-1", 10), netplayPlayerCount: Number.parseInt(new URLSearchParams(location.search).get("netplayPlayerCount") || "2", 10), netplayStage4BossChain: new URLSearchParams(location.search).get("netplayStage4BossChain") === "1", netplayPhysicalInput: new URLSearchParams(location.search).get("netplayPhysicalInput") === "1", netplayPauseCycle: new URLSearchParams(location.search).get("netplayPauseCycle") === "1", netplayStageTransition: new URLSearchParams(location.search).get("netplayStageTransition") === "1", netplayTestFrames: Number.parseInt(new URLSearchParams(location.search).get("netplayTestFrames") || "300", 10), thpracSession: null },
+      eaglerOptions: { thpracEnabled: false, limitPresentationTo60: false, touchEnabled: false, touchMovementMode: "touch", touchSensitivity: 100, touchFocusMode: "hold-button", unlimitedTouch: false, touchBombZoneEnabled: true, doubleTapBombEnabled: false, alwaysHitbox: false, enhanceLocalPlayerVisibility: false, th06FocusHitbox: false, netplayRollbackProbe: new URLSearchParams(location.search).get("netplayProbe") === "1", thpracLocale: "en-US", oggDecodeMode: "stream", debugHarness: new URLSearchParams(location.search).get("debugHarness") || null, netplayUrl: new URLSearchParams(location.search).get("netplayUrl") || "", netplayPlayer: Number.parseInt(new URLSearchParams(location.search).get("netplayPlayer") || "-1", 10), netplayPlayerCount: Number.parseInt(new URLSearchParams(location.search).get("netplayPlayerCount") || "2", 10), netplayStage4BossChain: new URLSearchParams(location.search).get("netplayStage4BossChain") === "1", netplayPhysicalInput: new URLSearchParams(location.search).get("netplayPhysicalInput") === "1", netplayPauseCycle: new URLSearchParams(location.search).get("netplayPauseCycle") === "1", netplayStageTransition: new URLSearchParams(location.search).get("netplayStageTransition") === "1", netplayTestFrames: Number.parseInt(new URLSearchParams(location.search).get("netplayTestFrames") || "300", 10), thpracSession: null },
         eaglerControls: { fireEnabled: true, focusEnabled: false, bombSerial: 0, escapeSerial: 0, joystickX: 0, joystickY: 0, keyboardBits: 0, keyboardPulseBits: 0, thpracKeyboardBits: 0 },
         preRun: [() => {
           addRunDependency("savesth07-sync");

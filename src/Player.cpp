@@ -16,6 +16,7 @@
 #include "PracticeRuntime.hpp"
 #include "ReplayExtension.hpp"
 #include "Rng.hpp"
+#include "ScreenEffect.hpp"
 #include "SoundPlayer.hpp"
 #include "Stage.hpp"
 #include "Touch.hpp"
@@ -75,18 +76,17 @@ namespace
 // slot or advance the gameplay RNG.  The normal focus effect below remains
 // completely vanilla.
 constexpr i32 EAGLER_HITBOX_ANM = 0x2c2;
-// Multiplayer readability only.  Remote ships begin fading before they enter
-// the local player's immediate dodge space, then become strongly translucent
-// when they are close enough to obscure bullets.  These values affect draw
-// alpha only; simulation positions and collision stay untouched.
-// Keep the entire close-overlap zone pinned to the minimum alpha.  The old
-// 120..220 linear ramp made a player at 150 px roughly 32% opaque, so tiny
-// rollback/presentation corrections visibly modulated brightness during live
-// play.  Use a narrow outer transition instead: <=220 px stays extremely
-// faint, 220..260 eases back to opaque, >=260 is normal.
-constexpr f32 REMOTE_PLAYER_FADE_START_DISTANCE = 260.0f;
-constexpr f32 REMOTE_PLAYER_FADE_FULL_DISTANCE = 220.0f;
-constexpr i32 REMOTE_PLAYER_FADE_MIN_ALPHA = 8;
+// Multiplayer readability only. Measure each remote ship against this
+// machine's local player: opaque at 100 px and beyond, linearly fading over
+// 50..100 px, and held at 20% opacity inside 50 px. The draw path must clamp
+// both ANM interpolation endpoints; changing only the current color makes
+// SetRenderStateForVm lerp from an opaque prevColor every presentation frame.
+constexpr f32 REMOTE_PLAYER_FADE_START_DISTANCE = 100.0f;
+constexpr f32 REMOTE_PLAYER_FADE_FULL_DISTANCE = 50.0f;
+constexpr i32 REMOTE_PLAYER_FADE_MIN_ALPHA = 51;
+constexpr u32 LOCAL_PLAYER_LOCATOR_COLOR = 0x20ffffff;
+constexpr f32 LOCAL_PLAYER_LOCATOR_THICKNESS = 1.0f;
+void ClampVmAlpha(AnmVm *vm, u8 alpha);
 AnmVm g_EaglerHitboxVm;
 bool g_EaglerHitboxVmActive = false;
 
@@ -99,6 +99,37 @@ bool CanSampleRawTouchForPlayer(const Player *player)
 #else
     (void)player;
     return true;
+#endif
+}
+
+void DrawLocalPlayerLocator(const Player *player, const ZunVec3 &drawPlayerPos)
+{
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (!player || !MultiplayerGameplay::IsMultiplayer() ||
+        !EaglerOptions::EnhanceLocalPlayerVisibility() ||
+        player->initParam != MultiplayerGameplay::GetLocalPlayerSlot() ||
+        !g_GameManager.notInMenu || g_GameManager.replay ||
+        g_GameManager.isInPauseMenu || g_GameManager.isInRetryMenu)
+        return;
+
+    const f32 left = g_GameManager.arcadeRegionTopLeftPos.x;
+    const f32 top = g_GameManager.arcadeRegionTopLeftPos.y;
+    const f32 right = left + g_GameManager.arcadeRegionSize.x;
+    const f32 bottom = top + g_GameManager.arcadeRegionSize.y;
+    const f32 x = left + drawPlayerPos.x;
+    const f32 y = top + drawPlayerPos.y;
+    const f32 halfThickness = LOCAL_PLAYER_LOCATOR_THICKNESS * 0.5f;
+
+    // Screen-space presentation only. Keep both strokes strictly inside the
+    // 384x448 arcade region so the locator can never leak into the side UI or
+    // any outer menu surface.
+    ZunRect horizontal{left, y - halfThickness, right, y + halfThickness};
+    ZunRect vertical{x - halfThickness, top, x + halfThickness, bottom};
+    ScreenEffect::DrawSquare(&horizontal, 0xffffffff);
+    ScreenEffect::DrawSquare(&vertical, 0xffffffff);
+#else
+    (void)player;
+    (void)drawPlayerPos;
 #endif
 }
 
@@ -236,19 +267,22 @@ void DrawEaglerHitboxVm(const Player *player)
     g_EaglerHitboxVm.pos = {g_GameManager.arcadeRegionTopLeftPos.x + drawPos.x,
                             g_GameManager.arcadeRegionTopLeftPos.y + drawPos.y, 0.0f};
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-    const u32 originalColor = g_EaglerHitboxVm.color.color;
+    const ZunColor originalColor = g_EaglerHitboxVm.color;
+    const ZunColor originalPrevColor = g_EaglerHitboxVm.prevColor;
+    const ZunColor originalColor2 = g_EaglerHitboxVm.color2;
+    const ZunColor originalPrevColor2 = g_EaglerHitboxVm.prevColor2;
     if (MultiplayerGameplay::IsMultiplayer())
     {
         const u8 alpha = GetPlayerOverlapAlpha(player);
-        if (alpha < (u8)(g_EaglerHitboxVm.color.color >> 24))
-            g_EaglerHitboxVm.color.color =
-                (g_EaglerHitboxVm.color.color & 0x00ffffff) |
-                ((u32)alpha << 24);
+        ClampVmAlpha(&g_EaglerHitboxVm, alpha);
     }
 #endif
     g_AnmManager->Draw(&g_EaglerHitboxVm);
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-    g_EaglerHitboxVm.color.color = originalColor;
+    g_EaglerHitboxVm.color = originalColor;
+    g_EaglerHitboxVm.prevColor = originalPrevColor;
+    g_EaglerHitboxVm.color2 = originalColor2;
+    g_EaglerHitboxVm.prevColor2 = originalPrevColor2;
 #endif
 }
 } // namespace
@@ -271,6 +305,18 @@ namespace
 {
 bool g_SharedBorderTransition = false;
 constexpr f32 PLAYER_SPIRIT_DRIFT_SPEED = 0.2f;
+constexpr i32 LIFE_GIVE_WAIT_RELEASE_TOKEN = -1;
+constexpr f32 REVIVE_PRESENTATION_BASE_ALPHA = 80.0f;
+constexpr f32 REVIVE_PRESENTATION_ACTIVE_ALPHA = 254.0f;
+constexpr f32 REVIVE_PRESENTATION_FADE_SECONDS = 0.20f;
+struct RevivePresentationState
+{
+    bool valid = false;
+    bool wasSpirit = false;
+    u64 lastTickNs = 0;
+    f32 alpha = REVIVE_PRESENTATION_BASE_ALPHA;
+};
+RevivePresentationState g_RevivePresentation[TH07_MULTI_MAX_PLAYERS];
 
 bool IsSharedBorderParticipant(const Player *player)
 {
@@ -472,6 +518,14 @@ void UpdateLifeTransfer(Player *giver)
         return;
     }
 
+    if (giver->lifeGiveTargetToken == LIFE_GIVE_WAIT_RELEASE_TOKEN)
+    {
+        giver->lifeGiveTimer = 0;
+        if (!giver->isFocus)
+            giver->lifeGiveTargetToken = 0;
+        return;
+    }
+
     Player *receiver = SelectLifeTransferReceiver(giver);
     if (!receiver)
     {
@@ -501,8 +555,6 @@ void UpdateLifeTransfer(Player *giver)
     if (++giver->lifeGiveTimer < 90 || GetPlayerLives(giver->initParam) <= 0)
         return;
 
-    giver->lifeGiveTimer = 0;
-    giver->lifeGiveTargetToken = 0;
     if (receiver->playerState == PLAYER_STATE_SPIRIT)
     {
         AddPlayerLives(giver->initParam, -1);
@@ -513,10 +565,13 @@ void UpdateLifeTransfer(Player *giver)
         receiver->bulletGracePeriod = 60;
         receiver->playerSprite.color.color = 0xffffffff;
         g_Gui.showLives = 2;
-        g_SoundPlayer.PlaySoundByIdx(SOUND_EXTEND, 0);
+        giver->lifeGiveTimer = 0;
+        giver->lifeGiveTargetToken = LIFE_GIVE_WAIT_RELEASE_TOKEN;
         return;
     }
 
+    giver->lifeGiveTimer = 0;
+    giver->lifeGiveTargetToken = 0;
     Item *lifeItem = g_ItemManager.SpawnItem(
         &giver->positionCenter, ITEM_LIFE,
         GetLifeTransferSpawnState(receiver->initParam));
@@ -524,8 +579,73 @@ void UpdateLifeTransfer(Player *giver)
     {
         AddPlayerLives(giver->initParam, -1);
         g_Gui.showLives = 2;
+        giver->lifeGiveTargetToken = LIFE_GIVE_WAIT_RELEASE_TOKEN;
         g_SoundPlayer.PlaySoundByIdx(SOUND_25, 0);
     }
+}
+
+bool IsPlayerActivelyBeingRevived(const Player *receiver)
+{
+    if (!receiver || receiver->playerState != PLAYER_STATE_SPIRIT)
+        return false;
+    const i32 token = receiver->initParam + 1;
+    for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+    {
+        const Player *giver = &g_Players[playerId];
+        if (giver == receiver || !IsPlayerActiveForLifeTransfer(giver) ||
+            GetPlayerLives(playerId) <= 0)
+            continue;
+        if (giver->lifeGiveTargetToken == token && giver->lifeGiveTimer > 0)
+            return true;
+    }
+    return false;
+}
+
+u8 GetPlayerRescuePresentationAlpha(const Player *player, u8 normalAlpha)
+{
+    if (!player || player->initParam >= TH07_MULTI_MAX_PLAYERS)
+        return normalAlpha;
+    RevivePresentationState &state = g_RevivePresentation[player->initParam];
+    const bool spirit = player->playerState == PLAYER_STATE_SPIRIT;
+    const u64 now = SDL_GetTicksNS();
+
+    if (!state.valid)
+    {
+        state.valid = true;
+        state.wasSpirit = spirit;
+        state.lastTickNs = now;
+        state.alpha = spirit ? REVIVE_PRESENTATION_BASE_ALPHA : normalAlpha;
+    }
+
+    // First presented frame after a successful rescue is exactly 100%.
+    if (state.wasSpirit && !spirit)
+    {
+        state.alpha = 255.0f;
+        state.lastTickNs = now;
+        state.wasSpirit = false;
+        g_SoundPlayer.PlaySoundByIdx(SOUND_EXTEND, 0);
+        return 255;
+    }
+
+    const f32 elapsed = std::clamp(
+        static_cast<f32>(now - state.lastTickNs) / 1000000000.0f, 0.0f, 0.05f);
+    state.lastTickNs = now;
+    state.wasSpirit = spirit;
+
+    const f32 target = spirit
+                           ? (IsPlayerActivelyBeingRevived(player)
+                                  ? REVIVE_PRESENTATION_ACTIVE_ALPHA
+                                  : REVIVE_PRESENTATION_BASE_ALPHA)
+                           : static_cast<f32>(normalAlpha);
+    const f32 speed = (REVIVE_PRESENTATION_ACTIVE_ALPHA - REVIVE_PRESENTATION_BASE_ALPHA) /
+                      REVIVE_PRESENTATION_FADE_SECONDS;
+    if (state.alpha < target)
+        state.alpha = std::min(target, state.alpha + speed * elapsed);
+    else if (state.alpha > target)
+        state.alpha = std::max(target, state.alpha - speed * elapsed);
+
+    const i32 maxAlpha = spirit ? 254 : 255;
+    return static_cast<u8>(std::clamp<i32>((i32)(state.alpha + 0.5f), 0, maxAlpha));
 }
 
 void UpdateSpiritState(Player *player)
@@ -585,43 +705,33 @@ u8 CalculatePlayerOverlapAlpha(const Player *player)
     if (!IsPlayerActiveForProximity(localPlayer))
         return 255;
 
-    const ZunVec3 localPresentation =
-        localPlayer->prevPositionCenter.Lerp(localPlayer->positionCenter, g_RenderAlpha);
-    ZunVec3 remotePresentation =
-        player->prevPositionCenter.Lerp(player->positionCenter, g_RenderAlpha);
-    if (player->initParam < TH07_MULTI_MAX_PLAYERS &&
-        g_RemotePresentation[player->initParam].valid)
-    {
-        remotePresentation = g_RemotePresentation[player->initParam].position;
-    }
-
-    const f32 dx = remotePresentation.x - localPresentation.x;
-    const f32 dy = remotePresentation.y - localPresentation.y;
+    const f32 dx = player->positionCenter.x - localPlayer->positionCenter.x;
+    const f32 dy = player->positionCenter.y - localPlayer->positionCenter.y;
     f32 distance = sqrtf(dx * dx + dy * dy);
     if (distance >= REMOTE_PLAYER_FADE_START_DISTANCE)
         return 255;
     if (distance < REMOTE_PLAYER_FADE_FULL_DISTANCE)
         distance = REMOTE_PLAYER_FADE_FULL_DISTANCE;
 
-    const f32 fadeSpan = REMOTE_PLAYER_FADE_START_DISTANCE -
-                         REMOTE_PLAYER_FADE_FULL_DISTANCE;
-    f32 fadeProgress =
-        (distance - REMOTE_PLAYER_FADE_FULL_DISTANCE) / fadeSpan;
-    // Smoothstep avoids a visible alpha derivative discontinuity at either
-    // edge without introducing any persistent state into rollback snapshots.
-    fadeProgress = fadeProgress * fadeProgress * (3.0f - 2.0f * fadeProgress);
+    const f32 fadeProgress =
+        (distance - REMOTE_PLAYER_FADE_FULL_DISTANCE) /
+        (REMOTE_PLAYER_FADE_START_DISTANCE - REMOTE_PLAYER_FADE_FULL_DISTANCE);
     return (u8)std::clamp<i32>(
         (i32)(fadeProgress * (255 - REMOTE_PLAYER_FADE_MIN_ALPHA)) +
             REMOTE_PLAYER_FADE_MIN_ALPHA,
         0, 255);
 }
 
-u32 ApplyPlayerProximityAlpha(u32 color, const Player *player)
+void ClampVmAlpha(AnmVm *vm, u8 alpha)
 {
-    const u8 alpha = (u8)(color >> 24);
-    const u8 proximityAlpha = CalculatePlayerOverlapAlpha(player);
-    return (color & 0x00ffffff) |
-           ((u32)(proximityAlpha < alpha ? proximityAlpha : alpha) << 24);
+    auto clamp = [alpha](ZunColor &color) {
+        if (alpha < color.bytes.a)
+            color.bytes.a = alpha;
+    };
+    clamp(vm->color);
+    clamp(vm->prevColor);
+    clamp(vm->color2);
+    clamp(vm->prevColor2);
 }
 
 void DrawPowerTransferPrompt(const Player *giver)
@@ -658,6 +768,7 @@ void DrawPowerTransferPrompt(const Player *giver)
 void DrawLifeTransferPrompt(const Player *giver)
 {
     if (!giver || GetPlayerLives(giver->initParam) <= 0 ||
+        giver->lifeGiveTargetToken == LIFE_GIVE_WAIT_RELEASE_TOKEN ||
         !SelectLifeTransferReceiver(giver) || !giver->isFocus ||
         IS_PRESSED_PLAYER(giver, TH_BUTTON_SHOOT) ||
         g_powerGiveTaps[giver->initParam] > 0)
@@ -984,6 +1095,49 @@ i32 GetActivePlayerCount()
     for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
         count += g_PlayerActive[playerId] ? 1 : 0;
     return count;
+}
+
+void UpdateTeamWipeRetryCountdown()
+{
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (!MultiplayerGameplay::IsMultiplayer() || g_teamWipeRetryFrames <= 0)
+        return;
+
+    // The grace window is gameplay time, not wall-clock time. Do not consume
+    // it while the synchronized pause/retry UI or TH07's ordinary time-stop is
+    // active; otherwise opening Pause after a team wipe could make Retry fire
+    // behind the menu.
+    if (g_GameManager.isPaused || g_GameManager.isInPauseMenu ||
+        g_GameManager.isInRetryMenu || g_GameManager.isTimeStopped)
+        return;
+
+    bool hasParticipant = false;
+    bool teamWiped = true;
+    for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+    {
+        if (!IsPlayerSlotActive(playerId))
+            continue;
+        hasParticipant = true;
+        const i8 state = g_Players[playerId].playerState;
+        if (state != PLAYER_STATE_SPIRIT && state != PLAYER_STATE_ELIMINATED)
+        {
+            teamWiped = false;
+            break;
+        }
+    }
+
+    if (!hasParticipant || !teamWiped)
+    {
+        g_teamWipeRetryFrames = 0;
+        return;
+    }
+
+    if (--g_teamWipeRetryFrames <= 0)
+    {
+        g_teamWipeRetryFrames = 0;
+        g_GameManager.isInRetryMenu = 1;
+    }
+#endif
 }
 
 bool IsAnyActivePlayerBombing()
@@ -1524,9 +1678,8 @@ i32 ShtData::OnMissileHit(Player *player, PlayerBullet *bullet, ZunVec3 *pos)
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
         if (MultiplayerGameplay::IsMultiplayer())
         {
-            missileAnmIdx -= player->initParam == 0
-                                 ? 0
-                                 : ANM_OFFSET_PLAYER2 - ANM_OFFSET_PLAYER;
+            missileAnmIdx -= GetPlayerAnmScript(player, ANM_OFFSET_PLAYER) -
+                             ANM_OFFSET_PLAYER;
         }
 #endif
         switch (missileAnmIdx)
@@ -2490,7 +2643,11 @@ i32 Player::HandlePlayerInputs()
 #ifdef TH_ENABLE_NETPLAY
              (Netplay::Input::ReplayJoystick(this->initParam, &joystickX, &joystickY) ||
 #endif
-              (CanSampleRawTouchForPlayer(this) &&
+              (
+#ifdef TH_ENABLE_NETPLAY
+               !Netplay::Input::PlayerButtonOverridesActive() &&
+#endif
+               CanSampleRawTouchForPlayer(this) &&
                Touch::GetFreeJoystickVector(&joystickX, &joystickY))
 #ifdef TH_ENABLE_NETPLAY
              )
@@ -3787,33 +3944,6 @@ u32 Player::OnUpdate(Player *arg)
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
     if (MultiplayerGameplay::IsMultiplayer())
     {
-        if (arg->initParam == 0 && g_teamWipeRetryFrames > 0)
-        {
-            bool teamWiped = false;
-            bool hasParticipant = false;
-            teamWiped = true;
-            for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
-            {
-                if (!IsPlayerSlotActive(playerId))
-                    continue;
-                hasParticipant = true;
-                const i8 state = g_Players[playerId].playerState;
-                if (state != PLAYER_STATE_SPIRIT && state != PLAYER_STATE_ELIMINATED)
-                {
-                    teamWiped = false;
-                    break;
-                }
-            }
-            if (!hasParticipant || !teamWiped)
-            {
-                g_teamWipeRetryFrames = 0;
-            }
-            else if (--g_teamWipeRetryFrames <= 0)
-            {
-                g_teamWipeRetryFrames = 0;
-                g_GameManager.isInRetryMenu = 1;
-            }
-        }
         if (arg->playerState == PLAYER_STATE_ELIMINATED)
         {
             arg->UpdateShots();
@@ -3919,7 +4049,10 @@ u32 Player::OnDrawHighPrio(Player *arg)
         arg->playerSprite.pos.y = g_GameManager.arcadeRegionTopLeftPos.y + drawPlayerPos.y;
         arg->playerSprite.pos.z = 0.0f;
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-        const u32 originalPlayerColor = arg->playerSprite.color.color;
+        const ZunColor originalPlayerColor = arg->playerSprite.color;
+        const ZunColor originalPlayerPrevColor = arg->playerSprite.prevColor;
+        const ZunColor originalPlayerColor2 = arg->playerSprite.color2;
+        const ZunColor originalPlayerPrevColor2 = arg->playerSprite.prevColor2;
         if (MultiplayerGameplay::IsMultiplayer())
         {
             if (arg->initParam != 0 &&
@@ -3928,8 +4061,17 @@ u32 Player::OnDrawHighPrio(Player *arg)
                 arg->playerSprite.color.color =
                     (arg->playerSprite.color.color & 0xff000000) | 0x0080ffff;
             }
-            arg->playerSprite.color.color =
-                ApplyPlayerProximityAlpha(arg->playerSprite.color.color, arg);
+            const u8 normalAlpha = GetPlayerOverlapAlpha(arg);
+            const u8 presentationAlpha = GetPlayerRescuePresentationAlpha(arg, normalAlpha);
+            if (arg->playerState == PLAYER_STATE_SPIRIT)
+            {
+                arg->playerSprite.color.bytes.a = presentationAlpha;
+                arg->playerSprite.prevColor.bytes.a = presentationAlpha;
+            }
+            else
+            {
+                ClampVmAlpha(&arg->playerSprite, presentationAlpha);
+            }
             if (MultiplayerGameplay::IsPlayerTemporarilyAbsent(arg->initParam))
             {
                 const u8 currentAlpha = (u8)(arg->playerSprite.color.color >> 24);
@@ -3940,9 +4082,13 @@ u32 Player::OnDrawHighPrio(Player *arg)
             }
         }
 #endif
+        DrawLocalPlayerLocator(arg, drawPlayerPos);
         g_AnmManager->DrawNoRotation(&arg->playerSprite);
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-        arg->playerSprite.color.color = originalPlayerColor;
+        arg->playerSprite.color = originalPlayerColor;
+        arg->playerSprite.prevColor = originalPlayerPrevColor;
+        arg->playerSprite.color2 = originalPlayerColor2;
+        arg->playerSprite.prevColor2 = originalPlayerPrevColor2;
 #endif
         if (arg->optionState != OPTION_HIDDEN &&
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
@@ -3963,21 +4109,32 @@ u32 Player::OnDrawHighPrio(Player *arg)
                 g_GameManager.arcadeRegionTopLeftPos.y + drawOptionsPos[1].y;
             arg->optionsSprite[1].pos.z = 0.0f;
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-            const u32 originalOptionColor0 = arg->optionsSprite[0].color.color;
-            const u32 originalOptionColor1 = arg->optionsSprite[1].color.color;
+            const ZunColor originalOptionColor0 = arg->optionsSprite[0].color;
+            const ZunColor originalOptionPrevColor0 = arg->optionsSprite[0].prevColor;
+            const ZunColor originalOptionColor20 = arg->optionsSprite[0].color2;
+            const ZunColor originalOptionPrevColor20 = arg->optionsSprite[0].prevColor2;
+            const ZunColor originalOptionColor1 = arg->optionsSprite[1].color;
+            const ZunColor originalOptionPrevColor1 = arg->optionsSprite[1].prevColor;
+            const ZunColor originalOptionColor21 = arg->optionsSprite[1].color2;
+            const ZunColor originalOptionPrevColor21 = arg->optionsSprite[1].prevColor2;
             if (MultiplayerGameplay::IsMultiplayer())
             {
-                arg->optionsSprite[0].color.color =
-                    ApplyPlayerProximityAlpha(arg->optionsSprite[0].color.color, arg);
-                arg->optionsSprite[1].color.color =
-                    ApplyPlayerProximityAlpha(arg->optionsSprite[1].color.color, arg);
+                const u8 proximityAlpha = GetPlayerOverlapAlpha(arg);
+                ClampVmAlpha(&arg->optionsSprite[0], proximityAlpha);
+                ClampVmAlpha(&arg->optionsSprite[1], proximityAlpha);
             }
 #endif
             g_AnmManager->Draw(&arg->optionsSprite[0]);
             g_AnmManager->Draw(&arg->optionsSprite[1]);
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-            arg->optionsSprite[0].color.color = originalOptionColor0;
-            arg->optionsSprite[1].color.color = originalOptionColor1;
+            arg->optionsSprite[0].color = originalOptionColor0;
+            arg->optionsSprite[0].prevColor = originalOptionPrevColor0;
+            arg->optionsSprite[0].color2 = originalOptionColor20;
+            arg->optionsSprite[0].prevColor2 = originalOptionPrevColor20;
+            arg->optionsSprite[1].color = originalOptionColor1;
+            arg->optionsSprite[1].prevColor = originalOptionPrevColor1;
+            arg->optionsSprite[1].color2 = originalOptionColor21;
+            arg->optionsSprite[1].prevColor2 = originalOptionPrevColor21;
 #endif
         }
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
@@ -4172,11 +4329,6 @@ ZunResult Player::AddedCallback(Player *arg)
     arg->horizontalMovementSpeedMultiplierDuringBomb = 1.0f;
     arg->respawnTimer = arg->shooterData->initialRespawnTimer;
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-    if (MultiplayerGameplay::IsMultiplayer() && arg->initParam == 2 &&
-        MultiplayerGameplay::GetPlayerCount() >= 3)
-    {
-        ApplyActivePlayerCountParameters(2, 3);
-    }
     if (arg->initParam == 0)
 #endif
     {
@@ -4271,9 +4423,22 @@ static ZunResult RegisterOnePlayer(Player *mgr, u8 playerId)
 ZunResult Player::RegisterChain(u32 param_1)
 {
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-    if (MultiplayerGameplay::IsMultiplayer() && !g_GameManager.replay)
+    // Multiplayer Replay is still a multiplayer gameplay session. The Replay
+    // menu has already restored playerCount/loadouts from the EAGX metadata,
+    // and ReplayManager feeds every recorded FrameInput lane during playback.
+    // Do not collapse that session back to the vanilla single g_Player just
+    // because g_GameManager.replay is set.
+    if (MultiplayerGameplay::IsMultiplayer())
     {
         const bool preserveResources = g_Supervisor.curState == 3;
+        // A partial 8-tap Power-transfer gesture is stage-local interaction,
+        // not run state.  Never carry a few taps/windows through a stage load
+        // where direct later-stage Replay would necessarily start from zero.
+        for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+        {
+            g_powerGiveTaps[playerId] = 0;
+            g_powerGiveWindow[playerId] = 0;
+        }
         if (!preserveResources)
         {
             ResetPlayerContributionStats();

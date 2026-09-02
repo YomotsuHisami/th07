@@ -22,6 +22,8 @@ public:
     BrowserPeerTransport &operator=(const BrowserPeerTransport &) = delete;
 
     bool Connect(const char *relayUrl, std::uint8_t localPlayer, std::uint8_t playerCount);
+    bool ConnectSpectator(const char *relayUrl, const char *spectatorId,
+                          std::uint8_t playerCount);
     void Close();
     bool IsOpen() const;
     bool Failed() const;
@@ -33,6 +35,10 @@ public:
     bool SendTo(std::uint8_t peer, const std::uint8_t *data, std::size_t size);
     // Session/control traffic: reliable and ordered on RTC.
     bool SendControl(const std::uint8_t *data, std::size_t size);
+    // Best-effort, relay-only confirmed input stream. Failure is deliberately
+    // isolated from gameplay transport health.
+    bool SendSpectator(const std::uint8_t *data, std::size_t size);
+    bool HasSpectators() const;
     bool Poll(std::vector<std::uint8_t> *packet);
     std::size_t BufferedAmount() const;
     const std::string &LastError() const;

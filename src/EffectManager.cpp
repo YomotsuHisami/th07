@@ -742,7 +742,10 @@ u32 EffectManager::OnDraw(EffectManager *arg)
         {
             active[i]->vm.pos = active[i]->prevPos.Lerp(active[i]->pos1, g_RenderAlpha);
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-            const u32 originalColor = active[i]->vm.color.color;
+            const ZunColor originalColor = active[i]->vm.color;
+            const ZunColor originalPrevColor = active[i]->vm.prevColor;
+            const ZunColor originalColor2 = active[i]->vm.color2;
+            const ZunColor originalPrevColor2 = active[i]->vm.prevColor2;
             if (MultiplayerGameplay::IsMultiplayer())
             {
                 for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
@@ -754,10 +757,14 @@ u32 EffectManager::OnDraw(EffectManager *arg)
                     {
                         active[i]->vm.pos += GetPlayerPresentationOffset(playerId);
                         const u8 alpha = GetPlayerOverlapAlpha(&g_Players[playerId]);
-                        if (alpha < (u8)(active[i]->vm.color.color >> 24))
-                            active[i]->vm.color.color =
-                                (active[i]->vm.color.color & 0x00ffffff) |
-                                ((u32)alpha << 24);
+                        auto clampAlpha = [alpha](ZunColor &color) {
+                            if (alpha < color.bytes.a)
+                                color.bytes.a = alpha;
+                        };
+                        clampAlpha(active[i]->vm.color);
+                        clampAlpha(active[i]->vm.prevColor);
+                        clampAlpha(active[i]->vm.color2);
+                        clampAlpha(active[i]->vm.prevColor2);
                         break;
                     }
                 }
@@ -774,7 +781,10 @@ u32 EffectManager::OnDraw(EffectManager *arg)
                 g_AnmManager->Draw(&active[i]->vm);
             }
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-            active[i]->vm.color.color = originalColor;
+            active[i]->vm.color = originalColor;
+            active[i]->vm.prevColor = originalPrevColor;
+            active[i]->vm.color2 = originalColor2;
+            active[i]->vm.prevColor2 = originalPrevColor2;
 #endif
         }
     };

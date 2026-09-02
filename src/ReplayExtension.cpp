@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include <SDL3/SDL_iostream.h>
@@ -49,11 +50,32 @@ std::vector<InputSample> g_RecordInputs[7];
 std::vector<DirectTouchSample> g_RecordDirectTouch[7];
 std::vector<TouchEvent> g_RecordTouchEvents[7];
 std::vector<MultiplayerInputSample> g_RecordMultiplayerInputs[7];
+MultiplayerPlayerResourceSnapshot g_RecordMultiplayerStageResources[7][3]{};
+u8 g_RecordMultiplayerStageResourceMask[7]{};
+MultiplayerContributionSnapshot g_RecordMultiplayerStageContributions[7][3]{};
+u8 g_RecordMultiplayerStageContributionMask[7]{};
 std::vector<TouchEvent> g_PendingTouchEvents;
 std::vector<InputSample> g_PlaybackInputs[7];
 std::vector<DirectTouchSample> g_PlaybackDirectTouch[7];
 std::vector<TouchEvent> g_PlaybackTouchEvents[7];
 std::vector<MultiplayerInputSample> g_PlaybackMultiplayerInputs[7];
+#ifdef TH_DEV_TOOLS
+struct ExpectedMultiplayerFrame
+{
+    bool valid = false;
+    u8 playerCount = 0;
+    Netplay::FrameInput players[3]{};
+};
+std::vector<ExpectedMultiplayerFrame> g_ExpectedMultiplayerPlayback[7];
+u32 g_ExpectedMultiplayerPlaybackFrames = 0;
+u32 g_ComparedMultiplayerPlaybackFrames = 0;
+bool g_MultiplayerPlaybackMismatch = false;
+u32 g_ExpectedMultiplayerPlaybackCoverage = 0;
+#endif
+MultiplayerPlayerResourceSnapshot g_PlaybackMultiplayerStageResources[7][3]{};
+u8 g_PlaybackMultiplayerStageResourceMask[7]{};
+MultiplayerContributionSnapshot g_PlaybackMultiplayerStageContributions[7][3]{};
+u8 g_PlaybackMultiplayerStageContributionMask[7]{};
 InputSample g_CapturedJoystick = {};
 DirectTouchSample g_CapturedDirectTouch = {};
 bool g_RecordUsesExtension = false;
@@ -75,6 +97,8 @@ constexpr u32 FLAG_TOUCH_EVENTS = 2;
 constexpr u32 FLAG_DIRECT_TOUCH_INPUT = 4;
 constexpr u32 FLAG_TOUCH_STATE = 8;
 constexpr u32 FLAG_MULTIPLAYER_INPUT = 32;
+constexpr u32 FLAG_MULTIPLAYER_STAGE_RESOURCES = 64;
+constexpr u32 FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS = 128;
 constexpr u32 DIRECT_TOUCH_ACTIVE = 1;
 constexpr u32 DIRECT_TOUCH_UNLIMITED = 2;
 constexpr u32 TOUCH_STATE_USED_THIS_RUN = 4;
@@ -88,7 +112,20 @@ constexpr std::size_t MP_PLAYER_COUNT_OFFSET = 96;
 constexpr std::size_t MP_DIFFICULTY_OFFSET = 100;
 constexpr std::size_t MP_GAMEPLAY_ABI_OFFSET = 104;
 constexpr std::size_t MP_LOADOUT_OFFSET = 108;
+constexpr std::size_t MP_LOCAL_PLAYER_OFFSET = 120;
+constexpr std::size_t MP_SESSION_FLAGS_OFFSET = 124;
 constexpr std::size_t MP_COUNTS_OFFSET = 128;
+constexpr u32 MP_SESSION_STAGE4_BOSS_CHAIN = 1u;
+constexpr u32 MP_SESSION_HIDE_CONTRIBUTION_STATS = 2u;
+constexpr u32 MP_SESSION_HIDE_STAGE_PLAYER_NAMES = 4u;
+constexpr u32 MP_SESSION_FLAGS_MASK = MP_SESSION_STAGE4_BOSS_CHAIN |
+                                      MP_SESSION_HIDE_CONTRIBUTION_STATS |
+                                      MP_SESSION_HIDE_STAGE_PLAYER_NAMES;
+constexpr std::size_t MP_STAGE_RESOURCE_BYTES_PER_STAGE = 4 + 3 * 3 * 4;
+constexpr std::size_t MP_STAGE_RESOURCE_BYTES = 7 * MP_STAGE_RESOURCE_BYTES_PER_STAGE;
+constexpr std::size_t MP_STAGE_CONTRIBUTION_BYTES_PER_STAGE = 4 + 3 * 2 * 4;
+constexpr std::size_t MP_STAGE_CONTRIBUTION_BYTES =
+    7 * MP_STAGE_CONTRIBUTION_BYTES_PER_STAGE;
 
 u8 PackInputFlags(const Netplay::FrameInput &input)
 {
@@ -149,17 +186,28 @@ bool FindTrailer(const u8 *bytes, std::size_t size, std::size_t &payloadOffset, 
     if (version != VERSION)
         return false;
     const bool hasMultiplayer = (flags & FLAG_MULTIPLAYER_INPUT) != 0;
+    const bool hasMultiplayerStageResources =
+        (flags & FLAG_MULTIPLAYER_STAGE_RESOURCES) != 0;
+    const bool hasMultiplayerStageContributions =
+        (flags & FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS) != 0;
+    if ((hasMultiplayerStageResources || hasMultiplayerStageContributions) && !hasMultiplayer)
+        return false;
     const std::size_t headerSize = hasMultiplayer ? MP_HEADER_SIZE : HEADER_SIZE;
     if (payloadSize < headerSize || ReadLe32(bytes + payloadOffset + 92) != DETERMINISM_ABI)
         return false;
     if ((flags & (FLAG_JOYSTICK_INPUT | FLAG_TOUCH_EVENTS | FLAG_DIRECT_TOUCH_INPUT |
-                  FLAG_TOUCH_STATE | FLAG_MULTIPLAYER_INPUT)) == 0)
+                  FLAG_TOUCH_STATE | FLAG_MULTIPLAYER_INPUT |
+                  FLAG_MULTIPLAYER_STAGE_RESOURCES |
+                  FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS)) == 0)
         return false;
     if (hasMultiplayer)
     {
         const u32 playerCount = ReadLe32(bytes + payloadOffset + MP_PLAYER_COUNT_OFFSET);
         const u32 difficulty = ReadLe32(bytes + payloadOffset + MP_DIFFICULTY_OFFSET);
-        if (playerCount < 2 || playerCount > 3 || difficulty > 5)
+        const u32 localPlayer = ReadLe32(bytes + payloadOffset + MP_LOCAL_PLAYER_OFFSET);
+        const u32 sessionFlags = ReadLe32(bytes + payloadOffset + MP_SESSION_FLAGS_OFFSET);
+        if (playerCount < 2 || playerCount > 3 || difficulty > 5 ||
+            localPlayer >= playerCount || (sessionFlags & ~MP_SESSION_FLAGS_MASK) != 0)
             return false;
         for (u32 player = 0; player < playerCount; ++player)
         {
@@ -200,6 +248,49 @@ bool FindTrailer(const u8 *bytes, std::size_t size, std::size_t &payloadOffset, 
                 return false;
             expected += static_cast<std::size_t>(count) * sizeof(MultiplayerInputSample);
         }
+    }
+    if (hasMultiplayerStageResources)
+    {
+        if (expected > payloadSize || MP_STAGE_RESOURCE_BYTES > payloadSize - expected)
+            return false;
+        const u32 playerCount = ReadLe32(bytes + payloadOffset + MP_PLAYER_COUNT_OFFSET);
+        const u32 allowedMask = (1u << playerCount) - 1u;
+        const u8 *resourceBytes = bytes + payloadOffset + expected;
+        for (i32 stage = 0; stage < 7; ++stage)
+        {
+            const u32 mask = ReadLe32(resourceBytes);
+            resourceBytes += 4;
+            if ((mask & ~allowedMask) != 0)
+                return false;
+            for (u32 player = 0; player < 3; ++player)
+            {
+                for (u32 field = 0; field < 3; ++field)
+                {
+                    if (ReadLe32(resourceBytes) >
+                        static_cast<u32>(std::numeric_limits<i32>::max()))
+                        return false;
+                    resourceBytes += 4;
+                }
+            }
+        }
+        expected += MP_STAGE_RESOURCE_BYTES;
+    }
+    if (hasMultiplayerStageContributions)
+    {
+        if (expected > payloadSize || MP_STAGE_CONTRIBUTION_BYTES > payloadSize - expected)
+            return false;
+        const u32 playerCount = ReadLe32(bytes + payloadOffset + MP_PLAYER_COUNT_OFFSET);
+        const u32 allowedMask = (1u << playerCount) - 1u;
+        const u8 *contributionBytes = bytes + payloadOffset + expected;
+        for (i32 stage = 0; stage < 7; ++stage)
+        {
+            const u32 mask = ReadLe32(contributionBytes);
+            contributionBytes += 4;
+            if ((mask & ~allowedMask) != 0)
+                return false;
+            contributionBytes += 3 * 2 * 4;
+        }
+        expected += MP_STAGE_CONTRIBUTION_BYTES;
     }
     if (expected != payloadSize)
         return false;
@@ -316,6 +407,10 @@ bool AppendInputEvents(const char *path, const std::vector<InputSample> (&inputs
                        const std::vector<TouchEvent> (&touchEvents)[7],
                        const std::vector<DirectTouchSample> (&directTouch)[7],
                        const std::vector<MultiplayerInputSample> (&multiplayerInputs)[7],
+                       const MultiplayerPlayerResourceSnapshot (&stageResources)[7][3],
+                       const u8 (&stageResourceMask)[7],
+                       const MultiplayerContributionSnapshot (&stageContributions)[7][3],
+                       const u8 (&stageContributionMask)[7],
                        const MultiplayerReplayConfig &multiplayerConfig)
 {
     std::vector<u8> bytes;
@@ -355,6 +450,22 @@ bool AppendInputEvents(const char *path, const std::vector<InputSample> (&inputs
         flags |= FLAG_MULTIPLAYER_INPUT;
         for (const auto &stage : multiplayerInputs)
             bodySize += stage.size() * sizeof(MultiplayerInputSample);
+        bool hasStageResources = false;
+        for (u8 mask : stageResourceMask)
+            hasStageResources = hasStageResources || mask != 0;
+        if (hasStageResources)
+        {
+            flags |= FLAG_MULTIPLAYER_STAGE_RESOURCES;
+            bodySize += MP_STAGE_RESOURCE_BYTES;
+        }
+        bool hasStageContributions = false;
+        for (u8 mask : stageContributionMask)
+            hasStageContributions = hasStageContributions || mask != 0;
+        if (hasStageContributions)
+        {
+            flags |= FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS;
+            bodySize += MP_STAGE_CONTRIBUTION_BYTES;
+        }
     }
     if (flags == 0)
         return true;
@@ -375,6 +486,16 @@ bool AppendInputEvents(const char *path, const std::vector<InputSample> (&inputs
                   multiplayerConfig.difficulty);
         WriteLe32(bytes.data() + payloadOffset + MP_GAMEPLAY_ABI_OFFSET,
                   multiplayerConfig.gameplayAbi);
+        WriteLe32(bytes.data() + payloadOffset + MP_LOCAL_PLAYER_OFFSET,
+                  multiplayerConfig.localPlayer);
+        u32 sessionFlags = multiplayerConfig.stage4BossChain
+                               ? MP_SESSION_STAGE4_BOSS_CHAIN
+                               : 0u;
+        if (!multiplayerConfig.showContributionStats)
+            sessionFlags |= MP_SESSION_HIDE_CONTRIBUTION_STATS;
+        if (!multiplayerConfig.showStagePlayerNames)
+            sessionFlags |= MP_SESSION_HIDE_STAGE_PLAYER_NAMES;
+        WriteLe32(bytes.data() + payloadOffset + MP_SESSION_FLAGS_OFFSET, sessionFlags);
         for (u32 player = 0; player < 3; ++player)
         {
             const u32 loadout = static_cast<u32>(multiplayerConfig.characters[player]) |
@@ -432,6 +553,44 @@ bool AppendInputEvents(const char *path, const std::vector<InputSample> (&inputs
             }
         }
     }
+    if ((flags & FLAG_MULTIPLAYER_STAGE_RESOURCES) != 0)
+    {
+        for (i32 stage = 0; stage < 7; ++stage)
+        {
+            WriteLe32(bytes.data() + cursor, stageResourceMask[stage]);
+            cursor += 4;
+            for (u32 player = 0; player < 3; ++player)
+            {
+                const MultiplayerPlayerResourceSnapshot &resources =
+                    stageResources[stage][player];
+                WriteLe32(bytes.data() + cursor, static_cast<u32>(resources.lives));
+                cursor += 4;
+                WriteLe32(bytes.data() + cursor, static_cast<u32>(resources.bombs));
+                cursor += 4;
+                WriteLe32(bytes.data() + cursor, static_cast<u32>(resources.power));
+                cursor += 4;
+            }
+        }
+    }
+    if ((flags & FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS) != 0)
+    {
+        for (i32 stage = 0; stage < 7; ++stage)
+        {
+            WriteLe32(bytes.data() + cursor, stageContributionMask[stage]);
+            cursor += 4;
+            for (u32 player = 0; player < 3; ++player)
+            {
+                const MultiplayerContributionSnapshot &contributions =
+                    stageContributions[stage][player];
+                WriteLe32(bytes.data() + cursor, contributions.enemiesDefeated);
+                cursor += 4;
+                WriteLe32(bytes.data() + cursor, contributions.damageDealt);
+                cursor += 4;
+            }
+        }
+    }
+    if (cursor != payloadOffset + payloadSize)
+        return false;
     WriteLe32(bytes.data() + payloadOffset + payloadSize, static_cast<u32>(payloadSize));
     std::memcpy(bytes.data() + payloadOffset + payloadSize + 4, "EAGX", 4);
 
@@ -450,6 +609,14 @@ void ResetRecording()
         stage.clear();
     for (auto &stage : g_RecordMultiplayerInputs)
         stage.clear();
+    std::memset(g_RecordMultiplayerStageResources, 0,
+                sizeof(g_RecordMultiplayerStageResources));
+    std::memset(g_RecordMultiplayerStageResourceMask, 0,
+                sizeof(g_RecordMultiplayerStageResourceMask));
+    std::memset(g_RecordMultiplayerStageContributions, 0,
+                sizeof(g_RecordMultiplayerStageContributions));
+    std::memset(g_RecordMultiplayerStageContributionMask, 0,
+                sizeof(g_RecordMultiplayerStageContributionMask));
     g_PendingTouchEvents.clear();
     g_CapturedJoystick = {};
     g_CapturedDirectTouch = {};
@@ -466,6 +633,12 @@ void BeginStageRecording(i32 stage)
     g_RecordDirectTouch[stage].clear();
     g_RecordTouchEvents[stage].clear();
     g_RecordMultiplayerInputs[stage].clear();
+    std::memset(g_RecordMultiplayerStageResources[stage], 0,
+                sizeof(g_RecordMultiplayerStageResources[stage]));
+    g_RecordMultiplayerStageResourceMask[stage] = 0;
+    std::memset(g_RecordMultiplayerStageContributions[stage], 0,
+                sizeof(g_RecordMultiplayerStageContributions[stage]));
+    g_RecordMultiplayerStageContributionMask[stage] = 0;
     g_PendingTouchEvents.clear();
     g_CapturedJoystick = {};
     g_CapturedDirectTouch = {};
@@ -478,6 +651,43 @@ void BeginMultiplayerRecording(const MultiplayerReplayConfig &config)
         return;
     g_RecordMultiplayerConfig = config;
     g_RecordHasMultiplayer = true;
+    g_RecordUsesExtension = true;
+}
+
+void CaptureMultiplayerStageContributions(
+    i32 stage,
+    const MultiplayerContributionSnapshot *contributions,
+    std::size_t count)
+{
+    if (!g_RecordHasMultiplayer || !contributions ||
+        count < g_RecordMultiplayerConfig.playerCount)
+        return;
+    stage = std::clamp(stage, 0, 6);
+    u8 mask = 0;
+    for (u8 playerId = 0; playerId < g_RecordMultiplayerConfig.playerCount; ++playerId)
+    {
+        g_RecordMultiplayerStageContributions[stage][playerId] = contributions[playerId];
+        mask |= static_cast<u8>(1u << playerId);
+    }
+    g_RecordMultiplayerStageContributionMask[stage] = mask;
+    g_RecordUsesExtension = true;
+}
+
+void CaptureMultiplayerStageResources(i32 stage,
+                                      const MultiplayerPlayerResourceSnapshot *resources,
+                                      std::size_t count)
+{
+    if (!g_RecordHasMultiplayer || !resources ||
+        count < g_RecordMultiplayerConfig.playerCount)
+        return;
+    stage = std::clamp(stage, 0, 6);
+    u8 mask = 0;
+    for (u8 playerId = 0; playerId < g_RecordMultiplayerConfig.playerCount; ++playerId)
+    {
+        g_RecordMultiplayerStageResources[stage][playerId] = resources[playerId];
+        mask |= static_cast<u8>(1u << playerId);
+    }
+    g_RecordMultiplayerStageResourceMask[stage] = mask;
     g_RecordUsesExtension = true;
 }
 
@@ -588,7 +798,12 @@ bool AppendRecording(const char *path)
     if (!g_RecordUsesExtension)
         return true;
     return AppendInputEvents(path, g_RecordInputs, g_RecordTouchEvents, g_RecordDirectTouch,
-                             g_RecordMultiplayerInputs, g_RecordMultiplayerConfig);
+                             g_RecordMultiplayerInputs,
+                             g_RecordMultiplayerStageResources,
+                             g_RecordMultiplayerStageResourceMask,
+                             g_RecordMultiplayerStageContributions,
+                             g_RecordMultiplayerStageContributionMask,
+                             g_RecordMultiplayerConfig);
 }
 
 bool AppendPlayback(const char *path)
@@ -598,7 +813,12 @@ bool AppendPlayback(const char *path)
     if (g_PlaybackVersion != VERSION)
         return false;
     return AppendInputEvents(path, g_PlaybackInputs, g_PlaybackTouchEvents, g_PlaybackDirectTouch,
-                             g_PlaybackMultiplayerInputs, g_PlaybackMultiplayerConfig);
+                             g_PlaybackMultiplayerInputs,
+                             g_PlaybackMultiplayerStageResources,
+                             g_PlaybackMultiplayerStageResourceMask,
+                             g_PlaybackMultiplayerStageContributions,
+                             g_PlaybackMultiplayerStageContributionMask,
+                             g_PlaybackMultiplayerConfig);
 }
 
 void ClearPlayback()
@@ -611,6 +831,14 @@ void ClearPlayback()
         stage.clear();
     for (auto &stage : g_PlaybackMultiplayerInputs)
         stage.clear();
+    std::memset(g_PlaybackMultiplayerStageResources, 0,
+                sizeof(g_PlaybackMultiplayerStageResources));
+    std::memset(g_PlaybackMultiplayerStageResourceMask, 0,
+                sizeof(g_PlaybackMultiplayerStageResourceMask));
+    std::memset(g_PlaybackMultiplayerStageContributions, 0,
+                sizeof(g_PlaybackMultiplayerStageContributions));
+    std::memset(g_PlaybackMultiplayerStageContributionMask, 0,
+                sizeof(g_PlaybackMultiplayerStageContributionMask));
     g_PlaybackVersion = 0;
     g_PlaybackFlags = 0;
     g_PlaybackMultiplayerConfig = {};
@@ -642,6 +870,16 @@ bool LoadPlayback(const u8 *bytes, std::size_t size)
             static_cast<u8>(ReadLe32(bytes + payloadOffset + MP_DIFFICULTY_OFFSET));
         g_PlaybackMultiplayerConfig.gameplayAbi =
             ReadLe32(bytes + payloadOffset + MP_GAMEPLAY_ABI_OFFSET);
+        g_PlaybackMultiplayerConfig.localPlayer =
+            static_cast<u8>(ReadLe32(bytes + payloadOffset + MP_LOCAL_PLAYER_OFFSET));
+        const u32 sessionFlags =
+            ReadLe32(bytes + payloadOffset + MP_SESSION_FLAGS_OFFSET);
+        g_PlaybackMultiplayerConfig.stage4BossChain =
+            (sessionFlags & MP_SESSION_STAGE4_BOSS_CHAIN) != 0;
+        g_PlaybackMultiplayerConfig.showContributionStats =
+            (sessionFlags & MP_SESSION_HIDE_CONTRIBUTION_STATS) == 0;
+        g_PlaybackMultiplayerConfig.showStagePlayerNames =
+            (sessionFlags & MP_SESSION_HIDE_STAGE_PLAYER_NAMES) == 0;
         for (u32 player = 0; player < 3; ++player)
         {
             const u32 loadout = ReadLe32(bytes + payloadOffset + MP_LOADOUT_OFFSET + player * 4);
@@ -699,6 +937,49 @@ bool LoadPlayback(const u8 *bytes, std::size_t size)
             }
         }
     }
+    if ((flags & FLAG_MULTIPLAYER_STAGE_RESOURCES) != 0)
+    {
+        for (i32 stage = 0; stage < 7; ++stage)
+        {
+            g_PlaybackMultiplayerStageResourceMask[stage] =
+                static_cast<u8>(ReadLe32(bytes + cursor));
+            cursor += 4;
+            for (u32 player = 0; player < 3; ++player)
+            {
+                MultiplayerPlayerResourceSnapshot &resources =
+                    g_PlaybackMultiplayerStageResources[stage][player];
+                resources.lives = static_cast<i32>(ReadLe32(bytes + cursor));
+                cursor += 4;
+                resources.bombs = static_cast<i32>(ReadLe32(bytes + cursor));
+                cursor += 4;
+                resources.power = static_cast<i32>(ReadLe32(bytes + cursor));
+                cursor += 4;
+            }
+        }
+    }
+    if ((flags & FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS) != 0)
+    {
+        for (i32 stage = 0; stage < 7; ++stage)
+        {
+            g_PlaybackMultiplayerStageContributionMask[stage] =
+                static_cast<u8>(ReadLe32(bytes + cursor));
+            cursor += 4;
+            for (u32 player = 0; player < 3; ++player)
+            {
+                MultiplayerContributionSnapshot &contributions =
+                    g_PlaybackMultiplayerStageContributions[stage][player];
+                contributions.enemiesDefeated = ReadLe32(bytes + cursor);
+                cursor += 4;
+                contributions.damageDealt = ReadLe32(bytes + cursor);
+                cursor += 4;
+            }
+        }
+    }
+    if (cursor != payloadOffset + payloadSize)
+    {
+        ClearPlayback();
+        return false;
+    }
     return true;
 }
 
@@ -737,6 +1018,34 @@ bool GetMultiplayerPlaybackConfig(MultiplayerReplayConfig *out)
     if (!out || !MultiplayerPlaybackActive())
         return false;
     *out = g_PlaybackMultiplayerConfig;
+    return true;
+}
+
+bool GetMultiplayerPlaybackStageResources(i32 stage, u8 playerId,
+                                          MultiplayerPlayerResourceSnapshot *out)
+{
+    if (!out || !MultiplayerPlaybackActive() ||
+        (g_PlaybackFlags & FLAG_MULTIPLAYER_STAGE_RESOURCES) == 0 ||
+        playerId >= g_PlaybackMultiplayerConfig.playerCount)
+        return false;
+    stage = std::clamp(stage, 0, 6);
+    if ((g_PlaybackMultiplayerStageResourceMask[stage] & (1u << playerId)) == 0)
+        return false;
+    *out = g_PlaybackMultiplayerStageResources[stage][playerId];
+    return true;
+}
+
+bool GetMultiplayerPlaybackStageContributions(
+    i32 stage, u8 playerId, MultiplayerContributionSnapshot *out)
+{
+    if (!out || !MultiplayerPlaybackActive() ||
+        (g_PlaybackFlags & FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS) == 0 ||
+        playerId >= g_PlaybackMultiplayerConfig.playerCount)
+        return false;
+    stage = std::clamp(stage, 0, 6);
+    if ((g_PlaybackMultiplayerStageContributionMask[stage] & (1u << playerId)) == 0)
+        return false;
+    *out = g_PlaybackMultiplayerStageContributions[stage][playerId];
     return true;
 }
 
@@ -840,6 +1149,84 @@ bool MatchesPath(const char *path, const u8 *bytes, std::size_t size)
 }
 
 #ifdef TH_DEV_TOOLS
+void DebugResetMultiplayerPlaybackAudit()
+{
+    for (auto &stage : g_ExpectedMultiplayerPlayback)
+        stage.clear();
+    g_ExpectedMultiplayerPlaybackFrames = 0;
+    g_ComparedMultiplayerPlaybackFrames = 0;
+    g_MultiplayerPlaybackMismatch = false;
+    g_ExpectedMultiplayerPlaybackCoverage = 0;
+}
+
+void DebugExpectMultiplayerPlaybackFrame(i32 stage, i32 frame,
+                                         const Netplay::FrameInput *inputs,
+                                         std::size_t count)
+{
+    if (!inputs || stage < 0 || stage >= 7 || frame < 0 || count < 2 || count > 3)
+        return;
+    auto &frames = g_ExpectedMultiplayerPlayback[stage];
+    if (frames.size() <= static_cast<std::size_t>(frame))
+        frames.resize(static_cast<std::size_t>(frame) + 1);
+    ExpectedMultiplayerFrame &expected = frames[frame];
+    if (!expected.valid)
+        ++g_ExpectedMultiplayerPlaybackFrames;
+    expected.valid = true;
+    expected.playerCount = static_cast<u8>(count);
+    for (std::size_t player = 0; player < count; ++player)
+    {
+        expected.players[player] = inputs[player];
+        if (inputs[player].analogMode == Netplay::AnalogMode::Joystick)
+            g_ExpectedMultiplayerPlaybackCoverage |= 1u;
+        if (inputs[player].analogMode == Netplay::AnalogMode::DirectTouch)
+            g_ExpectedMultiplayerPlaybackCoverage |= 2u;
+        if (inputs[player].unlimited)
+            g_ExpectedMultiplayerPlaybackCoverage |= 4u;
+        if (inputs[player].touchUsed)
+            g_ExpectedMultiplayerPlaybackCoverage |= 8u;
+        if (inputs[player].touchBomb)
+            g_ExpectedMultiplayerPlaybackCoverage |= 16u;
+    }
+}
+
+int DebugAuditMultiplayerPlaybackFrame(i32 stage, i32 frame,
+                                       const Netplay::FrameInput *inputs,
+                                       std::size_t count)
+{
+    if (!inputs || stage < 0 || stage >= 7 || frame < 0)
+        return -1;
+    const auto &frames = g_ExpectedMultiplayerPlayback[stage];
+    if (static_cast<std::size_t>(frame) >= frames.size() || !frames[frame].valid)
+        return -1;
+    const ExpectedMultiplayerFrame &expected = frames[frame];
+    bool match = count >= expected.playerCount;
+    for (u8 player = 0; match && player < expected.playerCount; ++player)
+        match = inputs[player] == expected.players[player];
+    ++g_ComparedMultiplayerPlaybackFrames;
+    g_MultiplayerPlaybackMismatch = g_MultiplayerPlaybackMismatch || !match;
+    return match ? 1 : 0;
+}
+
+u32 DebugExpectedMultiplayerPlaybackFrames()
+{
+    return g_ExpectedMultiplayerPlaybackFrames;
+}
+
+u32 DebugComparedMultiplayerPlaybackFrames()
+{
+    return g_ComparedMultiplayerPlaybackFrames;
+}
+
+bool DebugMultiplayerPlaybackMismatch()
+{
+    return g_MultiplayerPlaybackMismatch;
+}
+
+u32 DebugExpectedMultiplayerPlaybackCoverage()
+{
+    return g_ExpectedMultiplayerPlaybackCoverage;
+}
+
 bool DebugRoundTrip(const char *path)
 {
     if (!path || !*path)
@@ -931,6 +1318,10 @@ bool DebugRoundTrip(const char *path)
     MultiplayerReplayConfig mpConfig;
     mpConfig.playerCount = 3;
     mpConfig.difficulty = 3;
+    mpConfig.localPlayer = 2;
+    mpConfig.stage4BossChain = true;
+    mpConfig.showContributionStats = false;
+    mpConfig.showStagePlayerNames = false;
     mpConfig.gameplayAbi = 2;
     mpConfig.characters[0] = 0;
     mpConfig.shots[0] = 1;
@@ -940,6 +1331,18 @@ bool DebugRoundTrip(const char *path)
     mpConfig.shots[2] = 1;
     BeginMultiplayerRecording(mpConfig);
     BeginStageRecording(0);
+    const MultiplayerPlayerResourceSnapshot stage0Resources[3] = {
+        {2, 3, 64}, {0, 2, 96}, {1, 1, 128}};
+    const MultiplayerPlayerResourceSnapshot stage3Resources[3] = {
+        {4, 1, 128}, {2, 0, 32}, {3, 2, 80}};
+    CaptureMultiplayerStageResources(0, stage0Resources, 3);
+    CaptureMultiplayerStageResources(3, stage3Resources, 3);
+    const MultiplayerContributionSnapshot stage0Contributions[3] = {
+        {11, 1200}, {7, 900}, {5, 700}};
+    const MultiplayerContributionSnapshot stage3Contributions[3] = {
+        {41, 8200}, {29, 6100}, {33, 7300}};
+    CaptureMultiplayerStageContributions(0, stage0Contributions, 3);
+    CaptureMultiplayerStageContributions(3, stage3Contributions, 3);
     Netplay::FrameInput mpInputs[3]{};
     mpInputs[0].buttons = 0x11;
     mpInputs[1].buttons = 0x22;
@@ -954,6 +1357,14 @@ bool DebugRoundTrip(const char *path)
     mpInputs[2].touchUsed = true;
     mpInputs[2].touchBomb = true;
     RecordMultiplayerFrame(0, 0, mpInputs, 3);
+    // A live rollback first records a predicted remote lane, then revisits the
+    // same logical Replay frame with authoritative input.  The EAGX vector is
+    // intentionally random-access by frame: the second write must replace the
+    // prediction instead of appending a duplicate frame.
+    mpInputs[1].buttons = 0x2a;
+    mpInputs[1].x = -0.5f;
+    mpInputs[1].y = 0.625f;
+    RecordMultiplayerFrame(0, 0, mpInputs, 3);
     const std::string multiplayerPath = ResolveSavePath(path);
     const bool multiplayerWritten =
         WriteWholeFile(multiplayerPath.c_str(), base) && AppendRecording(multiplayerPath.c_str());
@@ -963,12 +1374,39 @@ bool DebugRoundTrip(const char *path)
         LoadPlayback(multiplayerBytes.data(), multiplayerBytes.size());
     MultiplayerReplayConfig loadedConfig;
     Netplay::FrameInput loadedInputs[3]{};
+    MultiplayerPlayerResourceSnapshot loadedStage0Player1{};
+    MultiplayerPlayerResourceSnapshot loadedStage3Player2{};
+    MultiplayerPlayerResourceSnapshot missingStageResources{};
+    MultiplayerContributionSnapshot loadedStage0Contribution1{};
+    MultiplayerContributionSnapshot loadedStage3Contribution2{};
+    MultiplayerContributionSnapshot missingStageContributions{};
+    const bool multiplayerResourcesRead = multiplayerRead &&
+        GetMultiplayerPlaybackStageResources(0, 1, &loadedStage0Player1) &&
+        GetMultiplayerPlaybackStageResources(3, 2, &loadedStage3Player2) &&
+        !GetMultiplayerPlaybackStageResources(2, 1, &missingStageResources);
+    const bool multiplayerContributionsRead = multiplayerRead &&
+        GetMultiplayerPlaybackStageContributions(0, 1, &loadedStage0Contribution1) &&
+        GetMultiplayerPlaybackStageContributions(3, 2, &loadedStage3Contribution2) &&
+        !GetMultiplayerPlaybackStageContributions(2, 1, &missingStageContributions);
     const bool multiplayerRoundTrip = multiplayerRead &&
         GetMultiplayerPlaybackConfig(&loadedConfig) && loadedConfig.playerCount == 3 &&
-        loadedConfig.difficulty == 3 && loadedConfig.gameplayAbi == 2 &&
+        loadedConfig.difficulty == 3 && loadedConfig.localPlayer == 2 &&
+        loadedConfig.stage4BossChain && !loadedConfig.showContributionStats &&
+        !loadedConfig.showStagePlayerNames &&
+        loadedConfig.gameplayAbi == 2 &&
         loadedConfig.characters[0] == 0 && loadedConfig.shots[0] == 1 &&
         loadedConfig.characters[1] == 1 && loadedConfig.shots[1] == 0 &&
         loadedConfig.characters[2] == 2 && loadedConfig.shots[2] == 1 &&
+        multiplayerResourcesRead &&
+        loadedStage0Player1.lives == 0 && loadedStage0Player1.bombs == 2 &&
+        loadedStage0Player1.power == 96 &&
+        loadedStage3Player2.lives == 3 && loadedStage3Player2.bombs == 2 &&
+        loadedStage3Player2.power == 80 &&
+        multiplayerContributionsRead &&
+        loadedStage0Contribution1.enemiesDefeated == 7 &&
+        loadedStage0Contribution1.damageDealt == 900 &&
+        loadedStage3Contribution2.enemiesDefeated == 33 &&
+        loadedStage3Contribution2.damageDealt == 7300 &&
         GetMultiplayerPlaybackFrame(0, 0, loadedInputs, 3) &&
         loadedInputs[0].buttons == mpInputs[0].buttons &&
         loadedInputs[1].buttons == mpInputs[1].buttons &&
@@ -981,12 +1419,102 @@ bool DebugRoundTrip(const char *path)
         std::abs(loadedInputs[2].x - mpInputs[2].x) < 0.0001f &&
         std::abs(loadedInputs[2].y - mpInputs[2].y) < 0.0001f;
 
+    std::size_t multiplayerPayloadOffset = 0;
+    std::size_t multiplayerPayloadSize = 0;
+    u32 multiplayerVersion = 0;
+    u32 multiplayerFlags = 0;
+    const bool multiplayerHeader = multiplayerRead &&
+        FindTrailer(multiplayerBytes.data(), multiplayerBytes.size(),
+                    multiplayerPayloadOffset, multiplayerPayloadSize,
+                    &multiplayerVersion, &multiplayerFlags) &&
+        multiplayerVersion == VERSION &&
+        (multiplayerFlags & FLAG_MULTIPLAYER_INPUT) != 0 &&
+        (multiplayerFlags & FLAG_MULTIPLAYER_STAGE_RESOURCES) != 0 &&
+        (multiplayerFlags & FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS) != 0;
+
+    std::vector<u8> invalidLocalPlayer = multiplayerBytes;
+    if (multiplayerHeader)
+        WriteLe32(invalidLocalPlayer.data() + multiplayerPayloadOffset + MP_LOCAL_PLAYER_OFFSET, 3);
+    const bool invalidLocalPlayerRejected = multiplayerHeader &&
+        !LoadPlayback(invalidLocalPlayer.data(), invalidLocalPlayer.size());
+
+    bool preContributionV1Accepted = false;
+    if (multiplayerHeader &&
+        multiplayerPayloadSize >= MP_HEADER_SIZE + MP_STAGE_CONTRIBUTION_BYTES)
+    {
+        std::vector<u8> preContribution = multiplayerBytes;
+        const std::size_t oldPayloadSize =
+            multiplayerPayloadSize - MP_STAGE_CONTRIBUTION_BYTES;
+        const std::size_t contributionOffset = multiplayerPayloadOffset + oldPayloadSize;
+        preContribution.erase(
+            preContribution.begin() + contributionOffset,
+            preContribution.begin() + contributionOffset + MP_STAGE_CONTRIBUTION_BYTES);
+        WriteLe32(preContribution.data() + multiplayerPayloadOffset + 4,
+                  multiplayerFlags & ~FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS);
+        WriteLe32(preContribution.data() + multiplayerPayloadOffset + oldPayloadSize,
+                  static_cast<u32>(oldPayloadSize));
+        std::memcpy(preContribution.data() + multiplayerPayloadOffset + oldPayloadSize + 4,
+                    "EAGX", 4);
+        RecalculateChecksum(preContribution);
+
+        MultiplayerPlayerResourceSnapshot oldResources{};
+        MultiplayerContributionSnapshot oldContributions{};
+        preContributionV1Accepted =
+            LoadPlayback(preContribution.data(), preContribution.size()) &&
+            GetMultiplayerPlaybackStageResources(0, 1, &oldResources) &&
+            oldResources.lives == 0 && oldResources.bombs == 2 && oldResources.power == 96 &&
+            !GetMultiplayerPlaybackStageContributions(0, 1, &oldContributions);
+    }
+
+    bool legacyMultiplayerV1Accepted = false;
+    if (multiplayerHeader && multiplayerPayloadSize >=
+        MP_HEADER_SIZE + MP_STAGE_RESOURCE_BYTES + MP_STAGE_CONTRIBUTION_BYTES)
+    {
+        std::vector<u8> legacyMultiplayer = multiplayerBytes;
+        const std::size_t legacyPayloadSize = multiplayerPayloadSize -
+            MP_STAGE_RESOURCE_BYTES - MP_STAGE_CONTRIBUTION_BYTES;
+        const std::size_t optionalTailOffset = multiplayerPayloadOffset + legacyPayloadSize;
+        legacyMultiplayer.erase(
+            legacyMultiplayer.begin() + optionalTailOffset,
+            legacyMultiplayer.begin() + optionalTailOffset +
+                MP_STAGE_RESOURCE_BYTES + MP_STAGE_CONTRIBUTION_BYTES);
+        WriteLe32(legacyMultiplayer.data() + multiplayerPayloadOffset + 4,
+                  multiplayerFlags & ~(FLAG_MULTIPLAYER_STAGE_RESOURCES |
+                                       FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS));
+        // Older VERSION=1 writers left this reserved word zero-filled.
+        WriteLe32(legacyMultiplayer.data() + multiplayerPayloadOffset + MP_LOCAL_PLAYER_OFFSET, 0);
+        WriteLe32(legacyMultiplayer.data() + multiplayerPayloadOffset + MP_SESSION_FLAGS_OFFSET, 0);
+        WriteLe32(legacyMultiplayer.data() + multiplayerPayloadOffset + legacyPayloadSize,
+                  static_cast<u32>(legacyPayloadSize));
+        std::memcpy(legacyMultiplayer.data() + multiplayerPayloadOffset + legacyPayloadSize + 4,
+                    "EAGX", 4);
+        RecalculateChecksum(legacyMultiplayer);
+
+        MultiplayerReplayConfig legacyConfig{};
+        Netplay::FrameInput legacyInputs[3]{};
+        MultiplayerPlayerResourceSnapshot legacyResources{};
+        MultiplayerContributionSnapshot legacyContributions{};
+        legacyMultiplayerV1Accepted =
+            LoadPlayback(legacyMultiplayer.data(), legacyMultiplayer.size()) &&
+            GetMultiplayerPlaybackConfig(&legacyConfig) &&
+            legacyConfig.playerCount == 3 && legacyConfig.localPlayer == 0 &&
+            !legacyConfig.stage4BossChain && legacyConfig.showContributionStats &&
+            legacyConfig.showStagePlayerNames &&
+            legacyConfig.gameplayAbi == 2 &&
+            GetMultiplayerPlaybackFrame(0, 0, legacyInputs, 3) &&
+            legacyInputs[1].buttons == mpInputs[1].buttons &&
+            !GetMultiplayerPlaybackStageResources(0, 1, &legacyResources) &&
+            !GetMultiplayerPlaybackStageContributions(0, 1, &legacyContributions);
+    }
+
     std::remove(extendedPath.c_str());
     std::remove(multiplayerPath.c_str());
     ResetRecording();
     ClearPlayback();
     return frame0 && frame1 && oldAttemptGone && incompatibleRejected &&
-           developmentVersionRejected && multiplayerRoundTrip;
+           developmentVersionRejected && multiplayerRoundTrip && multiplayerHeader &&
+           invalidLocalPlayerRejected && preContributionV1Accepted &&
+           legacyMultiplayerV1Accepted;
 }
 #endif
 } // namespace ReplayExtension

@@ -49,10 +49,18 @@ def main() -> None:
     require("frozen AnmManager.hpp has four hunks",
             hunk_count("src/th07/AnmManager.hpp") == 4)
 
-    require("P2 and P3 player file slots match upstream",
-            define("ANM_FILE_PLAYER2") == 47 and define("ANM_FILE_PLAYER3") == 48)
-    require("P2 and P3 face file slots match upstream",
-            define("ANM_FILE_FACE2") == 40 and define("ANM_FILE_FACE3") == 50)
+    require("multiplayer player file slots avoid original menu children",
+            define("ANM_FILE_PLAYER2") == 250 and define("ANM_FILE_PLAYER3") == 251)
+    require("multiplayer face file slots reserve two entries each",
+            define("ANM_FILE_FACE2") == 252 and define("ANM_FILE_FACE3") == 254)
+    require("original multi-entry menu file ranges stay collision-free",
+            define("ANM_FILE_TITLE") == 32 and
+            define("ANM_FILE_RESULT") == 42 and
+            define("ANM_FILE_MUSIC") == 46 and
+            define("ANM_FILE_STAFF") == 49 and
+            define("ANM_FILE_PLAYER2") > 49 and
+            define("ANM_FILE_FACE2") + 1 < define("ANM_FILE_FACE3") and
+            define("ANM_FILE_FACE3") + 1 < 256)
     require("player script blocks match upstream",
             define("ANM_OFFSET_PLAYER2") == 0x500 and
             define("ANM_OFFSET_PLAYER3") == 0xA00)
@@ -63,7 +71,7 @@ def main() -> None:
     require("portable sprite capacity matches final upstream",
             "constexpr i32 ANM_SPRITE_SLOT_COUNT = 2816;" in HEADER)
     require("portable file capacity matches final upstream",
-            "constexpr i32 ANM_FILE_SLOT_COUNT = 56;" in HEADER)
+            "constexpr i32 ANM_FILE_SLOT_COUNT = 256;" in HEADER)
     require("all sprite and script arrays share the capacity constant",
             "sprites[ANM_SPRITE_SLOT_COUNT]" in HEADER and
             "scripts[ANM_SPRITE_SLOT_COUNT]" in HEADER and

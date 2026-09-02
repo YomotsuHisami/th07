@@ -63,12 +63,11 @@ def select_power_receiver(candidates: list[tuple[int, int, float]]) -> int | Non
 
 
 def overlap_alpha(distance: float, remote: bool) -> int:
-    if not remote or distance >= 260.0:
+    if not remote or distance >= 100.0:
         return 255
-    distance = max(distance, 220.0)
-    progress = (distance - 220.0) / 40.0
-    progress = progress * progress * (3.0 - 2.0 * progress)
-    return int(progress * (255 - 8)) + 8
+    distance = max(distance, 50.0)
+    progress = (distance - 50.0) / 50.0
+    return int(progress * (255 - 51)) + 51
 
 
 def main() -> None:
@@ -97,7 +96,7 @@ def main() -> None:
 
     source_contracts = {
         "independent SHT power": "? GetPlayerPower(player->initParam)\n                                 : (i32)g_GameManager.globals->currentPower",
-        "missile ANM normalization": "missileAnmIdx -= player->initParam == 0",
+        "missile ANM normalization": "missileAnmIdx -= GetPlayerAnmScript(player, ANM_OFFSET_PLAYER)",
         "three logical input lanes": "IS_PRESSED_PLAYER(this, TH_BUTTON_UP)",
         "raw touch is local-slot gated": "CanSampleRawTouchForPlayer(this) &&\n               Touch::GetFreeJoystickVector",
         "direct touch is local-slot gated": "CanSampleRawTouchForPlayer(this) &&\n                  Touch::GetPlayerDelta",
@@ -111,9 +110,12 @@ def main() -> None:
         "slot-specific ANM file": "playerAnmFile = ANM_FILE_PLAYER3",
         "sidecar reset occurs after SHT load": "ResetMultiplayerPlayerResources(playerId);",
         "same-character tint is drawn": "MultiplayerGameplay::ShouldTintPlayer(arg->initParam)",
-        "proximity fade is centered on the local player": "Player *localPlayer = &g_Players[localPlayerId];",
-        "proximity fade follows smoothed presentation position": "g_RemotePresentation[player->initParam].position",
-        "option sprites share teammate proximity fade": "ApplyPlayerProximityAlpha(arg->optionsSprite[0].color.color, arg)",
+        "proximity fade keeps active-player eligibility": "!IsPlayerActiveForProximity(player)",
+        "proximity fade is measured only against this machine's local player": "const u8 localPlayerId = MultiplayerGameplay::GetLocalPlayerSlot();",
+        "remote-to-local distance uses local player position": "player->positionCenter.x - localPlayer->positionCenter.x",
+        "proximity fade keeps original 50 to 100 pixel range": "REMOTE_PLAYER_FADE_START_DISTANCE = 100.0f",
+        "proximity fade uses requested twenty-percent floor": "REMOTE_PLAYER_FADE_MIN_ALPHA = 51",
+        "option sprites share teammate proximity fade": "ClampVmAlpha(&arg->optionsSprite[0], proximityAlpha)",
         "always-visible hitbox shares teammate proximity fade": "const u8 alpha = GetPlayerOverlapAlpha(player);",
         "temporary absence hides options": "!MultiplayerGameplay::IsPlayerTemporarilyAbsent(arg->initParam)",
         "temporary absence cannot make proximity fade more opaque": "const u8 absentAlpha = currentAlpha < 0x50 ? currentAlpha : 0x50;",
@@ -122,6 +124,24 @@ def main() -> None:
     }
     for name, fragment in source_contracts.items():
         require(name, fragment in PLAYER)
+
+    require(
+        "proximity clamp covers ANM interpolation endpoints",
+        "clamp(vm->color);" in PLAYER
+        and "clamp(vm->prevColor);" in PLAYER
+        and "clamp(vm->color2);" in PLAYER
+        and "clamp(vm->prevColor2);" in PLAYER,
+    )
+    require(
+        "local locator is multiplayer-only and bounded to the arcade region",
+        "DrawLocalPlayerLocator" in PLAYER
+        and "player->initParam != MultiplayerGameplay::GetLocalPlayerSlot()" in PLAYER
+        and "!g_GameManager.notInMenu" in PLAYER
+        and "g_GameManager.arcadeRegionTopLeftPos.x" in PLAYER
+        and "g_GameManager.arcadeRegionSize.x" in PLAYER
+        and "ScreenEffect::DrawSquare(&horizontal" in PLAYER
+        and "ScreenEffect::DrawSquare(&vertical" in PLAYER,
+    )
 
     on_draw = function_body(PLAYER, "u32 Player::OnDrawHighPrio")
     require(
@@ -134,9 +154,11 @@ def main() -> None:
         on_update.index("expectedPlayerId") < on_update.index("arg->UpdateBombProjectiles();"),
     )
     life_transfer = function_body(PLAYER, "void UpdateLifeTransfer")
+    power_tap_guard = life_transfer.index("if (g_powerGiveTaps")
+    focus_guard = life_transfer.index("if (!giver->isFocus || IS_PRESSED_PLAYER")
     require(
         "Power tapping cancels life charge before Focus charge",
-        life_transfer.index("g_powerGiveTaps") < life_transfer.index("!giver->isFocus"),
+        power_tap_guard < focus_guard,
     )
     require(
         "Spirit revival preserves Focus and drift speeds",
@@ -177,10 +199,10 @@ def main() -> None:
         select_power_receiver([(1, 128, 100.0), (2, 0, 401.0)]) is None,
     )
     require("local overlap cue remains opaque", overlap_alpha(120.0, False) == 255)
-    require("remote overlap clamps to alpha 8", overlap_alpha(20.0, True) == 8)
-    require("remote player stays at alpha 8 throughout close overlap", overlap_alpha(220.0, True) == 8)
-    require("remote outer fade midpoint is smooth", overlap_alpha(240.0, True) == 131)
-    require("remote overlap returns opaque at 260 px", overlap_alpha(260.0, True) == 255)
+    require("remote overlap clamps to twenty-percent alpha", overlap_alpha(20.0, True) == 51)
+    require("remote player stays at twenty-percent alpha through 50 px", overlap_alpha(50.0, True) == 51)
+    require("remote original-range midpoint is linear", overlap_alpha(75.0, True) == 153)
+    require("remote overlap returns opaque at 100 px", overlap_alpha(100.0, True) == 255)
     require("2P Border threshold stays 50000", (50000 if 2 < 3 else 75000) == 50000)
     require("3P Border threshold is 75000", (50000 if 3 < 3 else 75000) == 75000)
     require("3P bomb multiplier is two thirds", abs((2.0 / 3.0) - 0.6666666667) < 1e-9)

@@ -31,11 +31,7 @@ namespace
 {
 bool ShouldSkipReplaySavePrompt()
 {
-#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-    return MultiplayerGameplay::IsMultiplayer();
-#else
     return false;
-#endif
 }
 
 bool ShouldSkipPersistentResultWrite()
@@ -55,7 +51,12 @@ static ResultScreen *g_ReadOnlyResultAuditScreen = nullptr;
 static bool g_ReadOnlyResultAuditForcePhantasm = false;
 #endif
 
-static const f32 g_DifficultyWeightsList[] = {-30.0f, -10.0f, 20.0f, 30.0f, 30.0f};
+// The original table stops at Extra even though DrawFinalStats indexes it with
+// the full six-value Difficulty enum. Native builds happened to read adjacent
+// static storage for Phantasm; WebAssembly must not rely on that undefined
+// behavior. The value only contributes to the discarded rankingProbably
+// accumulator, so preserve the Extra/Phantasm parity used elsewhere here.
+static const f32 g_DifficultyWeightsList[] = {-30.0f, -10.0f, 20.0f, 30.0f, 30.0f, 30.0f};
 
 const char *g_AlphabetList = "ABCDEFGHIJKLMNOPQRSTUVWXYZ.,:;_@abcdefghijklmnopqrstuvwxyz+-/"
                              "*=%0123456789#!?'\"$(){}[]<>&\\|~^ --";
@@ -88,7 +89,7 @@ const char *g_CharactersAndShotTypesStrings[6] = {
     "ReimuA ", "ReimuB ", "MarisaA", "MarisaB", "SakuyaA", "SakuyaB",
 };
 
-static const f32 g_DifficultySpellcardWeightsList[] = {1.0f, 1.5f, 1.5f, 2.0f, 2.5f};
+static const f32 g_DifficultySpellcardWeightsList[] = {1.0f, 1.5f, 1.5f, 2.0f, 2.5f, 2.5f};
 
 const char *g_DifficultyNameTable[6] = {
     "      Easy", "    Normal", "      Hard", "   Lunatic", "     Extra", "  Phantasm",

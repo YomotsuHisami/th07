@@ -55,7 +55,7 @@ u32 BombEffects::OnUpdateFadeOut(BombEffects *arg)
     return 1;
 }
 
-void ScreenEffect::DrawSquare(ZunRect *rect, u32 color)
+static void DrawSquareWithBlend(ZunRect *rect, u32 color, BlendMode srcBlend, BlendMode dstBlend)
 {
     g_AnmManager->Flush();
 
@@ -73,7 +73,7 @@ void ScreenEffect::DrawSquare(ZunRect *rect, u32 color)
     {
         g_Supervisor.gfxDevice->SetDepthMask(false);
     }
-    g_Supervisor.gfxDevice->SetBlendMode(BLEND_ALPHA, BLEND_ALPHA);
+    g_Supervisor.gfxDevice->SetBlendMode(srcBlend, dstBlend);
     g_Supervisor.gfxDevice->SetColorOp(COMPONENT_RGB, COLOR_OP_DISABLE);
     g_Supervisor.gfxDevice->SetColorOp(COMPONENT_ALPHA, COLOR_OP_DISABLE);
     g_Supervisor.gfxDevice->DrawPrimitiveUP(PRIM_TRIANGLE_STRIP, 2, vertices,
@@ -86,6 +86,12 @@ void ScreenEffect::DrawSquare(ZunRect *rect, u32 color)
     g_AnmManager->SetZWriteDisable(255);
     g_Supervisor.gfxDevice->SetTextureArg(TEX_ARG_TEXTURE);
 }
+
+void ScreenEffect::DrawSquare(ZunRect *rect, u32 color)
+{
+    DrawSquareWithBlend(rect, color, BLEND_ALPHA, BLEND_ALPHA);
+}
+
 
 void ScreenEffect::DrawColoredQuad(ZunRect *rect, u32 param_2, u32 param_3, u32 param_4,
                                    u32 param_5)

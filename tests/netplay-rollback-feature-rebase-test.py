@@ -12,12 +12,14 @@ CORE_H = (ROOT / "src/netplay/NetplayCore.hpp").read_text(encoding="utf-8")
 CORE = (ROOT / "src/netplay/NetplayCore.cpp").read_text(encoding="utf-8")
 PROTOCOL = (ROOT / "src/netplay/NetplayProtocol.hpp").read_text(encoding="utf-8")
 DRIVER = (ROOT / "src/netplay/Th07LanStageProbe.cpp").read_text(encoding="utf-8")
+PLAYER = (ROOT / "src/Player.cpp").read_text(encoding="utf-8")
 ROLLBACK = (ROOT / "src/netplay/Th07RollbackState.cpp").read_text(encoding="utf-8")
 JOURNAL_H = (ROOT / "src/netplay/RollbackJournal.hpp").read_text(encoding="utf-8")
 JOURNAL = (ROOT / "src/netplay/RollbackJournal.cpp").read_text(encoding="utf-8")
 SIDE_EFFECTS = (ROOT / "src/netplay/NetplaySideEffects.cpp").read_text(encoding="utf-8")
 WINDOW = (ROOT / "src/GameWindow.cpp").read_text(encoding="utf-8")
 TRANSPORT = (ROOT / "src/netplay/WebSocketTransport.cpp").read_text(encoding="utf-8")
+PEER_TRANSPORT = (ROOT / "src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
 BASE = "5b9ebe892914ff5666ef68c0cd02719dde7d4ee9"
 FINAL = "022c533"
 
@@ -53,7 +55,7 @@ def main() -> None:
     shell = CORE + PROTOCOL + DRIVER + ROLLBACK
     require(
         "browser gameplay ABI rejects runtimes without shared difficulty and Ending semantics",
-        "constexpr std::uint32_t GAMEPLAY_ABI = 2;" in DRIVER,
+        "constexpr std::uint32_t GAMEPLAY_ABI = TH07_MULTI_GAMEPLAY_ABI;" in DRIVER,
     )
     require(
         "portable rollback path excludes WinSock threads LowLatency and UDP",
@@ -88,6 +90,50 @@ def main() -> None:
         "g_SimFrame == 0 && ConfirmedThroughAllRemotes() == INVALID_FRAME" in DRIVER
         and "g_Session.CanStart()" in DRIVER,
     )
+    bootstrap = DRIVER.split(
+        "if (!g_Initialized && !EligibleForInitialNetplayStart())", 1
+    )[1].split("if (!g_Initialized)", 1)[0]
+    require(
+        "pre-frame-zero bootstrap runs with neutral synchronized input lanes",
+        "std::array<FrameInput, TH07_MULTI_MAX_PLAYERS> neutralInputs{};" in bootstrap
+        and "Input::SetReplayOverride(0);" in bootstrap
+        and "Input::SetPlayerInputOverrides(neutralInputs.data(), g_PlayerCount);" in bootstrap
+        and bootstrap.split("std::array<FrameInput, TH07_MULTI_MAX_PLAYERS> neutralInputs{};", 1)[1].index(
+            "Input::SetPlayerInputOverrides"
+        )
+        < bootstrap.split("std::array<FrameInput, TH07_MULTI_MAX_PLAYERS> neutralInputs{};", 1)[1].index(
+            "g_Chain.RunCalcChain()"
+        )
+        and "Input::ClearPlayerButtonOverrides();" in bootstrap
+        and "Input::ClearReplayOverride();" in bootstrap,
+    )
+    require(
+        "retired post-game scenes regain vanilla UI input",
+        "if (!InitialNetplayBootstrapInProgress())" in bootstrap
+        and "return g_Chain.RunCalcChain();" in bootstrap.split(
+            "if (!InitialNetplayBootstrapInProgress())", 1
+        )[1].split("std::array<FrameInput, TH07_MULTI_MAX_PLAYERS> neutralInputs{}", 1)[0],
+    )
+    require(
+        "frame-zero baseline clears local raw and held-input history",
+        "g_CurFrameRawInput = 0;" in DRIVER
+        and "g_LastFrameRawInput = 0;" in DRIVER
+        and "g_IsEighthFrameOfHeldInput = 0;" in DRIVER
+        and "g_NumOfFramesInputsWereHeld = 0;" in DRIVER
+        and "g_CurFrameGameInputs[playerId] = 0;" in DRIVER
+        and "g_LastFrameGameInputs[playerId] = 0;" in DRIVER,
+    )
+    joystick_path = PLAYER.split("Netplay::Input::ReplayJoystick", 1)[1].split(
+        "ReplayExtension::CaptureJoystick", 1
+    )[0]
+    direct_touch_path = PLAYER.split("Netplay::Input::ReplayDirectTouch", 1)[1].split(
+        "ReplayExtension::CaptureDirectTouch", 1
+    )[0]
+    require(
+        "synchronized touch lanes block machine-local joystick and direct-touch fallback",
+        "!Netplay::Input::PlayerButtonOverridesActive()" in joystick_path
+        and "!Netplay::Input::PlayerButtonOverridesActive()" in direct_touch_path,
+    )
     scheduled_sender = re.search(
         r"bool SendScheduledLocalFrame\(std::uint32_t frame\)\s*\{(?P<body>.*?)\n\}",
         DRIVER,
@@ -118,6 +164,49 @@ def main() -> None:
         "pause retry and transition UI wait for confirmed input",
         "SharedUiNeedsConfirmedInputs()" in DRIVER
         and "ConfirmedThroughAllRemotes() < g_SimFrame" in DRIVER,
+    )
+    require(
+        "RunCalcChain positive job counts are never confused with callback exit enums",
+        "CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS" not in DRIVER
+        and "CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR" not in DRIVER
+        and "res == CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS" not in WINDOW
+        and "res == CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR" not in WINDOW
+        and "if (res == 0)" in WINDOW
+        and "if (res == -1)" in WINDOW,
+    )
+    require(
+        "calc-chain return values use 0/-1 exits rather than ChainCallbackResult enum numbers",
+        "CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS" not in DRIVER
+        and "CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR" not in DRIVER
+        and "res == CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS" not in WINDOW
+        and "res == CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR" not in WINDOW
+        and "if (res == 0)" in WINDOW
+        and "if (res == -1)" in WINDOW,
+    )
+    require(
+        "driver respects Chain::RunCalcChain integer return contract",
+        "CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS" not in DRIVER
+        and "CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR" not in DRIVER
+        and "if (res == 0)" in WINDOW
+        and "if (res == -1)" in WINDOW,
+    )
+    require(
+        "driver preserves Chain::RunCalcChain integer return contract",
+        "CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS" not in DRIVER
+        and "CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR" not in DRIVER
+        and "res == 0" in WINDOW
+        and "res == -1" in WINDOW
+        and "res == CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS" not in WINDOW
+        and "res == CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR" not in WINDOW,
+    )
+    require(
+        "driver preserves Chain RunCalcChain integer exit contract",
+        "CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS" not in DRIVER
+        and "CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR" not in DRIVER
+        and "CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS" not in WINDOW
+        and "CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR" not in WINDOW
+        and "if (result == 0 || result == -1)" in DRIVER
+        and "return -1;" in DRIVER,
     )
     require(
         "Extra Phantasm and Ending remain inside the synchronized session",
@@ -151,6 +240,21 @@ def main() -> None:
                 "TouchEffect(&g_EffectManager.effects[i])",
             )
         ),
+    )
+    require(
+        "rollback does not rewind committed replay output cursors",
+        "TouchObject(g_ReplayManager)" not in ROLLBACK
+        and "TouchObject(&g_ReplayManager->rngSeed)" in ROLLBACK
+        and "TouchObject(&g_ReplayManager->replayEventFlags)" in ROLLBACK,
+    )
+    require(
+        "rollback resimulation overwrites the mapped multiplayer Replay frame",
+        "struct ReplayFrameBinding" in DRIVER
+        and "slot.replayFrame = g_ReplayManager->frameId" in DRIVER
+        and "if (!resimulation)" in DRIVER
+        and "ReplayExtension::RecordMultiplayerFrame(" in DRIVER
+        and "replayBinding.replayFrame" in DRIVER
+        and "decision.inputs.data()" in DRIVER,
     )
     require(
         "three-player BombEffect rollback capacity matches final upstream",
@@ -201,6 +305,18 @@ def main() -> None:
         and "remote WebSocket closed" in TRANSPORT
         and "RemoteInputsTimedOut()" in DRIVER
         and 'Fail("remote input timeout")' in DRIVER,
+    )
+    require(
+        "reliable session control is rate-limited during slow-peer restart",
+        "SESSION_RETRY_TICKS = 15" in DRIVER
+        and "g_LastHelloSendTick" in DRIVER
+        and "g_LastReadySendTick" in DRIVER,
+    )
+    require(
+        "browser peer receive queue dequeues without Array.shift quadratic backlog",
+        "receivedHead" in PEER_TRANSPORT
+        and "state.receivedHead = head + 1" in PEER_TRANSPORT
+        and "state.received?.shift()" not in PEER_TRANSPORT,
     )
     require(
         "hash resync and automatic repair are absent from rollback core",

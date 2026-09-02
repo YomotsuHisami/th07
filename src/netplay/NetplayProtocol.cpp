@@ -11,6 +11,7 @@ constexpr std::uint8_t MAGIC[4] = {'E', '7', 'N', 'P'};
 constexpr std::size_t HEADER_SIZE = 44;
 constexpr std::size_t SESSION_PACKET_SIZE = 32;
 constexpr std::size_t INPUT_SAMPLE_SIZE = 12;
+constexpr std::size_t SPECTATOR_FRAME_HEADER_SIZE = 24;
 
 void PutU16(std::vector<std::uint8_t> *out, std::uint16_t value)
 {
@@ -130,7 +131,8 @@ bool PeekPacketType(const std::uint8_t *data, std::size_t size, PacketType *out)
         data[4] != PROTOCOL_VERSION)
         return false;
     const auto type = static_cast<PacketType>(data[5]);
-    if (type != PacketType::Input && type != PacketType::Session)
+    if (type != PacketType::Input && type != PacketType::Session &&
+        type != PacketType::SpectatorFrame)
         return false;
     *out = type;
     return true;
@@ -276,6 +278,55 @@ bool DecodeSessionPacket(const std::uint8_t *data, std::size_t size, SessionPack
     packet.phase = static_cast<SessionPhase>(data[at]);
     if (packet.phase != SessionPhase::Hello && packet.phase != SessionPhase::Ready)
         return false;
+    *out = packet;
+    return true;
+}
+
+bool EncodeSpectatorFramePacket(const SpectatorFramePacket &packet,
+                                std::vector<std::uint8_t> *out)
+{
+    if (!out || packet.frame == INVALID_FRAME || packet.playerCount < 2 ||
+        packet.playerCount > MAX_PLAYERS)
+        return false;
+    for (std::uint8_t player = 0; player < packet.playerCount; ++player)
+        if (!ValidInput(packet.inputs[player]))
+            return false;
+    out->clear();
+    out->reserve(SPECTATOR_FRAME_HEADER_SIZE + packet.playerCount * INPUT_SAMPLE_SIZE);
+    out->insert(out->end(), MAGIC, MAGIC + 4);
+    out->push_back(PROTOCOL_VERSION);
+    out->push_back(static_cast<std::uint8_t>(PacketType::SpectatorFrame));
+    out->push_back(packet.playerCount);
+    out->push_back(0);
+    PutU64(out, packet.sessionId);
+    PutU32(out, packet.frame);
+    PutU32(out, packet.gameplayAbi);
+    for (std::uint8_t player = 0; player < packet.playerCount; ++player)
+        PutInput(out, packet.inputs[player]);
+    return out->size() == SPECTATOR_FRAME_HEADER_SIZE +
+                              packet.playerCount * INPUT_SAMPLE_SIZE;
+}
+
+bool DecodeSpectatorFramePacket(const std::uint8_t *data, std::size_t size,
+                                SpectatorFramePacket *out)
+{
+    PacketType type;
+    if (!data || !out || !PeekPacketType(data, size, &type) ||
+        type != PacketType::SpectatorFrame || size < SPECTATOR_FRAME_HEADER_SIZE)
+        return false;
+    SpectatorFramePacket packet;
+    packet.playerCount = data[6];
+    if (packet.playerCount < 2 || packet.playerCount > MAX_PLAYERS || data[7] != 0 ||
+        size != SPECTATOR_FRAME_HEADER_SIZE + packet.playerCount * INPUT_SAMPLE_SIZE)
+        return false;
+    std::size_t at = 8;
+    if (!GetU64(data, size, &at, &packet.sessionId) ||
+        !GetU32(data, size, &at, &packet.frame) ||
+        !GetU32(data, size, &at, &packet.gameplayAbi) || packet.frame == INVALID_FRAME)
+        return false;
+    for (std::uint8_t player = 0; player < packet.playerCount; ++player)
+        if (!GetInput(data, size, &at, &packet.inputs[player]))
+            return false;
     *out = packet;
     return true;
 }

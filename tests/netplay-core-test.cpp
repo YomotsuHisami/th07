@@ -73,6 +73,26 @@ static void TestProtocolRoundTrip()
     assert(decodedHello.seed == hello.seed && decodedHello.gameplayAbi == 1);
     assert(decodedHello.gameId == 7 && decodedHello.senderPlayer == 1);
     assert(decodedHello.phase == SessionPhase::Hello);
+
+    SpectatorFramePacket spectator;
+    spectator.sessionId = packet.sessionId;
+    spectator.frame = 42;
+    spectator.gameplayAbi = 2;
+    spectator.playerCount = 3;
+    spectator.inputs[0] = packet.inputs[0];
+    spectator.inputs[1] = packet.inputs[1];
+    spectator.inputs[2] = packet.inputs[2];
+    assert(EncodeSpectatorFramePacket(spectator, &wire));
+    assert(PeekPacketType(wire.data(), wire.size(), &type));
+    assert(type == PacketType::SpectatorFrame);
+    SpectatorFramePacket decodedSpectator;
+    assert(DecodeSpectatorFramePacket(wire.data(), wire.size(), &decodedSpectator));
+    assert(decodedSpectator.sessionId == spectator.sessionId);
+    assert(decodedSpectator.gameplayAbi == spectator.gameplayAbi);
+    assert(decodedSpectator.frame == 42 && decodedSpectator.playerCount == 3);
+    assert(decodedSpectator.inputs[1] == spectator.inputs[1]);
+    wire.push_back(0);
+    assert(!DecodeSpectatorFramePacket(wire.data(), wire.size(), &decodedSpectator));
 }
 
 static SessionConfig MakeSessionConfig(std::uint8_t localPlayer)

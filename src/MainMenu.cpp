@@ -1,4 +1,5 @@
 #include "MainMenu.hpp"
+#include "EaglerOptions.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -2049,6 +2050,12 @@ u32 MainMenu::OnUpdateSelectReplay()
             }
             this->replayFilesNum = local_10;
             this->replayPage = 0;
+#ifdef __EMSCRIPTEN__
+            if (EaglerOptions::ReplayViewerEnabled())
+            {
+                EM_ASM({ globalThis.__eaglerOrdinaryReplayFilesFound = $0; }, local_10);
+            }
+#endif
         }
         if (this->stateTimer >= 30)
         {
@@ -2197,10 +2204,17 @@ u32 MainMenu::OnUpdateSelectReplay()
             ReplayExtension::MultiplayerReplayConfig replayConfig;
             if (ReplayExtension::GetMultiplayerPlaybackConfig(&replayConfig))
             {
+                if (replayConfig.gameplayAbi != TH07_MULTI_GAMEPLAY_ABI)
+                {
+                    g_GameErrorContext.Fatal("Multiplayer replay gameplay ABI is incompatible\n");
+                    return CHAIN_CALLBACK_RESULT_CONTINUE_AND_REMOVE_JOB;
+                }
                 MultiplayerGameplay::SessionState session;
                 session.playerCount = replayConfig.playerCount;
-                session.localPlayer = 0;
-                session.showStagePlayerNames = true;
+                session.localPlayer = replayConfig.localPlayer;
+                session.stage4BossChain = replayConfig.stage4BossChain;
+                session.showContributionStats = replayConfig.showContributionStats;
+                session.showStagePlayerNames = replayConfig.showStagePlayerNames;
                 for (u8 playerId = 0; playerId < replayConfig.playerCount; ++playerId)
                 {
                     session.players[playerId].active = true;
@@ -2628,6 +2642,8 @@ ZunResult MainMenu::ActualAddedCallback()
     }
     g_GameManager.phantasmUnlocked = g_GameManager.HasUnlockedPhantomAndMaxClears();
     this->gameState = STATE_PRE_INPUT;
+    if (EaglerOptions::ReplayViewerEnabled())
+        g_GameManager.SetReplay(1);
     InitializeTimingVars(&g_Supervisor);
     switch (g_Supervisor.prevState)
     {

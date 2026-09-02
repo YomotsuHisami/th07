@@ -1,5 +1,9 @@
 #include "Gui.hpp"
 
+#if defined(TH_DEV_TOOLS) && defined(__EMSCRIPTEN__)
+#include <emscripten/emscripten.h>
+#endif
+
 #include <cstdio>
 #include <cstring>
 
@@ -43,6 +47,65 @@ ChainElem g_GuiDrawChain;
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
 namespace
 {
+// Countdown warning audio is presentation state, not rollback state. Track the
+// currently presented spellcard and a bit for each audible second (0..9). A
+// rollback may move the timer back above 10 or revisit 9/8/etc., but it must not
+// re-arm a second which this spellcard already voiced.
+struct SpellcardCountdownAudioState
+{
+    bool initialized = false;
+    i32 phaseSpellcardId = -1;
+    i32 lastPresentedSecond = -1;
+    u16 soundedSeconds = 0;
+};
+
+SpellcardCountdownAudioState g_SpellcardCountdownAudio;
+
+void ResetSpellcardCountdownAudio()
+{
+    g_SpellcardCountdownAudio = {};
+    g_SpellcardCountdownAudio.phaseSpellcardId = -1;
+    g_SpellcardCountdownAudio.lastPresentedSecond = -1;
+}
+
+bool ShouldPlaySpellcardCountdownWarning(i32 secondsRemaining,
+                                         i32 rollbackLastSecondsRemaining)
+{
+    if (!MultiplayerGameplay::IsMultiplayer())
+        return secondsRemaining < 10 &&
+               rollbackLastSecondsRemaining != secondsRemaining;
+
+    // The vanilla warning belongs to the whole Boss timer, including non-spell
+    // phases. Use the active spell id when there is one, otherwise -1. A real
+    // phase restart also makes the displayed timer jump upward by many seconds;
+    // TH07 rollback is capped at 12 frames (< 1 second), so an increase of more
+    // than one displayed second cannot be caused by rollback alone.
+    const i32 phaseSpellcardId = g_EnemyManager.spellcardInfo.isActive != 0
+                                     ? g_EnemyManager.spellcardInfo.spellcardIdx
+                                     : -1;
+    const bool newPhase =
+        !g_SpellcardCountdownAudio.initialized ||
+        g_SpellcardCountdownAudio.phaseSpellcardId != phaseSpellcardId ||
+        (g_SpellcardCountdownAudio.lastPresentedSecond >= 0 &&
+         secondsRemaining > g_SpellcardCountdownAudio.lastPresentedSecond + 1);
+    if (newPhase)
+    {
+        g_SpellcardCountdownAudio.initialized = true;
+        g_SpellcardCountdownAudio.phaseSpellcardId = phaseSpellcardId;
+        g_SpellcardCountdownAudio.soundedSeconds = 0;
+    }
+    g_SpellcardCountdownAudio.lastPresentedSecond = secondsRemaining;
+
+    if (secondsRemaining < 0 || secondsRemaining >= 10)
+        return false;
+
+    const u16 bit = static_cast<u16>(1u << secondsRemaining);
+    if ((g_SpellcardCountdownAudio.soundedSeconds & bit) != 0)
+        return false;
+    g_SpellcardCountdownAudio.soundedSeconds |= bit;
+    return true;
+}
+
 const char *GetPlayerFacePath(u8 playerId)
 {
     switch (MultiplayerGameplay::GetPlayerCharacter(playerId))
@@ -64,6 +127,27 @@ const char *GetMultiplayerHudLoadoutName(u8 playerId)
     return index >= 0 && index < 6 ? names[index] : "Unknown";
 }
 } // namespace
+
+#if defined(TH_DEV_TOOLS) && defined(__EMSCRIPTEN__) && defined(TH_ENABLE_MULTIPLAYER_GAMEPLAY)
+extern "C" EMSCRIPTEN_KEEPALIVE int TouhouDebugCountdownAudioStep(
+    i32 secondsRemaining, i32 rollbackLastSecondsRemaining, i32 phaseSpellcardId,
+    i32 spellActive, i32 reset)
+{
+    if (reset)
+        ResetSpellcardCountdownAudio();
+    const auto oldActive = g_EnemyManager.spellcardInfo.isActive;
+    const auto oldIdx = g_EnemyManager.spellcardInfo.spellcardIdx;
+    g_EnemyManager.spellcardInfo.isActive = spellActive ? 1u : 0u;
+    g_EnemyManager.spellcardInfo.spellcardIdx = phaseSpellcardId;
+    const bool play = ShouldPlaySpellcardCountdownWarning(
+        secondsRemaining, rollbackLastSecondsRemaining);
+    g_EnemyManager.spellcardInfo.isActive = oldActive;
+    g_EnemyManager.spellcardInfo.spellcardIdx = oldIdx;
+    if (play)
+        g_SoundPlayer.PlaySoundByIdx(SOUND_29, 0);
+    return play ? 1 : 0;
+}
+#endif
 #endif
 
 i32 Gui::IsStageFinished()
@@ -451,6 +535,9 @@ void Gui::ShowSpellcard(i32 spellcardSprite, const char *spellcardName)
 
 ZunResult Gui::ActualAddedCallback()
 {
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    ResetSpellcardCountdownAudio();
+#endif
     i32 k;
     i32 j;
     i32 i;
@@ -2255,8 +2342,13 @@ void Gui::DrawStageElements()
         g_AsciiManager.SetColor(interpBossHealthBarAlpha << 24 | timeColor);
         secondsRemaining =
             this->spellcardSecondsRemaining > 99 ? 99 : this->spellcardSecondsRemaining;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        if (ShouldPlaySpellcardCountdownWarning(
+                secondsRemaining, this->lastSpellcardSecondsRemaining))
+#else
         if (secondsRemaining < 10 &&
             this->lastSpellcardSecondsRemaining != this->spellcardSecondsRemaining)
+#endif
         {
             g_SoundPlayer.PlaySoundByIdx(SOUND_29, 0);
         }

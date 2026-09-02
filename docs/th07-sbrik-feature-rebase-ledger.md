@@ -551,6 +551,23 @@ Effects accounting: `14/14` implementation hunks and `2/2` header hunks have a d
 
 Replay accounting: `8/8` hunks have a disposition. Multiplayer sessions do not write incomplete P1-only replay files, while ordinary `.rpy` and optional EAGX touch extensions remain supported. Pre-existing vanilla replay checksum and pre-existing EAGX trailer validation were not changed in this work class; this is not authorization to add or expand any hash or compatibility gate.
 
+> **Current-tree replay addendum (2026-08-29):** the paragraph above records the
+> historical frozen-rebase disposition and is no longer a complete description
+> of the working tree. Current TH07 multiplayer replay uses the EAGX v1
+> `FLAG_MULTIPLAYER_INPUT` sidecar to save 2P/3P loadouts and synchronized
+> `FrameInput` lanes, and the Replay menu restores a `MultiplayerGameplay`
+> session before playback. A real playback bug was found where
+> `Player::RegisterChain()` additionally required `!g_GameManager.replay`, which
+> collapsed an otherwise valid multiplayer Replay back to the single vanilla
+> `g_Player`; the replay therefore displayed only P1 even though P2/P3 input was
+> present. The guard has been removed. ReplayManager already restores all
+> recorded player lanes, and multiplayer Replay now registers every active
+> Player slot. Static Replay/Player contracts and the official Web netplay build
+> pass after this fix. Human visual Replay playback remains a separate
+> acceptance gate. Directly starting a later replay stage still needs a separate
+> audit for guest per-stage resource snapshots; do not conflate that with the
+> fixed missing-player registration bug.
+
 ### Replay real-person acceptance
 
 - Record and play an ordinary keyboard replay. Verify vanilla `.rpy` behavior, stage transitions, held-button repeat and Border activation remain unchanged.

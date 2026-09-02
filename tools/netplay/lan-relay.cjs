@@ -6,6 +6,11 @@ const port = Number.parseInt(process.env.TH07_RELAY_PORT || '18142', 10);
 const delayMs = Math.max(0, Number.parseInt(process.env.TH07_RELAY_DELAY_MS || '0', 10) || 0);
 const jitterMs = Math.max(0, Number.parseInt(process.env.TH07_RELAY_JITTER_MS || '0', 10) || 0);
 const dropEvery = Math.max(0, Number.parseInt(process.env.TH07_RELAY_DROP_EVERY || '0', 10) || 0);
+const dropFirstInputPerEdge = process.env.TH07_RELAY_DROP_FIRST_INPUT_PER_EDGE === '1';
+const dropInputLatestFrom = Math.max(-1, Number.parseInt(process.env.TH07_RELAY_DROP_INPUT_LATEST_FROM || '-1', 10) || -1);
+const dropInputLatestTo = Math.max(-1, Number.parseInt(process.env.TH07_RELAY_DROP_INPUT_LATEST_TO || '-1', 10) || -1);
+const routeSkewPlayer = Number.parseInt(process.env.TH07_TEST_ROUTE_SKEW_PLAYER || '-1', 10);
+const routeSkewMs = Math.max(0, Number.parseInt(process.env.TH07_TEST_ROUTE_SKEW_MS || '0', 10) || 0);
 const rtcTimeoutMs = Math.max(1000, Number.parseInt(
   process.env.TH07_RTC_TIMEOUT_MS || process.env.TH07_DIRECT_TIMEOUT_MS || '4500', 10
 ) || 4500);
@@ -18,6 +23,12 @@ const turnUsername = process.env.TH07_TURN_USERNAME || '';
 const turnCredential = process.env.TH07_TURN_CREDENTIAL || '';
 const turnTtlSeconds = Math.max(60, Number.parseInt(process.env.TH07_TURN_TTL_SECONDS || '3600', 10) || 3600);
 const lobbyReconnectGraceMs = Math.max(100, Number.parseInt(process.env.TH07_LOBBY_RECONNECT_GRACE_MS || '12000', 10) || 12000);
+const spectatorConnectGraceMs = Math.max(100, Number.parseInt(
+  process.env.TH07_SPECTATOR_CONNECT_GRACE_MS || '60000', 10
+) || 60000);
+const spectatorMaxBufferedBytes = Math.max(64 * 1024, Number.parseInt(
+  process.env.TH07_SPECTATOR_MAX_BUFFERED_BYTES || String(1024 * 1024), 10
+) || 1024 * 1024);
 
 for (const url of stunUrls) {
   if (!/^stuns?:/i.test(url)) throw new Error(`invalid TH07_STUN_URLS entry: ${url}`);
@@ -33,6 +44,8 @@ if ((turnUsername && !turnCredential) || (!turnUsername && turnCredential)) {
 }
 const rooms = new Map();
 const forwardCounters = new Map();
+const firstInputDropped = new Set();
+const inputLatestDropped = new Set();
 const targetedEnvelopeMarker = 0xe7;
 
 function iceServersFor(roomId, runId, player) {
@@ -67,6 +80,7 @@ function getRoom(id) {
         playerCount: 2,
         difficulty: 1,
         seats: [null, null, null],
+        spectators: new Map(),
         startSerial: 0,
       },
     };
@@ -86,6 +100,12 @@ function getRun(room, runId) {
       playerCount: 0,
       route: null,
       routeTimer: null,
+      admittedSpectators: new Set(),
+      claimedSpectators: new Set(),
+      spectatorClients: new Map(),
+      spectatorHistory: [],
+      spectatorGraceTimer: null,
+      spectatorAdmissionOpen: false,
     };
     room.runs.set(runId, run);
   }
@@ -93,9 +113,40 @@ function getRun(room, runId) {
 }
 
 function maybeDeleteRun(room, runId, run) {
-  if (run.clients.size !== 0 || run.signalClients.size !== 0) return;
+  if (run.clients.size !== 0 || run.signalClients.size !== 0 || run.spectatorClients.size !== 0) return;
   if (run.routeTimer) clearTimeout(run.routeTimer);
+  if (run.spectatorGraceTimer) clearTimeout(run.spectatorGraceTimer);
   room.runs.delete(runId);
+}
+
+function startSpectatorGrace(roomId, room, runId, run) {
+  if (run.spectatorGraceTimer) clearTimeout(run.spectatorGraceTimer);
+  run.spectatorAdmissionOpen = true;
+  run.spectatorHistory.length = 0;
+  run.spectatorGraceTimer = setTimeout(() => {
+    run.spectatorGraceTimer = null;
+    if (room.runs.get(runId) !== run) return;
+    run.spectatorAdmissionOpen = false;
+    let expired = 0;
+    for (const spectatorId of [...run.admittedSpectators]) {
+      if (run.claimedSpectators.has(spectatorId)) continue;
+      run.admittedSpectators.delete(spectatorId);
+      expired++;
+    }
+    run.spectatorHistory.length = 0;
+    console.log(`SPECTATOR WINDOW CLOSE room=${roomId} run=${runId} expired=${expired}`);
+  }, spectatorConnectGraceMs);
+}
+
+function sendSpectatorPayload(socket, payload, roomId, runId, spectatorId) {
+  if (socket.readyState !== WebSocket.OPEN) return false;
+  if (Number(socket.bufferedAmount || 0) > spectatorMaxBufferedBytes) {
+    console.log(`SPECTATOR SLOW room=${roomId} run=${runId} client=${spectatorId} buffered=${socket.bufferedAmount}`);
+    socket.close(1008, 'spectator fell too far behind');
+    return false;
+  }
+  socket.send(payload, { binary: true });
+  return true;
 }
 
 function maybeDeleteRoom(roomId, room) {
@@ -126,10 +177,19 @@ function broadcastSignal(run, payload) {
 }
 
 function broadcastRoute(run, payload) {
-  broadcastSignal(run, payload);
   const message = JSON.stringify(payload);
-  for (const socket of run.clients.values())
-    if (socket.readyState === WebSocket.OPEN) socket.send(message);
+  const send = (player, socket) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    if (routeSkewMs > 0 && player === routeSkewPlayer) {
+      setTimeout(() => {
+        if (socket.readyState === WebSocket.OPEN) socket.send(message);
+      }, routeSkewMs);
+    } else {
+      socket.send(message);
+    }
+  };
+  for (const [player, socket] of run.signalClients) send(player, socket);
+  for (const [player, socket] of run.clients) send(player, socket);
 }
 
 function chooseRoute(roomId, runId, room, run, route) {
@@ -251,12 +311,18 @@ function handleSignalConnection(socket, roomId, runId, player, playerCount) {
 }
 
 function lobbySnapshot(room) {
+  const spectators = [...room.lobby.spectators.entries()]
+    .filter(([clientId]) => room.lobbyClients.has(clientId))
+    .map(([clientId, name]) => ({ clientId, name }));
   return {
     playerCount: room.lobby.playerCount,
     difficulty: room.lobby.difficulty,
     startSerial: room.lobby.startSerial,
+    spectators,
+    spectatorCount: spectators.length,
     seats: room.lobby.seats.map(seat => seat ? {
       clientId: seat.clientId,
+      name: seat.name || '',
       loadout: seat.loadout,
       ready: !!seat.ready,
       offline: !room.lobbyClients.has(seat.clientId),
@@ -291,6 +357,10 @@ function lobbySeatOf(room, clientId) {
 
 function validLoadout(value) {
   return Number.isInteger(value) && value >= 0 && value < 6;
+}
+
+function normalizeDisplayName(value) {
+  return [...String(value || '').replace(/[\u0000-\u001f\u007f]/g, '').trim()].slice(0, 12).join('');
 }
 
 function handleLobbyConnection(socket, roomId, clientId) {
@@ -330,13 +400,58 @@ function handleLobbyConnection(socket, roomId, clientId) {
         return;
       }
       clearLobbySeat(room, clientId);
-      room.lobby.seats[seat] = { clientId, loadout: Number(message.loadout), ready: !!message.ready };
+      room.lobby.spectators.delete(clientId);
+      const currentRun = room.runs.get(String(room.lobby.startSerial));
+      if (currentRun && !currentRun.claimedSpectators.has(clientId))
+        currentRun.admittedSpectators.delete(clientId);
+      room.lobby.seats[seat] = { clientId, name: normalizeDisplayName(message.name), loadout: Number(message.loadout), ready: !!message.ready };
       broadcastLobby(room);
       return;
     }
 
     if (message.type === 'stand-up') {
       if (clearLobbySeat(room, clientId)) broadcastLobby(room);
+      return;
+    }
+
+    if (message.type === 'spectate') {
+      const seatChanged = clearLobbySeat(room, clientId);
+      const spectatorChanged = !room.lobby.spectators.has(clientId);
+      room.lobby.spectators.set(clientId, normalizeDisplayName(message.name));
+      const currentRunId = String(room.lobby.startSerial);
+      const currentRun = room.runs.get(currentRunId);
+      let admittedCurrentRun = false;
+      if (currentRun?.spectatorAdmissionOpen && !currentRun.claimedSpectators.has(clientId)) {
+        currentRun.admittedSpectators.add(clientId);
+        admittedCurrentRun = true;
+      }
+      if (seatChanged || spectatorChanged) broadcastLobby(room);
+      if (admittedCurrentRun) {
+        const snapshot = lobbySnapshot(room);
+        snapshot.spectatorCount = currentRun.admittedSpectators.size;
+        sendLobby(socket, { type: 'spectator-start', serial: room.lobby.startSerial, room: snapshot });
+      } else if (currentRun && !currentRun.spectatorAdmissionOpen) {
+        sendLobby(socket, { type: 'error', error: '本局旁观加入窗口已关闭；已保留旁观席，将在下一局生效' });
+      }
+      return;
+    }
+
+    if (message.type === 'leave-spectator') {
+      const changed = room.lobby.spectators.delete(clientId);
+      const currentRun = room.runs.get(String(room.lobby.startSerial));
+      if (currentRun && !currentRun.claimedSpectators.has(clientId))
+        currentRun.admittedSpectators.delete(clientId);
+      if (changed) broadcastLobby(room);
+      return;
+    }
+
+    if (message.type === 'set-name') {
+      const name = normalizeDisplayName(message.name);
+      const playerSeat = lobbySeatOf(room, clientId);
+      if (playerSeat >= 0) room.lobby.seats[playerSeat].name = name;
+      else if (room.lobby.spectators.has(clientId)) room.lobby.spectators.set(clientId, name);
+      else { sendLobby(socket, { type: 'error', error: '请先加入玩家席或旁观' }); return; }
+      broadcastLobby(room);
       return;
     }
 
@@ -377,7 +492,16 @@ function handleLobbyConnection(socket, roomId, clientId) {
         return;
       }
       room.lobby.startSerial++;
-      broadcastLobby(room, { type: 'start', serial: room.lobby.startSerial, room: lobbySnapshot(room) });
+      const run = getRun(room, String(room.lobby.startSerial));
+      const seatedClients = new Set(activeSeats.map(entry => entry.clientId));
+      run.playerCount = room.lobby.playerCount;
+      run.admittedSpectators = new Set(
+        [...room.lobby.spectators.keys()].filter(id => room.lobbyClients.has(id) && !seatedClients.has(id)));
+      run.spectatorHistory.length = 0;
+      startSpectatorGrace(roomId, room, String(room.lobby.startSerial), run);
+      const snapshot = lobbySnapshot(room);
+      snapshot.spectatorCount = run.admittedSpectators.size;
+      broadcastLobby(room, { type: 'start', serial: room.lobby.startSerial, room: snapshot });
       return;
     }
     sendLobby(socket, { type: 'error', error: 'unknown lobby message' });
@@ -386,9 +510,10 @@ function handleLobbyConnection(socket, roomId, clientId) {
   socket.on('close', (code, reason) => {
     if (room.lobbyClients.get(clientId) === socket) {
       room.lobbyClients.delete(clientId);
+      const spectatorChanged = room.lobby.spectators.delete(clientId);
       const deliberateLeave = code === 1000 && String(reason || '') === 'leave room';
       if (deliberateLeave) {
-        if (clearLobbySeat(room, clientId)) broadcastLobby(room);
+        if (clearLobbySeat(room, clientId) || spectatorChanged) broadcastLobby(room);
       } else if (lobbySeatOf(room, clientId) >= 0) {
         const timer = setTimeout(() => {
           if (room.lobbyDisconnectTimers.get(clientId) !== timer) return;
@@ -400,6 +525,8 @@ function handleLobbyConnection(socket, roomId, clientId) {
         // Keep the seat visible during a short network transition. Clients can
         // show it as reconnecting instead of presenting an empty room.
         broadcastLobby(room);
+      } else if (spectatorChanged) {
+        broadcastLobby(room);
       }
     }
     console.log(`LOBBY LEAVE room=${roomId} client=${clientId}`);
@@ -407,6 +534,37 @@ function handleLobbyConnection(socket, roomId, clientId) {
   });
   socket.on('error', error => {
     console.error(`LOBBY SOCKET room=${roomId} client=${clientId} ${error.message}`);
+  });
+}
+
+function handleSpectatorConnection(socket, roomId, runId, spectatorId, playerCount) {
+  const room = rooms.get(roomId);
+  const run = room?.runs.get(runId);
+  if (!room || !run || run.playerCount !== playerCount ||
+      !run.admittedSpectators.has(spectatorId)) {
+    socket.close(1008, 'spectator was not admitted within the join window');
+    return;
+  }
+  if (run.claimedSpectators.has(spectatorId)) {
+    socket.close(1008, 'spectators cannot reconnect midgame');
+    return;
+  }
+  run.claimedSpectators.add(spectatorId);
+  run.spectatorClients.set(spectatorId, socket);
+  for (const payload of run.spectatorHistory) {
+    if (!sendSpectatorPayload(socket, payload, roomId, runId, spectatorId)) break;
+  }
+  console.log(`SPECTATOR JOIN room=${roomId} run=${runId} client=${spectatorId}`);
+  socket.on('message', () => socket.close(1008, 'spectators are receive-only'));
+  socket.on('close', () => {
+    if (run.spectatorClients.get(spectatorId) === socket)
+      run.spectatorClients.delete(spectatorId);
+    console.log(`SPECTATOR LEAVE room=${roomId} run=${runId} client=${spectatorId}`);
+    maybeDeleteRun(room, runId, run);
+    maybeDeleteRoom(roomId, room);
+  });
+  socket.on('error', error => {
+    console.error(`SPECTATOR SOCKET room=${roomId} run=${runId} client=${spectatorId} ${error.message}`);
   });
 }
 
@@ -419,6 +577,17 @@ server.on('connection', (socket, request) => {
   const lobbyClient = url.searchParams.get('lobby') || '';
   if (/^[A-Za-z0-9_-]{1,64}$/.test(roomId) && /^[A-Za-z0-9_-]{8,64}$/.test(lobbyClient)) {
     handleLobbyConnection(socket, roomId, lobbyClient);
+    return;
+  }
+  const spectator = url.searchParams.get('spectator') || '';
+  const spectatorPlayerCount = Number.parseInt(url.searchParams.get('players') || '2', 10);
+  if (spectator) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(roomId) || !/^[A-Za-z0-9_-]{1,64}$/.test(runId) ||
+        !/^[A-Za-z0-9_-]{8,64}$/.test(spectator) || ![2, 3].includes(spectatorPlayerCount)) {
+      socket.close(1008, 'invalid spectator');
+      return;
+    }
+    handleSpectatorConnection(socket, roomId, runId, spectator, spectatorPlayerCount);
     return;
   }
   const player = Number.parseInt(url.searchParams.get('player') || '-1', 10);
@@ -451,6 +620,21 @@ server.on('connection', (socket, request) => {
       return;
     }
     const incoming = Buffer.from(data);
+    if (incoming.length >= 2 && incoming[0] === 0xe8) {
+      if (player !== 0 || (!run.spectatorAdmissionOpen && run.spectatorClients.size === 0)) return;
+      const payload = Buffer.from(incoming.subarray(1));
+      const streamPlayers = payload[6];
+      if ((streamPlayers !== 2 && streamPlayers !== 3) ||
+          payload.length !== 24 + streamPlayers * 12 ||
+          payload[0] !== 0x45 || (payload[1] !== 0x36 && payload[1] !== 0x37) || payload[2] !== 0x4e ||
+          payload[3] !== 0x50 || payload[4] !== 4 || payload[5] !== 3 ||
+          payload[7] !== 0 || streamPlayers !== run.playerCount) return;
+      if (run.spectatorAdmissionOpen)
+        run.spectatorHistory.push(payload);
+      for (const [spectatorId, target] of run.spectatorClients)
+        sendSpectatorPayload(target, payload, roomId, runId, spectatorId);
+      return;
+    }
     let requestedPeer = null;
     let forwardedPayload = incoming;
     if (incoming.length >= 2 && incoming[0] === targetedEnvelopeMarker) {
@@ -468,6 +652,24 @@ server.on('connection', (socket, request) => {
       const key = `${roomId}:${runId}:${player}->${peer}`;
       const sequence = (forwardCounters.get(key) || 0) + 1;
       forwardCounters.set(key, sequence);
+      const looksLikeNetplayInput = forwardedPayload.length >= 6 &&
+        forwardedPayload[0] === 0x45 && forwardedPayload[2] === 0x4e &&
+        forwardedPayload[3] === 0x50 && forwardedPayload[5] === 1;
+      if (dropFirstInputPerEdge && looksLikeNetplayInput && !firstInputDropped.has(key)) {
+        firstInputDropped.add(key);
+        continue;
+      }
+      if (looksLikeNetplayInput && dropInputLatestFrom >= 0 && dropInputLatestTo >= dropInputLatestFrom &&
+          forwardedPayload.length >= 28) {
+        const latestFrame = forwardedPayload.readUInt32LE(24);
+        if (latestFrame >= dropInputLatestFrom && latestFrame <= dropInputLatestTo) {
+          const frameDropKey = `${key}:${latestFrame}`;
+          if (!inputLatestDropped.has(frameDropKey)) {
+            inputLatestDropped.add(frameDropKey);
+            continue;
+          }
+        }
+      }
       if (dropEvery > 0 && sequence % dropEvery === 0)
         continue;
       const spread = jitterMs > 0 ? ((sequence * 17) % (jitterMs * 2 + 1)) - jitterMs : 0;
@@ -494,7 +696,9 @@ server.on('connection', (socket, request) => {
 });
 
 server.on('listening', () => {
-  console.log(`TH07 LAN relay listening ws://${host}:${port} delay=${delayMs} jitter=${jitterMs} dropEvery=${dropEvery}`);
+  const dropRange = dropInputLatestFrom >= 0 && dropInputLatestTo >= dropInputLatestFrom
+    ? `${dropInputLatestFrom}-${dropInputLatestTo}` : 'off';
+  console.log(`TH07 LAN relay listening ws://${host}:${port} delay=${delayMs} jitter=${jitterMs} dropEvery=${dropEvery} dropFirstInput=${dropFirstInputPerEdge ? 1 : 0} dropInputLatest=${dropRange}`);
 });
 
 server.on('error', error => {

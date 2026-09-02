@@ -396,6 +396,7 @@ extern i32 g_teamWipeRetryFrames;
 
 u8 GetActivePlayerMask();
 i32 GetActivePlayerCount();
+void UpdateTeamWipeRetryCountdown();
 bool IsAnyActivePlayerBombing();
 bool VerifyThreePlayerLifeTransferSelectionRules();
 Player *GetClosestActivePlayer(ZunVec3 *position);

@@ -36,6 +36,9 @@ static char g_WebMidiPaths[32][256] = {};
 #include "dxutil.hpp"
 #include "graphics/ZunGraphics.hpp"
 #include "pbg4/Pbg4Archive.hpp"
+#ifdef TH_ENABLE_NETPLAY
+#include "netplay/NetplaySideEffects.hpp"
+#endif
 
 ControllerMapping g_ControllerMapping = {0, 1, 2, 4, -1, -1, -1, -1, 3};
 
@@ -1240,6 +1243,10 @@ i32 Supervisor::LoadAudio(i32 idx, const char *path)
 
 ZunResult Supervisor::PlayLoadedAudio(i32 idx)
 {
+#ifdef TH_ENABLE_NETPLAY
+    if (Netplay::SideEffects::IsSpeculative())
+        return ZUN_SUCCESS;
+#endif
 #ifdef __EMSCRIPTEN__
     if (IsWebOggMode() && idx >= 0 && idx < 32 && !HasWebOggForMidi(g_WebMidiPaths[idx]))
     {
@@ -1277,6 +1284,10 @@ ZunResult Supervisor::PlayLoadedAudio(i32 idx)
 
 ZunResult Supervisor::PlayAudio(const char *path)
 {
+#ifdef TH_ENABLE_NETPLAY
+    if (Netplay::SideEffects::IsSpeculative())
+        return ZUN_SUCCESS;
+#endif
     char local_10c[256];
     char *local_8;
 
@@ -1332,6 +1343,10 @@ ZunResult Supervisor::PlayAudio(const char *path)
 
 ZunResult Supervisor::StopAudio()
 {
+#ifdef TH_ENABLE_NETPLAY
+    if (Netplay::SideEffects::IsSpeculative())
+        return ZUN_SUCCESS;
+#endif
 #ifdef __EMSCRIPTEN__
     if (IsWebOggMode())
     {
@@ -1373,6 +1388,10 @@ ZunResult Supervisor::StopAudio()
 
 i32 Supervisor::FadeOutMusic(f32 musicFadeFrames)
 {
+#ifdef TH_ENABLE_NETPLAY
+    if (Netplay::SideEffects::IsSpeculative())
+        return 0;
+#endif
     f32 local_8;
 
 #ifdef __EMSCRIPTEN__

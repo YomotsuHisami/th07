@@ -1,4 +1,5 @@
 #include "FileSystem.hpp"
+#include "EaglerOptions.hpp"
 
 #include <cstdio>
 #include <limits>
@@ -215,7 +216,7 @@ std::string FileSystem::GetBasePath(const char *filename)
 std::string FileSystem::GetPrefPath(const char *filename)
 {
 #if defined(__EMSCRIPTEN__)
-    return std::string("/savesth07/") + filename;
+    return std::string(EaglerOptions::MultiplayerStorageEnabled() ? "/savesth07-multiplayer/" : "/savesth07/") + filename;
 #elif defined(TH_EXTERNAL_ASSETS)
     return GetBasePath(filename);
 #elif defined(__ANDROID__) || defined(__APPLE__)

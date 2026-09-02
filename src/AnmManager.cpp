@@ -694,6 +694,9 @@ void AnmManager::SetupVertexBuffer()
 
 ZunResult AnmManager::LoadTexture(i32 textureIdx, const char *texturePath, u32 colorKey)
 {
+    if (textureIdx < 0 || textureIdx >= static_cast<i32>(ARRAY_SIZE(this->imageDataArray)))
+        return ZUN_ERROR;
+
     u8 *srcData;
 
     ReleaseTexture(textureIdx);
@@ -747,6 +750,9 @@ ZunResult AnmManager::LoadTexture(i32 textureIdx, const char *texturePath, u32 c
 
 ZunResult AnmManager::LoadTextureEmbedded(u32 textureIdx, ZunImageInfoEmbedded *imageInfo)
 {
+    if (textureIdx >= ARRAY_SIZE(this->imageDataArray))
+        return ZUN_ERROR;
+
     SDL_Surface *surface;
 
     ReleaseTexture(textureIdx);
@@ -810,6 +816,9 @@ ZunResult AnmManager::LoadTextureEmbedded(u32 textureIdx, ZunImageInfoEmbedded *
 
 ZunResult AnmManager::LoadTextureAlphaChannel(i32 textureIdx, const char *texturePath)
 {
+    if (textureIdx < 0 || textureIdx >= static_cast<i32>(ARRAY_SIZE(this->imageDataArray)))
+        return ZUN_ERROR;
+
     u8 *data;
 
     u8 *basePixels = (u8 *)this->imageDataArray[textureIdx];
@@ -871,6 +880,9 @@ ZunResult AnmManager::LoadTextureAlphaChannel(i32 textureIdx, const char *textur
 
 ZunResult AnmManager::CreateEmptyTexture(i32 textureIdx, u32 width, u32 height)
 {
+    if (textureIdx < 0 || textureIdx >= static_cast<i32>(ARRAY_SIZE(this->imageDataArray)))
+        return ZUN_ERROR;
+
     ReleaseTexture(textureIdx);
     this->textures[textureIdx] = g_Supervisor.gfxDevice->CreateTexture();
 
@@ -971,7 +983,7 @@ i32 AnmManager::LoadAnm(i32 textureIdx, AnmRawEntry *rawEntry, i32 spriteIdxOffs
         g_GameErrorContext.Fatal("アニメが読み込めません。データが失われてるか壊れています\n");
         return ZUN_ERROR;
     }
-    if (textureIdx >= ANM_FILE_SLOT_COUNT)
+    if (textureIdx < 0 || textureIdx >= ANM_FILE_SLOT_COUNT)
     {
         g_GameErrorContext.Fatal("テクスチャ格納先が足りません\n");
         return ZUN_ERROR;
@@ -1243,7 +1255,7 @@ void AnmManager::ReleaseAnm(i32 anmIdx)
 
 void AnmManager::ReleaseTexture(i32 textureIdx)
 {
-    if (textureIdx < 0 || (u32)textureIdx >= 264)
+    if (textureIdx < 0 || textureIdx >= static_cast<i32>(ARRAY_SIZE(this->imageDataArray)))
     {
         return;
     }

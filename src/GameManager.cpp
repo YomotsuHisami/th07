@@ -669,6 +669,17 @@ ZunResult GameManager::AddedCallback(GameManager *arg)
                 break;
             }
         }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+        // Apply the 3P Cherry/Border scale exactly once at fresh-run setup.
+        // Player chains are recreated between stages, so doing this from a
+        // Player AddedCallback compounds CherryMax by 1.5 every stage.
+        // Replay playback restores the recorded per-stage Cherry state.
+        if (!g_GameManager.replay && MultiplayerGameplay::IsMultiplayer() &&
+            MultiplayerGameplay::GetPlayerCount() >= 3)
+        {
+            ApplyActivePlayerCountParameters(2, 3);
+        }
+#endif
         if (!g_GameManager.replay)
         {
             if (!arg->defaultCfg->slowMode)
@@ -863,7 +874,7 @@ ZunResult GameManager::DeletedCallback(GameManager *arg)
     g_Supervisor.StopAudio();
     if (g_Supervisor.cfg.musicMode == MUSIC_MIDI && g_Supervisor.midiOutput)
     {
-        g_Supervisor.midiOutput->PlayLoaded(30);
+        g_Supervisor.PlayLoadedAudio(30);
     }
     while (g_SoundPlayer.ProcessQueues())
         ;

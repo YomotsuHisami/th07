@@ -11,6 +11,7 @@
 #include <SDL3/SDL_surface.h>
 #include <SDL3_ttf/SDL_ttf.h>
 
+#include "AnmManager.hpp"
 #include "FileSystem.hpp"
 #include "GameErrorContext.hpp"
 #include "Localization.hpp"
@@ -555,7 +556,10 @@ bool TextHelper::CopyTextToTexture(i32 yPos, i32 spriteWidth, i32 spriteHeight, 
 
     SDL_StretchSurface(this->buffer, &srcRect, outSurface, &dstRect, SDL_SCALEMODE_LINEAR);
 
-    g_Supervisor.gfxDevice->BindTexture(outTexture);
+    // Keep AnmManager's texture cache synchronized with the real GPU binding.
+    // Boss/spell-name text uploads otherwise leave a different texture bound
+    // while the next player draw can incorrectly skip its cached rebind.
+    g_AnmManager->SetCurrentTexture(outTexture);
     g_Supervisor.gfxDevice->SetTextureSubImage(0, yPos, outSurface->w, fontWidth,
                                                outSurface->pixels);
     SDL_DestroySurface(outSurface);

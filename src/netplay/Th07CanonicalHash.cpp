@@ -70,7 +70,6 @@ void HashGlobals(Hasher &hash, const ZunGlobals &globals)
     hash.Scalar(globals.score);
     hash.Scalar(globals.guiScoreDifference);
     hash.Scalar(globals.highScore);
-    hash.Scalar(globals.highScoreNumContinues);
     hash.Scalar(globals.grazeInStage);
     hash.Scalar(globals.grazeInTotal);
     hash.Scalar(globals.spellCardsCaptured);
@@ -650,6 +649,7 @@ std::uint64_t MixComposite(const Sample &sample)
 {
     Hasher hash;
     hash.Scalar(sample.meta);
+    hash.Scalar(sample.multiplayer);
     hash.Scalar(sample.stage);
     hash.Scalar(sample.player);
     hash.Scalar(sample.enemies);
@@ -667,39 +667,81 @@ Sample Capture()
 {
     Sample sample;
 
-    Hasher meta;
-    meta.Scalar(g_Rng.seed);
-    meta.Scalar(g_Rng.seedBackup);
-    meta.Scalar(g_Rng.generationCount);
-    HashGameManager(meta);
+    Hasher rng;
+    rng.Scalar(g_Rng.seed);
+    rng.Scalar(g_Rng.seedBackup);
+    rng.Scalar(g_Rng.generationCount);
+    sample.metaRng = rng.value;
+
+    Hasher game;
+    HashGameManager(game);
     for (i32 value : g_GlobalEclVars.intVars)
-        meta.Scalar(value);
+        game.Scalar(value);
     for (f32 value : g_GlobalEclVars.floatVars)
-        meta.Scalar(value);
-    meta.Scalar(g_CurFrameRawInput);
+        game.Scalar(value);
+    sample.metaGame = game.value;
+
+    Hasher input;
+    input.Scalar(g_CurFrameRawInput);
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
     for (u16 value : g_CurFrameGameInputs)
-        meta.Scalar(value);
+        input.Scalar(value);
 #else
-    meta.Scalar(g_CurFrameGameInput);
+    input.Scalar(g_CurFrameGameInput);
 #endif
-    meta.Scalar(g_LastFrameRawInput);
+    input.Scalar(g_LastFrameRawInput);
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
     for (u16 value : g_LastFrameGameInputs)
-        meta.Scalar(value);
+        input.Scalar(value);
 #else
-    meta.Scalar(g_LastFrameGameInput);
+    input.Scalar(g_LastFrameGameInput);
 #endif
-    meta.Scalar(g_IsEighthFrameOfHeldInput);
-    meta.Scalar(g_NumOfFramesInputsWereHeld);
-    meta.Scalar(g_Supervisor.calcCount);
-    meta.Scalar(g_Supervisor.wantedState);
-    meta.Scalar(g_Supervisor.curState);
-    meta.Scalar(g_Supervisor.prevState);
-    meta.Scalar(g_Supervisor.isInEnding);
-    meta.Scalar(g_Supervisor.effectiveFramerateMultiplier);
-    meta.Scalar(g_Supervisor.flags);
+    input.Scalar(g_IsEighthFrameOfHeldInput);
+    input.Scalar(g_NumOfFramesInputsWereHeld);
+    sample.metaInput = input.value;
+
+    Hasher supervisor;
+    supervisor.Scalar(g_Supervisor.wantedState);
+    supervisor.Scalar(g_Supervisor.curState);
+    supervisor.Scalar(g_Supervisor.prevState);
+    supervisor.Scalar(g_Supervisor.isInEnding);
+    supervisor.Scalar(g_Supervisor.effectiveFramerateMultiplier);
+    supervisor.Scalar(g_Supervisor.flags);
+    sample.metaSupervisor = supervisor.value;
+
+    Hasher meta;
+    meta.Scalar(sample.metaRng);
+    meta.Scalar(sample.metaGame);
+    meta.Scalar(sample.metaInput);
+    meta.Scalar(sample.metaSupervisor);
     sample.meta = meta.value;
+
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    Hasher multiplayer;
+    for (bool active : g_PlayerActive)
+        multiplayer.Scalar(active);
+    for (const MultiplayerPlayerResources &resources : g_MultiplayerPlayerResources)
+    {
+        multiplayer.Scalar(resources.livesRemaining);
+        multiplayer.Scalar(resources.bombsRemaining);
+        multiplayer.Scalar(resources.currentPower);
+    }
+    for (const MultiplayerContributionStats &stats : g_MultiplayerContributionStats)
+    {
+        multiplayer.Scalar(stats.enemiesDefeated);
+        multiplayer.Scalar(stats.damageDealt);
+    }
+    for (i32 value : g_cherryMaxGrazeGrowth)
+        multiplayer.Scalar(value);
+    for (i32 value : g_cherryMaxBreakGrowth)
+        multiplayer.Scalar(value);
+    for (i32 value : g_powerGiveTaps)
+        multiplayer.Scalar(value);
+    for (i32 value : g_powerGiveWindow)
+        multiplayer.Scalar(value);
+    multiplayer.Scalar(g_teamWipeRetryFrames);
+    sample.multiplayer = multiplayer.value;
+#endif
 
     Hasher stage;
     HashStage(stage);
@@ -709,13 +751,23 @@ Sample Capture()
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
     for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
     {
-        player.Scalar(playerId);
-        player.Scalar(g_PlayerActive[playerId]);
+        Hasher individual;
+        individual.Scalar(playerId);
+        individual.Scalar(g_PlayerActive[playerId]);
         if (g_PlayerActive[playerId])
-            HashPlayer(player, g_Players[playerId]);
+            HashPlayer(individual, g_Players[playerId]);
+        if (playerId == 0)
+            sample.player0 = individual.value;
+        else if (playerId == 1)
+            sample.player1 = individual.value;
+        else if (playerId == 2)
+            sample.player2 = individual.value;
+
+        player.Scalar(individual.value);
     }
 #else
     HashPlayer(player, g_Player);
+    sample.player0 = player.value;
 #endif
     sample.player = player.value;
 

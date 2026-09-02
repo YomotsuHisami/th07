@@ -18,11 +18,10 @@ struct VertexDiffuseXyzrhw
     ZunColor diffuse;
 };
 
-// Multiplayer adds independent P2/P3 player and face blocks.  LoadAnms also
-// consumes consecutive child-file slots, so FACE3 cannot safely live at id 50
-// while the original table ends at 49.
+// Multiplayer reserves the top six CPU-backed texture/file slots for independent
+// P2/P3 player and face blocks. LoadAnms consumes consecutive face child slots.
 constexpr i32 ANM_SPRITE_SLOT_COUNT = 2816;
-constexpr i32 ANM_FILE_SLOT_COUNT = 56;
+constexpr i32 ANM_FILE_SLOT_COUNT = 256;
 
 struct VertexTex1DiffuseXyz
 {
@@ -281,6 +280,15 @@ struct AnmManager
     void SetTexture(GfxTextureHandle value)
     {
         this->currentTexture = value;
+    }
+
+    void SetCurrentTexture(GfxTextureHandle value)
+    {
+        if (this->currentTexture == value)
+            return;
+        this->Flush();
+        this->currentTexture = value;
+        g_Supervisor.gfxDevice->BindTexture(value);
     }
 
     void SetColorOp(u8 value)

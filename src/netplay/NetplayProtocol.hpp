@@ -20,6 +20,7 @@ enum class PacketType : std::uint8_t
 {
     Input = 1,
     Session = 2,
+    SpectatorFrame = 3,
 };
 
 enum class SessionPhase : std::uint8_t
@@ -50,6 +51,21 @@ struct FrameInput
 
     FrameInput() = default;
     FrameInput(std::uint16_t value) : buttons(value) {}
+};
+
+// Read-only stream emitted by P1 only after every gameplay peer has confirmed
+// the frame. Spectators never contribute a player slot or send this packet.
+struct SpectatorFramePacket
+{
+    std::uint64_t sessionId = 0;
+    std::uint32_t frame = INVALID_FRAME;
+    // Spectators do not participate in the player HELLO/READY gate, so every
+    // confirmed frame carries the deterministic gameplay contract explicitly.
+    // This occupies the existing reserved u32 in the wire header; packet size
+    // remains unchanged.
+    std::uint32_t gameplayAbi = 0;
+    std::uint8_t playerCount = 0;
+    std::array<FrameInput, MAX_PLAYERS> inputs{};
 };
 
 bool operator==(const FrameInput &left, const FrameInput &right);
@@ -101,4 +117,8 @@ bool EncodeInputPacket(const InputPacket &packet, std::vector<std::uint8_t> *out
 bool DecodeInputPacket(const std::uint8_t *data, std::size_t size, InputPacket *out);
 bool EncodeSessionPacket(const SessionPacket &packet, std::vector<std::uint8_t> *out);
 bool DecodeSessionPacket(const std::uint8_t *data, std::size_t size, SessionPacket *out);
+bool EncodeSpectatorFramePacket(const SpectatorFramePacket &packet,
+                                std::vector<std::uint8_t> *out);
+bool DecodeSpectatorFramePacket(const std::uint8_t *data, std::size_t size,
+                                SpectatorFramePacket *out);
 } // namespace Netplay

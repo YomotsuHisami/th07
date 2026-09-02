@@ -221,6 +221,46 @@ u32 ReplayManager::OnUpdateDemoHighPrio(ReplayManager *arg)
             std::min(g_GameManager.currentStage - 1, 6), arg->frameId,
             multiplayerInputs.data(), multiplayerInputs.size()))
     {
+#ifdef __EMSCRIPTEN__
+        if (EaglerOptions::ReplayViewerEnabled())
+        {
+            bool independentInputs = false;
+            for (u8 playerId = 1; playerId < MultiplayerGameplay::GetPlayerCount(); ++playerId)
+                independentInputs = independentInputs ||
+                                    multiplayerInputs[playerId] != multiplayerInputs[0];
+#ifdef TH_DEV_TOOLS
+            const int auditResult = ReplayExtension::DebugAuditMultiplayerPlaybackFrame(
+                std::min(g_GameManager.currentStage - 1, 6), arg->frameId,
+                multiplayerInputs.data(), MultiplayerGameplay::GetPlayerCount());
+#endif
+            EM_ASM({
+                globalThis.__eaglerNetplayReplayPlaybackObserved = true;
+                globalThis.__eaglerNetplayReplayPlaybackFrame = $0;
+                globalThis.__eaglerNetplayReplayPlaybackPlayerCount = $1;
+                globalThis.__eaglerNetplayReplayPlaybackIndependentInputs =
+                    !!globalThis.__eaglerNetplayReplayPlaybackIndependentInputs || !!$2;
+                globalThis.__eaglerNetplayReplayPlaybackInput0 = $3;
+                globalThis.__eaglerNetplayReplayPlaybackInput1 = $4;
+                globalThis.__eaglerNetplayReplayPlaybackInput2 = $5;
+                globalThis.__eaglerNetplayReplayPlaybackStage = $6;
+            }, arg->frameId, static_cast<int>(MultiplayerGameplay::GetPlayerCount()),
+               independentInputs ? 1 : 0,
+               static_cast<unsigned>(multiplayerInputs[0].buttons),
+               static_cast<unsigned>(multiplayerInputs[1].buttons),
+               static_cast<unsigned>(multiplayerInputs[2].buttons),
+               g_GameManager.currentStage);
+#ifdef TH_DEV_TOOLS
+            if (auditResult >= 0)
+            {
+                EM_ASM({
+                    globalThis.__eaglerNetplayReplayComparedFrames = $0;
+                    globalThis.__eaglerNetplayReplayInputMismatch = !!$1;
+                }, ReplayExtension::DebugComparedMultiplayerPlaybackFrames(),
+                   ReplayExtension::DebugMultiplayerPlaybackMismatch() ? 1 : 0);
+            }
+#endif
+        }
+#endif
 #ifdef TH_ENABLE_NETPLAY
         Netplay::Input::SetPlayerInputOverrides(multiplayerInputs.data(),
                                                 MultiplayerGameplay::GetPlayerCount());
@@ -235,6 +275,18 @@ u32 ReplayManager::OnUpdateDemoHighPrio(ReplayManager *arg)
     else
     {
         g_CurFrameGameInput = arg->replayInputs->frameNum;
+#ifdef __EMSCRIPTEN__
+        if (EaglerOptions::ReplayViewerEnabled())
+        {
+            EM_ASM({
+                globalThis.__eaglerOrdinaryReplayPlaybackObserved = true;
+                globalThis.__eaglerOrdinaryReplayPlaybackFrame = $0;
+                globalThis.__eaglerOrdinaryReplayPlaybackInput = $1;
+                globalThis.__eaglerOrdinaryReplayPlaybackStage = $2;
+            }, arg->frameId, static_cast<unsigned>(g_CurFrameGameInput),
+               g_GameManager.currentStage);
+        }
+#endif
         for (i32 playerId = 1; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
         {
             g_LastFrameGameInputs[playerId] = g_CurFrameGameInputs[playerId];
@@ -243,6 +295,18 @@ u32 ReplayManager::OnUpdateDemoHighPrio(ReplayManager *arg)
     }
 #else
     g_CurFrameGameInput = arg->replayInputs->frameNum;
+#ifdef __EMSCRIPTEN__
+    if (EaglerOptions::ReplayViewerEnabled())
+    {
+        EM_ASM({
+            globalThis.__eaglerOrdinaryReplayPlaybackObserved = true;
+            globalThis.__eaglerOrdinaryReplayPlaybackFrame = $0;
+            globalThis.__eaglerOrdinaryReplayPlaybackInput = $1;
+            globalThis.__eaglerOrdinaryReplayPlaybackStage = $2;
+        }, arg->frameId, static_cast<unsigned>(g_CurFrameGameInput),
+           g_GameManager.currentStage);
+    }
+#endif
 #endif
     arg->replayInputs = arg->replayInputs + 1;
     g_IsEighthFrameOfHeldInput = 0;
@@ -342,13 +406,33 @@ ZunResult ReplayManager::AddedCallback(ReplayManager *arg)
         ReplayExtension::MultiplayerReplayConfig config;
         config.playerCount = MultiplayerGameplay::GetPlayerCount();
         config.difficulty = static_cast<u8>(g_GameManager.difficulty);
-        config.gameplayAbi = 2;
+        config.localPlayer = MultiplayerGameplay::GetLocalPlayerSlot();
+        config.stage4BossChain = MultiplayerGameplay::IsStage4BossChainEnabled();
+        config.showContributionStats = MultiplayerGameplay::ShouldShowContributionStats();
+        config.showStagePlayerNames = MultiplayerGameplay::ShouldShowStagePlayerNames();
+        config.gameplayAbi = TH07_MULTI_GAMEPLAY_ABI;
         for (u8 playerId = 0; playerId < config.playerCount; ++playerId)
         {
             config.characters[playerId] = MultiplayerGameplay::GetPlayerCharacter(playerId);
             config.shots[playerId] = MultiplayerGameplay::GetPlayerShot(playerId);
         }
         ReplayExtension::BeginMultiplayerRecording(config);
+        ReplayExtension::MultiplayerPlayerResourceSnapshot resources[TH07_MULTI_MAX_PLAYERS]{};
+        for (u8 playerId = 0; playerId < config.playerCount; ++playerId)
+        {
+            resources[playerId].lives = GetPlayerLives(playerId);
+            resources[playerId].bombs = GetPlayerBombs(playerId);
+            resources[playerId].power = GetPlayerPower(playerId);
+        }
+        ReplayExtension::CaptureMultiplayerStageResources(i, resources, config.playerCount);
+        ReplayExtension::MultiplayerContributionSnapshot contributions[TH07_MULTI_MAX_PLAYERS]{};
+        for (u8 playerId = 0; playerId < config.playerCount; ++playerId)
+        {
+            contributions[playerId].enemiesDefeated = GetPlayerEnemiesDefeated(playerId);
+            contributions[playerId].damageDealt = GetPlayerDamageDealt(playerId);
+        }
+        ReplayExtension::CaptureMultiplayerStageContributions(
+            i, contributions, config.playerCount);
     }
 #endif
     arg->data->stageReplayData[i] = (StageReplayData *)malloc(sizeof(StageReplayData));
@@ -586,6 +670,37 @@ ZunResult ReplayManager::AddedCallbackDemo(ReplayManager *arg)
     g_GameManager.SetBombsRemainingAndComputeCsum(replayData->bombsRemaining);
     g_GameManager.SetCurrentPower(replayData->currentPower);
     g_GameManager.RegenerateGameIntegrityCsum();
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::IsMultiplayer() && ReplayExtension::MultiplayerPlaybackActive())
+    {
+        // Vanilla StageReplayData restores only P1.  Guest sidecars were
+        // already initialized by Player::RegisterChain before this callback,
+        // so direct Stage2+ MP Replay playback otherwise starts P2/P3 with
+        // default lives/bombs/power.  That changes whether a death enters
+        // Spirit, shifts the two RNG calls that choose Spirit drift, and makes
+        // the recorded 90-frame Focus revival input miss its original target.
+        for (u8 playerId = 0; playerId < MultiplayerGameplay::GetPlayerCount(); ++playerId)
+        {
+            ReplayExtension::MultiplayerPlayerResourceSnapshot resources;
+            if (!ReplayExtension::GetMultiplayerPlaybackStageResources(
+                    i, playerId, &resources))
+                continue;
+            SetPlayerLives(playerId, resources.lives);
+            SetPlayerBombs(playerId, resources.bombs);
+            SetPlayerPower(playerId, resources.power);
+
+            ReplayExtension::MultiplayerContributionSnapshot contributions;
+            if (ReplayExtension::GetMultiplayerPlaybackStageContributions(
+                    i, playerId, &contributions))
+            {
+                g_MultiplayerContributionStats[playerId].enemiesDefeated =
+                    contributions.enemiesDefeated;
+                g_MultiplayerContributionStats[playerId].damageDealt =
+                    contributions.damageDealt;
+            }
+        }
+    }
+#endif
     g_GameManager.globals->grazeInTotal = replayData->grazeInTotal;
     arg->replayInputs = replayData->replayInputs;
     g_GameManager.powerItemCountForScore = replayData->powerItemCountForScore;
@@ -886,7 +1001,18 @@ void ReplayManager::SaveReplay(const char *filename, char *replayName)
                     SDL_CloseIO(file);
                     PracticeRuntime::SaveReplayMetadata(actualFilename.c_str());
                     if (ReplayExtension::AppendRecording(actualFilename.c_str()))
+                    {
                         ReplayExtension::RemoveAlternateSave(actualFilename.c_str());
+#if defined(__EMSCRIPTEN__) && defined(TH_ENABLE_MULTIPLAYER_GAMEPLAY)
+                        EM_ASM({
+                            if (Module.eaglerOptions?.netplayMode !== "lan")
+                                return;
+                                globalThis.__eaglerNetplayReplaySaved = true;
+                                globalThis.__eaglerNetplayReplaySavedPath = UTF8ToString($0);
+                                globalThis.__eaglerNetplayReplaySavedStoragePath = UTF8ToString($1);
+                        }, actualFilename.c_str(), actualFilename.c_str());
+#endif
+                    }
                     Supervisor::DebugPrint("info : Size %d -> %d\n", replaySize,
                                            compressedSize + sizeof(ReplayHeader));
                     free(lpBuffer);

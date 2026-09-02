@@ -19,19 +19,20 @@
 #define ANM_FILE_LOADING 23
 #define ANM_FILE_STAGE_TEXT 24
 #define ANM_FILE_FACE 25
-#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-#define ANM_FILE_FACE2 40
-#define ANM_FILE_FACE3 50
-#endif
 #define ANM_FILE_FACE_STAGE 28
 #define ANM_FILE_TITLE 32
 #define ANM_FILE_RESULT 42
 #define ANM_FILE_MUSIC 46
-#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
-#define ANM_FILE_PLAYER2 47
-#define ANM_FILE_PLAYER3 48
-#endif
 #define ANM_FILE_STAFF 49
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+// Reserve the top six entries of the 256-entry CPU-backed texture/file range.
+// Localization patches commonly append files after the original slot range.
+// Player ANMs use one slot each; face ANMs use two consecutive slots.
+#define ANM_FILE_PLAYER2 250
+#define ANM_FILE_PLAYER3 251
+#define ANM_FILE_FACE2 252
+#define ANM_FILE_FACE3 254
+#endif
 
 #define ANM_OFFSET_ASCII 0x000
 #define ANM_OFFSET_CHERRY_DIGIT 0x003

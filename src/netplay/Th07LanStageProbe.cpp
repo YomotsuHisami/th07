@@ -15,18 +15,25 @@
 #include "Chain.hpp"
 #include "Controller.hpp"
 #include "EnemyManager.hpp"
+#include "FileSystem.hpp"
 #include "GameManager.hpp"
 #include "Gui.hpp"
 #include "ItemManager.hpp"
 #include "Player.hpp"
+#include "ReplayExtension.hpp"
 #include "ReplayManager.hpp"
 #include "Supervisor.hpp"
 #include "Touch.hpp"
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+#include "multiplayer/GameplaySession.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
+#include <filesystem>
 #include <vector>
 
 #ifdef __EMSCRIPTEN__
@@ -39,10 +46,10 @@ namespace
 {
 constexpr std::uint64_t SESSION_ID = 0x5448374c414e5331ull; // TH7LANS1
 constexpr std::uint32_t GAME_ID_TH07 = 7;
-// ABI 2 adds room-selected difficulty/EX/PH startup and keeps the shared
-// Ending scene inside the confirmed-input session. Refuse an ABI-1 peer
-// instead of letting old and new runtimes simulate different scene routes.
-constexpr std::uint32_t GAMEPLAY_ABI = 2;
+// ABI 3 fixes 3P CherryMax scaling so the 1.5x range is applied once per
+// fresh run instead of once per stage-local Player chain reconstruction.
+// Refuse older live peers because they simulate different Cherry economics.
+constexpr std::uint32_t GAMEPLAY_ABI = TH07_MULTI_GAMEPLAY_ABI;
 constexpr std::uint32_t DEFAULT_TEST_FRAMES = 300;
 
 WebSocketTransport g_Transport;
@@ -66,13 +73,24 @@ std::uint32_t g_SentPackets = 0;
 std::uint32_t g_ReceivedPackets = 0;
 std::uint32_t g_SessionPacketsSent = 0;
 std::uint32_t g_SessionPacketsReceived = 0;
+std::uint32_t g_LastHelloSendTick = 0;
+std::uint32_t g_LastReadySendTick = 0;
 std::uint32_t g_PredictedFrames = 0;
 std::uint32_t g_RollbackCount = 0;
 std::uint32_t g_ResimulatedFrames = 0;
 std::uint32_t g_MaxRollbackSpan = 0;
 std::size_t g_MaxSnapshotBytes = 0;
+
+struct ReplayFrameBinding
+{
+    std::uint32_t simFrame = INVALID_FRAME;
+    i32 stage = -1;
+    i32 replayFrame = -1;
+};
+std::array<ReplayFrameBinding, INPUT_HISTORY_SIZE> g_ReplayFrameBindings{};
 std::array<std::uint32_t, MAX_PLAYERS> g_LastConfirmedFrame{};
 std::array<std::uint64_t, MAX_PLAYERS> g_LastConfirmedAdvanceMs{};
+std::array<bool, MAX_PLAYERS> g_RemoteTimeoutArmed{};
 bool g_IndependentInputSlotsObserved = false;
 std::uint8_t g_InputSlotObservedMask = 0;
 bool g_PhysicalInputObserved = false;
@@ -86,6 +104,13 @@ bool g_StageTransitionObserved = false;
 bool g_StageTransitionInputResetObserved = false;
 bool g_PostTransitionInputObserved = false;
 bool g_EndingSkipHistoryNormalized = false;
+bool g_ReplayPlaybackCycleDispatched = false;
+std::uint32_t g_NextReplayAuditFrame = 0;
+bool g_SpectatorMode = false;
+bool g_SpectatorRunRetired = false;
+std::uint32_t g_NextSpectatorPublishFrame = 0;
+std::uint32_t g_NextSpectatorReceiveFrame = 0;
+std::deque<SpectatorFramePacket> g_SpectatorFrames;
 std::uint32_t g_PeakEnemies = 0;
 std::uint32_t g_PeakBullets = 0;
 std::uint32_t g_PeakLasers = 0;
@@ -106,7 +131,9 @@ double g_RecommendedLead = 0.0;
 double g_SimulationIntervalScale = 1.0;
 
 bool UsePhysicalInput();
+bool UseReplayPlaybackCycle();
 bool UsePauseCycle();
+bool UseRestartCycle();
 bool UseStageTransitionTest();
 bool ProbeMode();
 bool ProductionLanMode();
@@ -124,10 +151,53 @@ std::uint64_t CurrentSessionId()
             0x9e3779b97f4a7c15ull);
 }
 
+bool UseRestartCycle()
+{
+#ifdef __EMSCRIPTEN__
+    return EM_ASM_INT({ return Module.eaglerOptions?.netplayRestartCycle ? 1 : 0; }) != 0;
+#else
+    return false;
+#endif
+}
+
+bool UseReplayPlaybackCycle()
+{
+#ifdef __EMSCRIPTEN__
+    return EM_ASM_INT({
+        return Module.eaglerOptions?.netplayReplayPlaybackCycle ? 1 : 0;
+    }) != 0;
+#else
+    return false;
+#endif
+}
+
+bool DetailedCanonicalTelemetry()
+{
+#ifdef __EMSCRIPTEN__
+    if (ProbeMode())
+        return true;
+    return EM_ASM_INT({ return Module.eaglerOptions?.netplayScriptedInput ? 1 : 0; }) != 0;
+#else
+    return false;
+#endif
+}
+
 void RetireGameplaySession()
 {
     ClearTransientModes();
     Th07Rollback::Clear();
+    if (g_SpectatorMode)
+    {
+        // Spectator admission is scoped to the current relay run. A later
+        // room start gets a new startSerial and a fresh Runtime from the
+        // Launcher, so never reuse this old read-only socket for generation 1.
+        g_SpectatorRunRetired = true;
+        if (ProductionLanMode() && g_ProductionTransportStarted)
+        {
+            g_BrowserPeerTransport.Close();
+            g_ProductionTransportStarted = false;
+        }
+    }
     g_Initialized = false;
     g_Active = false;
     g_Done = false;
@@ -135,6 +205,8 @@ void RetireGameplaySession()
     g_DriverTicks = 0;
     g_Sequence = 1;
     g_LastReceivedSequence = 0;
+    g_LastHelloSendTick = 0;
+    g_LastReadySendTick = 0;
     ++g_SessionGeneration;
 #ifdef __EMSCRIPTEN__
     if (ProductionLanMode())
@@ -142,7 +214,8 @@ void RetireGameplaySession()
         EM_ASM({
             globalThis.__eaglerNetplayLanActive = false;
             globalThis.__eaglerNetplayLanFrame = 0;
-        });
+            globalThis.__eaglerNetplayLanGeneration = $0;
+        }, g_SessionGeneration);
     }
 #endif
 }
@@ -152,6 +225,29 @@ bool TransportConnect(const char *url)
     if (ProductionLanMode())
         return g_BrowserPeerTransport.Connect(url, g_LocalPlayer, g_PlayerCount);
     return g_Transport.Connect(url);
+}
+
+bool ReadSpectatorId(char *out, std::size_t capacity)
+{
+#ifdef __EMSCRIPTEN__
+    if (!out || capacity == 0)
+        return false;
+    EM_ASM({ stringToUTF8(Module.eaglerOptions?.netplaySpectatorId || "", $0, $1); }, out, capacity);
+    return out[0] != '\0';
+#else
+    (void)out; (void)capacity;
+    return false;
+#endif
+}
+
+bool SpectatorModeRequested()
+{
+#ifdef __EMSCRIPTEN__
+    return ProductionLanMode() &&
+           EM_ASM_INT({ return Module.eaglerOptions?.netplaySpectator ? 1 : 0; }) != 0;
+#else
+    return false;
+#endif
 }
 
 bool TransportIsOpen()
@@ -321,6 +417,92 @@ std::uint32_t ConfirmedThroughAllRemotes()
     return found ? confirmed : INVALID_FRAME;
 }
 
+bool CaptureConfirmedReplayAuditFrames()
+{
+#if defined(TH_DEV_TOOLS) && defined(TH_ENABLE_MULTIPLAYER_GAMEPLAY)
+    if (!UseReplayPlaybackCycle() || g_SimFrame == 0)
+        return true;
+    const std::uint32_t confirmed = ConfirmedThroughAllRemotes();
+    const std::uint32_t lastSimulated = g_SimFrame - 1;
+    const std::uint32_t lastAvailable = std::min(confirmed, lastSimulated);
+    while (g_NextReplayAuditFrame <= lastAvailable)
+    {
+        const ReplayFrameBinding &binding =
+            g_ReplayFrameBindings[g_NextReplayAuditFrame % g_ReplayFrameBindings.size()];
+        const FrameDecision authoritative = g_Core.PrepareFrame(g_NextReplayAuditFrame);
+        if (binding.simFrame != g_NextReplayAuditFrame || binding.stage < 0 ||
+            binding.replayFrame < 0 || !authoritative.canAdvance ||
+            authoritative.predictedMask != 0)
+            return false;
+        ReplayExtension::DebugExpectMultiplayerPlaybackFrame(
+            binding.stage, binding.replayFrame,
+            authoritative.inputs.data(), g_PlayerCount);
+        ++g_NextReplayAuditFrame;
+    }
+#endif
+    return true;
+}
+
+void PublishConfirmedSpectatorFrames()
+{
+    const bool hasSpectators = g_BrowserPeerTransport.HasSpectators();
+#ifdef __EMSCRIPTEN__
+    if (ProductionLanMode())
+        EM_ASM({
+            const state = globalThis.__eaglerNetplaySpectatorPublish = {};
+            state.hasSpectators = !!$0;
+            state.cursor = $1 >>> 0;
+            state.simFrame = $2 >>> 0;
+            state.confirmed = $3 >>> 0;
+        }, hasSpectators ? 1 : 0, g_NextSpectatorPublishFrame, g_SimFrame,
+            ConfirmedThroughAllRemotes());
+#endif
+    if (g_SpectatorMode || g_LocalPlayer != 0 || g_SimFrame == 0)
+        return;
+    const std::uint32_t lastAvailable =
+        std::min(ConfirmedThroughAllRemotes(), g_SimFrame - 1);
+    while (g_NextSpectatorPublishFrame <= lastAvailable)
+    {
+        const FrameDecision decision = g_Core.PrepareFrame(g_NextSpectatorPublishFrame);
+        if (!decision.canAdvance || decision.predictedMask != 0)
+            return;
+        SpectatorFramePacket packet;
+        packet.sessionId = CurrentSessionId();
+        packet.frame = g_NextSpectatorPublishFrame;
+        packet.gameplayAbi = GAMEPLAY_ABI;
+        packet.playerCount = g_PlayerCount;
+        packet.inputs = decision.inputs;
+        std::vector<std::uint8_t> wire;
+        if (!EncodeSpectatorFramePacket(packet, &wire) ||
+            !g_BrowserPeerTransport.SendSpectator(wire.data(), wire.size()))
+        {
+#ifdef __EMSCRIPTEN__
+            EM_ASM({ globalThis.__eaglerNetplaySpectatorPublishFailed = $0 >>> 0; },
+                   g_NextSpectatorPublishFrame);
+#endif
+            return;
+        }
+        ++g_NextSpectatorPublishFrame;
+    }
+}
+
+bool DrainSpectatorFrames()
+{
+    std::vector<std::uint8_t> wire;
+    while (TransportPoll(&wire))
+    {
+        SpectatorFramePacket packet;
+        if (!DecodeSpectatorFramePacket(wire.data(), wire.size(), &packet) ||
+            packet.sessionId != CurrentSessionId() || packet.gameplayAbi != GAMEPLAY_ABI ||
+            packet.playerCount != g_PlayerCount ||
+            packet.frame != g_NextSpectatorReceiveFrame)
+            return false;
+        g_SpectatorFrames.push_back(packet);
+        ++g_NextSpectatorReceiveFrame;
+    }
+    return true;
+}
+
 void PublishPeerDiagnostics(std::uint8_t predictedMask)
 {
 #ifdef __EMSCRIPTEN__
@@ -389,8 +571,38 @@ std::uint32_t ReadTestFrames()
 
 FrameInput CaptureLocalInput(std::uint32_t frame)
 {
-    if (!UsePhysicalInput())
+    // Deterministic restart smoke uses the real production BrowserPeerTransport
+    // but scripted gameplay/menu edges so both browser instances exercise the
+    // same Pause -> Reset lifecycle without host-window focus races.
+    if (UseRestartCycle())
         return FrameInput(LocalScript(g_LocalPlayer, frame));
+    if (!UsePhysicalInput())
+    {
+        FrameInput input(LocalScript(g_LocalPlayer, frame));
+        if (UseReplayPlaybackCycle())
+        {
+            // Match TH06's hidden Replay profile and cover the complete input
+            // record while keeping Stage 1 movement deliberately small.
+            const std::uint32_t phase = (frame / 20u + g_LocalPlayer) % 3u;
+            if (phase == 1u)
+            {
+                input.analogMode = AnalogMode::Joystick;
+                input.x = g_LocalPlayer == 0 ? 0.25f : -0.25f;
+                input.y = (frame & 1u) != 0 ? 0.125f : -0.125f;
+                input.touchUsed = true;
+            }
+            else if (phase == 2u)
+            {
+                input.analogMode = AnalogMode::DirectTouch;
+                input.x = g_LocalPlayer == 0 ? 0.5f : -0.5f;
+                input.y = (frame & 1u) != 0 ? 0.25f : -0.25f;
+                input.unlimited = ((frame / 20u) & 1u) != 0;
+                input.touchUsed = true;
+            }
+            input.touchBomb = frame == 173u + g_LocalPlayer;
+        }
+        return input;
+    }
 
     // Sample the local browser/controller exactly once when this logical
     // frame is first scheduled. The simulation pass below replays a
@@ -424,6 +636,8 @@ std::uint16_t CombinedButtons(const FrameDecision &decision)
 bool UsePhysicalInput()
 {
 #ifdef __EMSCRIPTEN__
+    if (EM_ASM_INT({ return Module.eaglerOptions?.netplayScriptedInput ? 1 : 0; }) != 0)
+        return false;
     return ProductionLanMode() ||
            EM_ASM_INT({ return Module.eaglerOptions?.netplayPhysicalInput ? 1 : 0; }) != 0;
 #else
@@ -450,6 +664,16 @@ bool EligibleForInitialNetplayStart()
            validInitialStage && g_GameManager.globals != nullptr &&
            g_GameManager.defaultCfg != nullptr && g_ReplayManager != nullptr &&
            g_Supervisor.curState == 2 && g_Supervisor.wantedState == g_Supervisor.curState;
+}
+
+bool InitialNetplayBootstrapInProgress()
+{
+    const int stage = g_GameManager.currentStage;
+    const bool validInitialStage = stage == 1 || stage == 7 || stage == 8;
+    const bool gameplayScene =
+        (g_Supervisor.curState == 2 || g_Supervisor.curState == 3) &&
+        (g_Supervisor.wantedState == 2 || g_Supervisor.wantedState == 3);
+    return !g_GameManager.replay && validInitialStage && gameplayScene;
 }
 
 bool SessionStillOwnsStageState()
@@ -523,13 +747,24 @@ bool RemoteInputsTimedOut()
         if (player == g_LocalPlayer)
             continue;
         const std::uint32_t confirmed = g_Core.ConfirmedThrough(player);
+        if (!g_Session.CanStart())
+        {
+            g_RemoteTimeoutArmed[player] = false;
+            continue;
+        }
+        if (!g_RemoteTimeoutArmed[player])
+        {
+            g_RemoteTimeoutArmed[player] = true;
+            g_LastConfirmedFrame[player] = confirmed;
+            g_LastConfirmedAdvanceMs[player] = now;
+            continue;
+        }
         if (confirmed != g_LastConfirmedFrame[player])
         {
             g_LastConfirmedFrame[player] = confirmed;
             g_LastConfirmedAdvanceMs[player] = now;
         }
-        else if (g_Session.CanStart() &&
-                 now - g_LastConfirmedAdvanceMs[player] >= timeoutMs)
+        else if (now - g_LastConfirmedAdvanceMs[player] >= timeoutMs)
         {
             std::printf(
                 "netplay lan stage: ERROR remote input timeout player=%u confirmed=%u sim=%u\n",
@@ -574,10 +809,17 @@ bool StartProductionTransportEarly()
     // still presenting frames; waiting until the first Stage 1 deterministic
     // tick can freeze the frame-zero gate before HELLO has a transport.
     g_PlayerCount = ReadPlayerCount();
-    g_LocalPlayer = ReadPlayer();
+    g_SpectatorMode = SpectatorModeRequested();
+    g_LocalPlayer = g_SpectatorMode ? 0 : ReadPlayer();
     char url[512] = {};
-    if (g_LocalPlayer >= g_PlayerCount || !ReadUrl(url, sizeof(url)) ||
-        !TransportConnect(url))
+    char spectatorId[65] = {};
+    if (g_LocalPlayer >= g_PlayerCount || !ReadUrl(url, sizeof(url)))
+        return false;
+    const bool connected = g_SpectatorMode
+        ? ReadSpectatorId(spectatorId, sizeof(spectatorId)) &&
+          g_BrowserPeerTransport.ConnectSpectator(url, spectatorId, g_PlayerCount)
+        : TransportConnect(url);
+    if (!connected)
         return false;
     g_ProductionTransportStarted = true;
     std::printf("netplay lan stage: PRECONNECT player=%u players=%u url=%s\n",
@@ -588,6 +830,20 @@ bool StartProductionTransportEarly()
 
 std::uint16_t LocalScript(std::uint8_t player, std::uint32_t frame)
 {
+    if (UseRestartCycle() && g_SessionGeneration == 0 && frame >= 600 && frame <= 660)
+    {
+        // Exact vanilla Pause -> Reset path.  P1 opens Pause at frame 600 and
+        // hits the dedicated Reset edge after the menu is live.  The resulting
+        // Supervisor state 10 must retire this rollback session, rebuild the
+        // GameManager, then synchronize a fresh generation from frame zero.
+        if (player != 0)
+            return 0;
+        if (frame == 600)
+            return TH_BUTTON_MENU;
+        if (frame == 620)
+            return TH_BUTTON_RESET;
+        return 0;
+    }
     if (UsePauseCycle() && frame >= 600 && frame <= 700)
     {
         // Exercise the exact shared pause path without gameplay buttons
@@ -672,6 +928,15 @@ void Fail(const char *reason)
         return;
     ClearTransientModes();
     g_Done = true;
+#ifdef __EMSCRIPTEN__
+    if (ProductionLanMode())
+    {
+        EM_ASM({
+            globalThis.__eaglerNetplayFailed = true;
+            globalThis.__eaglerNetplayError = UTF8ToString($0);
+        }, reason);
+    }
+#endif
     std::printf(
         "netplay lan stage: FAIL player=%u reason=%s sim=%u sent=%u recv=%u rollback=%u resim=%u predicted=%u confirmed=%u buffered=%llu error=%s\n",
         static_cast<unsigned>(g_LocalPlayer), reason, g_SimFrame, g_SentPackets,
@@ -684,7 +949,8 @@ void Fail(const char *reason)
 bool Initialize()
 {
     g_PlayerCount = ReadPlayerCount();
-    g_LocalPlayer = ReadPlayer();
+    g_SpectatorMode = SpectatorModeRequested();
+    g_LocalPlayer = g_SpectatorMode ? 0 : ReadPlayer();
     g_TestFrames = ProbeMode() ? ReadTestFrames() : 0xffffffffu;
     char url[512] = {};
     if (g_LocalPlayer >= g_PlayerCount || !ReadUrl(url, sizeof(url)))
@@ -700,8 +966,26 @@ bool Initialize()
         TH_BUTTON_DIRECTION | TH_BUTTON_FOCUS | TH_BUTTON_SHOOT | TH_BUTTON_SKIP;
     coreConfig.directionButtons = TH_BUTTON_DIRECTION;
     coreConfig.maxDirectionPredictionFrames = 3;
-    if (!g_Core.Reset(coreConfig))
+    if (!g_SpectatorMode && !g_Core.Reset(coreConfig))
         return false;
+
+    // Title/stage bootstrap is allowed to run before the rollback driver owns
+    // frame zero, and different browsers can spend a different number of
+    // outer ticks there. None of that machine-local input-repeat history is
+    // part of the synchronized game timeline. Establish one common baseline
+    // before scheduling the first real FrameInput.
+    g_CurFrameRawInput = 0;
+    g_LastFrameRawInput = 0;
+    g_IsEighthFrameOfHeldInput = 0;
+    g_NumOfFramesInputsWereHeld = 0;
+    g_Supervisor.calcCount = 0;
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    for (u8 playerId = 0; playerId < TH07_MULTI_MAX_PLAYERS; ++playerId)
+    {
+        g_CurFrameGameInputs[playerId] = 0;
+        g_LastFrameGameInputs[playerId] = 0;
+    }
+#endif
 
     Th07Rollback::Config stateConfig;
     stateConfig.maxFrames = 16;
@@ -739,13 +1023,22 @@ bool Initialize()
     sessionConfig.gameId = GAME_ID_TH07;
     sessionConfig.playerCount = g_PlayerCount;
     sessionConfig.localPlayer = g_LocalPlayer;
-    if (!g_Session.Reset(sessionConfig) ||
-        (!g_ProductionTransportStarted && !TransportConnect(url)))
+    if (g_SpectatorMode)
+    {
+        char spectatorId[65] = {};
+        if (!g_ProductionTransportStarted &&
+            (!ReadSpectatorId(spectatorId, sizeof(spectatorId)) ||
+             !g_BrowserPeerTransport.ConnectSpectator(url, spectatorId, g_PlayerCount)))
+            return false;
+    }
+    else if (!g_Session.Reset(sessionConfig) ||
+             (!g_ProductionTransportStarted && !TransportConnect(url)))
         return false;
     g_ProductionTransportStarted = true;
 
     g_LastConfirmedFrame.fill(INVALID_FRAME);
     g_LastRemoteSenderFrame.fill(INVALID_FRAME);
+    g_RemoteTimeoutArmed.fill(false);
     for (PeerTimeSyncState &state : g_PeerTimeSync)
         state = PeerTimeSyncState{};
     g_PredictionDepth.fill(0);
@@ -753,6 +1046,15 @@ bool Initialize()
     g_RecommendedLead = 0.0;
     g_SimulationIntervalScale = 1.0;
     g_EndingSkipHistoryNormalized = false;
+    g_ReplayPlaybackCycleDispatched = false;
+    g_NextReplayAuditFrame = 0;
+    g_NextSpectatorPublishFrame = 0;
+    g_NextSpectatorReceiveFrame = 0;
+    g_SpectatorFrames.clear();
+#ifdef TH_DEV_TOOLS
+    if (UseReplayPlaybackCycle())
+        ReplayExtension::DebugResetMultiplayerPlaybackAudit();
+#endif
     g_LastConfirmedAdvanceMs.fill(SDL_GetTicks());
 
     g_Active = true;
@@ -760,19 +1062,24 @@ bool Initialize()
     if (ProductionLanMode())
     {
         EM_ASM({
+            globalThis.__eaglerNetplayRuntimeBuild = "th07mp-20260829-anmfix1";
+            globalThis.__eaglerNetplayFailed = false;
+            globalThis.__eaglerNetplayError = "";
             globalThis.__eaglerNetplayLanActive = true;
             globalThis.__eaglerNetplayLanFrame = 0;
+            globalThis.__eaglerNetplayLanGeneration = $0;
             globalThis.__eaglerNetplayLanHash = "";
             globalThis.__eaglerNetplayLanHashes = Object.create(null);
             globalThis.__eaglerNetplayLanPeerAdvantages = [];
             globalThis.__eaglerNetplayLanPeers = [];
-        });
+        }, g_SessionGeneration);
     }
 #endif
-    std::printf("netplay lan stage: CONNECT player=%u players=%u url=%s seed=%u generation=%u\n",
+    std::printf("netplay lan stage: CONNECT player=%u players=%u url=%s seed=%u rngGeneration=%u sessionGeneration=%u\n",
                 static_cast<unsigned>(g_LocalPlayer), static_cast<unsigned>(g_PlayerCount), url,
                 static_cast<unsigned>(g_Rng.seed),
-                static_cast<unsigned>(g_Rng.generationCount));
+                static_cast<unsigned>(g_Rng.generationCount),
+                static_cast<unsigned>(g_SessionGeneration));
     return true;
 }
 
@@ -826,30 +1133,44 @@ bool SendSessionControl(bool forceReady = false)
     if (!TransportIsOpen() || (g_Session.CanStart() && !forceReady))
         return true;
 
-    const auto sendPhase = [](SessionPhase phase) {
+    // The RTC control DataChannel is reliable and ordered. Re-sending the
+    // same HELLO/READY on every driver tick only creates a large backlog when
+    // one browser is temporarily busy rebuilding GameManager during Restart.
+    // Keep a conservative 250 ms retry cadence for loss/reconnect tolerance;
+    // phase changes still send immediately because HELLO and READY track
+    // separate clocks.
+    constexpr std::uint32_t SESSION_RETRY_TICKS = 15;
+    const auto due = [](std::uint32_t lastTick) {
+        return lastTick == 0 || g_DriverTicks - lastTick >= SESSION_RETRY_TICKS;
+    };
+
+    const auto sendPhase = [&](SessionPhase phase, std::uint32_t *lastTick) {
+        if (!due(*lastTick))
+            return true;
         const SessionPacket packet = g_Session.BuildPacket(phase);
         std::vector<std::uint8_t> wire;
         if (!EncodeSessionPacket(packet, &wire) ||
             !TransportSend(wire.data(), wire.size(), true))
             return false;
+        *lastTick = g_DriverTicks;
         ++g_SessionPacketsSent;
         return true;
     };
 
     if (forceReady)
-        return sendPhase(SessionPhase::Ready);
+        return sendPhase(SessionPhase::Ready, &g_LastReadySendTick);
     if (!g_Session.CanSendReady())
-        return sendPhase(SessionPhase::Hello);
+        return sendPhase(SessionPhase::Hello, &g_LastHelloSendTick);
 
     // A slower peer can receive our HELLO before its own Stage 1 gate starts.
     // Its first packet would then be READY, which the earlier peer must reject
     // until it has seen that slower peer's HELLO. Keep HELLO retransmission in
     // the READY phase so asymmetric loading can always complete the ordered
     // session contract, then send READY on the reliable control channel.
-    if (!sendPhase(SessionPhase::Hello))
+    if (!sendPhase(SessionPhase::Hello, &g_LastHelloSendTick))
         return false;
     g_Session.MarkLocalReady();
-    return sendPhase(SessionPhase::Ready);
+    return sendPhase(SessionPhase::Ready, &g_LastReadySendTick);
 }
 
 bool SendScheduledLocalFrame(std::uint32_t frame);
@@ -936,9 +1257,30 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
             static_cast<unsigned>(decision.inputs[1].buttons),
             static_cast<unsigned>(decision.inputs[2].buttons), resimulation ? 1 : 0);
     }
+    ReplayFrameBinding replayBinding{};
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (MultiplayerGameplay::IsMultiplayer() && !g_GameManager.replay && g_ReplayManager)
+    {
+        ReplayFrameBinding &slot = g_ReplayFrameBindings[frame % g_ReplayFrameBindings.size()];
+        if (!resimulation)
+        {
+            // Netplay frame numbers span the whole rollback session while the
+            // vanilla ReplayManager frameId restarts at zero for each stage.
+            // Remember that mapping on the original forward pass so a later
+            // rollback can overwrite the exact EAGX frame with corrected
+            // remote input without rewinding committed replay cursors.
+            slot.simFrame = frame;
+            slot.stage = std::clamp(g_GameManager.currentStage - 1, 0, 6);
+            slot.replayFrame = g_ReplayManager->frameId;
+        }
+        if (slot.simFrame == frame)
+            replayBinding = slot;
+    }
+#endif
     NormalizeMultiplayerEndingSkipHistory();
-    if (!Th07Rollback::BeginFrame(frame))
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+    const bool captureRollback = !g_SpectatorMode;
+    if (captureRollback && !Th07Rollback::BeginFrame(frame))
+        return -1;
     SideEffects::SetSpeculative(resimulation);
     // Legacy/global raw-input owners still need one deterministic word. Use
     // the synchronized union on every peer while Player consumes its own
@@ -949,6 +1291,30 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
     const std::uint8_t stageBeforeCalc =
         static_cast<std::uint8_t>(g_GameManager.currentStage);
     const int result = g_Chain.RunCalcChain();
+    UpdateTeamWipeRetryCountdown();
+#ifdef __EMSCRIPTEN__
+    if (ProductionLanMode() && !resimulation &&
+        (frame == 0u || ((frame + 1u) % 15u) == 0u))
+    {
+        EM_ASM({
+            globalThis.__eaglerNetplayTeamWipeTimer = $0;
+            const playerStates = globalThis.__eaglerNetplayPlayerStates ||= new Array(3);
+            playerStates[0] = $1;
+            playerStates[1] = $2;
+            playerStates[2] = $3;
+            const pauseState = globalThis.__eaglerNetplayPauseState ||= new Array(3);
+            pauseState[0] = $4;
+            pauseState[1] = $5;
+            pauseState[2] = $6;
+        }, g_teamWipeRetryFrames,
+           static_cast<int>(g_Players[0].playerState),
+           static_cast<int>(g_Players[1].playerState),
+           static_cast<int>(g_Players[2].playerState),
+           g_GameManager.isPaused ? 1 : 0,
+           g_GameManager.isInPauseMenu ? 1 : 0,
+           g_GameManager.isTimeStopped ? 1 : 0);
+    }
+#endif
     const bool stageChangedDuringCalc =
         static_cast<std::uint8_t>(g_GameManager.currentStage) != stageBeforeCalc;
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
@@ -1010,7 +1376,7 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
                 g_AsciiManager.pauseMenu.curState,
                 resimulation ? 1 : 0);
             Fail("per-player input slot mismatch");
-            return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+            return -1;
         }
         if (decision.inputs[player].buttons != 0 ||
             decision.inputs[player].analogMode != AnalogMode::None)
@@ -1060,9 +1426,26 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
             g_Players[0].playerState, g_Players[1].playerState, g_Players[2].playerState,
             GetPlayerLives(0), GetPlayerLives(1), GetPlayerLives(2));
     }
-    if (!Th07Rollback::EndFrame() || !g_Core.MarkSimulated(frame, decision))
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
-    g_MaxSnapshotBytes = std::max(g_MaxSnapshotBytes, Th07Rollback::CapturedBytes(frame));
+    if (captureRollback)
+    {
+        if (!Th07Rollback::EndFrame() || !g_Core.MarkSimulated(frame, decision))
+            return -1;
+    }
+#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
+    if (replayBinding.simFrame == frame && replayBinding.stage >= 0 &&
+        replayBinding.replayFrame >= 0)
+    {
+        // The first forward pass may contain predicted remote input.  EAGX is
+        // indexed by replay frame, so rewriting the same slot here makes every
+        // rollback resimulation replace that prediction with the final
+        // decision that actually produced the surviving game state.
+        ReplayExtension::RecordMultiplayerFrame(
+            replayBinding.stage, replayBinding.replayFrame,
+            decision.inputs.data(), g_PlayerCount);
+    }
+#endif
+    if (captureRollback)
+        g_MaxSnapshotBytes = std::max(g_MaxSnapshotBytes, Th07Rollback::CapturedBytes(frame));
 #ifdef __EMSCRIPTEN__
     if (ProductionLanMode() && ((frame + 1u) % 300u) == 0u)
     {
@@ -1077,6 +1460,63 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
             globalThis.__eaglerNetplayLanHash = hash;
             globalThis.__eaglerNetplayLanHashes[String($1)] = hash;
         }, total, frame + 1u);
+        if (DetailedCanonicalTelemetry())
+        {
+            char meta[17], multiplayer[17], stage[17], player[17];
+            char metaRng[17], metaGame[17], metaInput[17], metaSupervisor[17];
+            char enemies[17], bullets[17], items[17];
+            char player0[17], player1[17], player2[17];
+            HashToHex(sample.meta, meta);
+            HashToHex(sample.metaRng, metaRng);
+            HashToHex(sample.metaGame, metaGame);
+            HashToHex(sample.metaInput, metaInput);
+            HashToHex(sample.metaSupervisor, metaSupervisor);
+            HashToHex(sample.multiplayer, multiplayer);
+            HashToHex(sample.stage, stage);
+            HashToHex(sample.player, player);
+            HashToHex(sample.enemies, enemies);
+            HashToHex(sample.bullets, bullets);
+            HashToHex(sample.items, items);
+            HashToHex(sample.player0, player0);
+            HashToHex(sample.player1, player1);
+            HashToHex(sample.player2, player2);
+            EM_ASM({
+                globalThis.__eaglerNetplayLanCanonical ||= Object.create(null);
+                const entry = Object.create(null);
+                entry.meta = UTF8ToString($0);
+                entry.multiplayer = UTF8ToString($1);
+                entry.stage = UTF8ToString($2);
+                entry.player = UTF8ToString($3);
+                entry.enemies = UTF8ToString($4);
+                entry.bullets = UTF8ToString($5);
+                entry.items = UTF8ToString($6);
+                entry.counts = [];
+                entry.counts[0] = $7;
+                entry.counts[1] = $8;
+                entry.counts[2] = $9;
+                entry.counts[3] = $10;
+                globalThis.__eaglerNetplayLanCanonical[String($11)] = entry;
+            }, meta, multiplayer, stage, player, enemies, bullets, items,
+               sample.enemyCount, sample.bulletCount, sample.laserCount, sample.itemCount,
+               frame + 1u);
+            EM_ASM({
+                globalThis.__eaglerNetplayLanCanonicalPlayers ||= Object.create(null);
+                const players = [];
+                players[0] = UTF8ToString($0);
+                players[1] = UTF8ToString($1);
+                players[2] = UTF8ToString($2);
+                globalThis.__eaglerNetplayLanCanonicalPlayers[String($3)] = players;
+            }, player0, player1, player2, frame + 1u);
+            EM_ASM({
+                globalThis.__eaglerNetplayLanCanonicalMeta ||= Object.create(null);
+                const detail = [];
+                detail[0] = UTF8ToString($0);
+                detail[1] = UTF8ToString($1);
+                detail[2] = UTF8ToString($2);
+                detail[3] = UTF8ToString($3);
+                globalThis.__eaglerNetplayLanCanonicalMeta[String($4)] = detail;
+            }, metaRng, metaGame, metaInput, metaSupervisor, frame + 1u);
+        }
     }
 #endif
     if (resimulation)
@@ -1123,8 +1563,7 @@ bool ReconcileRollback()
         if (!decision.canAdvance)
             return false;
         const int result = SimulateFrame(frame, decision, true);
-        if (result == CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS ||
-            result == CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR)
+        if (result == 0 || result == -1)
             return false;
     }
     return true;
@@ -1165,11 +1604,18 @@ int RunCalcChain()
         g_LastTickAdvanced = true;
         return g_Chain.RunCalcChain();
     }
+    if (!g_Initialized && g_SpectatorRunRetired)
+    {
+        // Local Result/MainMenu may keep running, but a one-shot spectator
+        // Runtime cannot silently become another netplay generation.
+        g_LastTickAdvanced = true;
+        return g_Chain.RunCalcChain();
+    }
     if (!g_Initialized && ProductionLanMode() &&
         !StartProductionTransportEarly())
     {
         Fail("transport preconnect");
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+        return -1;
     }
     if (ProbeMode() && g_Done)
         return CHAIN_CALLBACK_RESULT_CONTINUE;
@@ -1183,11 +1629,30 @@ int RunCalcChain()
     }
     if (!g_Initialized && !EligibleForInitialNetplayStart())
     {
-        // Stage/menu initialization remains vanilla. The first eligible call
-        // occurs before this gameplay tick has run, then the netplay gate owns
-        // all subsequent fixed-60-Hz simulation.
+        if (!InitialNetplayBootstrapInProgress())
+        {
+            // The room transport intentionally survives the gameplay session,
+            // but Result/Ending/MainMenu are local post-game scenes and must
+            // receive ordinary UI input. Neutral lanes belong only to the
+            // actual pre-frame-zero GameManager construction window.
+            g_LastTickAdvanced = true;
+            return g_Chain.RunCalcChain();
+        }
+        // The room has already committed this run to netplay, but TH07 still
+        // needs a few normal calc ticks to construct Stage/Player/ReplayManager
+        // before the deterministic gate can take ownership. Keep those
+        // initialization callbacks running, while preventing local keyboard,
+        // controller or touch state from moving only this machine's player
+        // before HELLO/READY. Otherwise peers can enter synchronized frame zero
+        // from different world states and rollback cannot repair the offset.
+        std::array<FrameInput, TH07_MULTI_MAX_PLAYERS> neutralInputs{};
+        Input::SetReplayOverride(0);
+        Input::SetPlayerInputOverrides(neutralInputs.data(), g_PlayerCount);
+        const int result = g_Chain.RunCalcChain();
+        Input::ClearPlayerButtonOverrides();
+        Input::ClearReplayOverride();
         g_LastTickAdvanced = true;
-        return g_Chain.RunCalcChain();
+        return result;
     }
     if (!g_Initialized)
     {
@@ -1195,25 +1660,71 @@ int RunCalcChain()
         if (!Initialize())
         {
             Fail("initialize");
-            return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+            return -1;
         }
     }
 
     ++g_DriverTicks;
+    if (g_SpectatorMode)
+    {
+        if (!DrainSpectatorFrames())
+        {
+            Fail("invalid spectator stream");
+            return -1;
+        }
+        if (TransportFailed())
+        {
+            Fail("spectator transport");
+            return -1;
+        }
+        if (g_SpectatorFrames.empty())
+            return CHAIN_CALLBACK_RESULT_CONTINUE;
+        const std::size_t backlog = g_SpectatorFrames.size();
+        const std::size_t framesThisTick = backlog > 8 ? 4 : backlog > 4 ? 2 : 1;
+        int result = CHAIN_CALLBACK_RESULT_CONTINUE;
+        for (std::size_t index = 0; index < framesThisTick && !g_SpectatorFrames.empty(); ++index)
+        {
+            const SpectatorFramePacket packet = g_SpectatorFrames.front();
+            if (packet.frame != g_SimFrame)
+            {
+                Fail("spectator frame gap");
+                return -1;
+            }
+            FrameDecision decision;
+            decision.canAdvance = true;
+            decision.inputs = packet.inputs;
+            const i32 stageBefore = g_GameManager.currentStage;
+            result = SimulateFrame(g_SimFrame, decision, false);
+            if (result == 0 || result == -1)
+                return result;
+            g_SpectatorFrames.pop_front();
+            ++g_SimFrame;
+            if (g_GameManager.currentStage != stageBefore)
+                break;
+        }
+#ifdef __EMSCRIPTEN__
+        EM_ASM({
+            globalThis.__eaglerNetplayLanFrame = $0;
+            globalThis.__eaglerNetplaySpectator = true;
+        }, g_SimFrame);
+#endif
+        g_LastTickAdvanced = true;
+        return result;
+    }
     if (!DrainPackets())
     {
         Fail("invalid packet");
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+        return -1;
     }
     if (TransportFailed())
     {
         Fail("transport");
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+        return -1;
     }
     if (RemoteInputsTimedOut())
     {
         Fail("remote input timeout");
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+        return -1;
     }
 
     if (!g_Session.CanStart())
@@ -1240,7 +1751,7 @@ int RunCalcChain()
         if (!SendSessionControl())
         {
             Fail("session control");
-            return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+            return -1;
         }
         // Control packets are deliberately separated from game inputs. Frame
         // zero is not scheduled until both peers have verified the complete
@@ -1250,8 +1761,14 @@ int RunCalcChain()
     if (!ReconcileRollback())
     {
         Fail("rollback reconcile");
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+        return -1;
     }
+    if (!CaptureConfirmedReplayAuditFrames())
+    {
+        Fail("Replay confirmed input audit unavailable");
+        return -1;
+    }
+    PublishConfirmedSpectatorFrames();
 #ifdef __EMSCRIPTEN__
     if (ProductionLanMode())
     {
@@ -1271,13 +1788,13 @@ int RunCalcChain()
         if (!localPresent && !SendLocalFrame(g_SimFrame))
         {
             Fail("send local input");
-            return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+            return -1;
         }
         if (localPresent && (g_DriverTicks % 3u) == 0u &&
             !SendScheduledLocalFrame(g_SimFrame))
         {
             Fail("input retry");
-            return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+            return -1;
         }
 
         // Frame zero is the session barrier. Receive every peer's real first
@@ -1299,7 +1816,7 @@ int RunCalcChain()
             if ((g_DriverTicks % 3u) == 0 && !SendSessionControl(true))
             {
                 Fail("session ready keepalive");
-                return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+                return -1;
             }
             return CHAIN_CALLBACK_RESULT_CONTINUE;
         }
@@ -1320,10 +1837,10 @@ int RunCalcChain()
         if (decision.predictedMask)
             ++g_PredictedFrames;
         const int result = SimulateFrame(g_SimFrame, decision, false);
-        if (result == CHAIN_CALLBACK_RESULT_EXIT_GAME_SUCCESS ||
-            result == CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR)
+        if (result == 0 || result == -1)
             return result;
         ++g_SimFrame;
+        PublishConfirmedSpectatorFrames();
 #ifdef __EMSCRIPTEN__
         if (ProductionLanMode())
             EM_ASM({ globalThis.__eaglerNetplayLanFrame = $0; }, g_SimFrame);
@@ -1335,7 +1852,12 @@ int RunCalcChain()
     if (!DrainPackets() || !ReconcileRollback())
     {
         Fail("final reconcile");
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+        return -1;
+    }
+    if (!CaptureConfirmedReplayAuditFrames())
+    {
+        Fail("Replay confirmed input audit unavailable");
+        return -1;
     }
     // A low-rate tail keepalive is part of the protocol behavior, not a
     // transport retransmission. It closes the otherwise unavoidable hole where
@@ -1343,8 +1865,42 @@ int RunCalcChain()
     if ((g_DriverTicks % 3u) == 0 && !SendTailKeepalive())
     {
         Fail("tail keepalive");
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+        return -1;
     }
+
+#if defined(__EMSCRIPTEN__) && defined(TH_ENABLE_MULTIPLAYER_GAMEPLAY) && defined(TH_DEV_TOOLS)
+    if (UseReplayPlaybackCycle() && !g_ReplayPlaybackCycleDispatched &&
+        g_SimFrame >= g_TestFrames &&
+        ConfirmedThroughAllRemotes() >= g_TestFrames - 1 &&
+        !g_Core.HasRollbackRequest())
+    {
+        // Test-only short end-to-end gate. Save only after every input in the
+        // recording window is authoritative, then use TH07's established
+        // gameplay-quit Supervisor transition to reach the real Replay menu.
+        if (ReplayExtension::DebugExpectedMultiplayerPlaybackFrames() != g_TestFrames)
+        {
+            Fail("Replay confirmed input audit incomplete");
+            return -1;
+        }
+        EM_ASM({
+            globalThis.__eaglerNetplayReplayExpectedFrames = $0;
+            globalThis.__eaglerNetplayReplayInputCoverage = $1;
+            globalThis.__eaglerNetplayReplayComparedFrames = 0;
+            globalThis.__eaglerNetplayReplayInputMismatch = false;
+        }, ReplayExtension::DebugExpectedMultiplayerPlaybackFrames(),
+           ReplayExtension::DebugExpectedMultiplayerPlaybackCoverage());
+        char replayName[] = "SMOKE";
+        std::filesystem::create_directory(
+            std::filesystem::u8path(FileSystem::GetPrefPath("replay")));
+        const std::string replayPath =
+            FileSystem::GetPrefPath("replay/th7_01.rpy");
+        ReplayManager::SaveReplay(replayPath.c_str(), replayName);
+        EM_ASM({ Module.eaglerOptions.replayViewer = true; });
+        g_ReplayPlaybackCycleDispatched = true;
+        g_Supervisor.curState = 7;
+        return CHAIN_CALLBACK_RESULT_CONTINUE;
+    }
+#endif
 
     if (ProbeMode() && g_SimFrame >= g_TestFrames &&
         ConfirmedThroughAllRemotes() >= g_TestFrames - 1 &&
@@ -1357,24 +1913,29 @@ int RunCalcChain()
             (g_InputSlotObservedMask & expectedInputMask) != expectedInputMask)
         {
             Fail("per-player input slots not exercised");
-            return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+            return -1;
         }
         if (UsePhysicalInput() && !g_PhysicalInputObserved)
         {
             Fail("physical input not observed");
-            return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+            return -1;
         }
         if (UsePauseCycle() && (!g_PauseObserved || !g_PauseResumeObserved))
         {
             Fail("pause cycle not completed");
-            return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+            return -1;
+        }
+        if (UseRestartCycle() && g_SessionGeneration == 0)
+        {
+            Fail("restart cycle did not create a new session generation");
+            return -1;
         }
         if (UseStageTransitionTest() &&
             (!g_StageTransitionObserved || !g_StageTransitionInputResetObserved ||
              !g_PostTransitionInputObserved))
         {
             Fail("stage transition input lifecycle not completed");
-            return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+            return -1;
         }
 #endif
         const auto sample = Th07CanonicalHash::Capture();
@@ -1399,7 +1960,7 @@ int RunCalcChain()
         }
 #endif
         std::printf(
-            "netplay lan stage: PASS player=%u players=%u frames=%u sent=%u recv=%u session=%u/%u rollback=%u resim=%u maxRollback=%u predicted=%u confirmed=%u maxSnapshot=%llu buffered=%llu peak=%u/%u/%u/%u pause=%d/%d stageMax=%u\n",
+            "netplay lan stage: PASS player=%u players=%u frames=%u sent=%u recv=%u session=%u/%u rollback=%u resim=%u maxRollback=%u predicted=%u confirmed=%u maxSnapshot=%llu buffered=%llu peak=%u/%u/%u/%u pause=%d/%d restart=%u stageMax=%u\n",
             static_cast<unsigned>(g_LocalPlayer), static_cast<unsigned>(g_PlayerCount),
             g_TestFrames, g_SentPackets,
             g_ReceivedPackets, g_SessionPacketsSent, g_SessionPacketsReceived,
@@ -1409,6 +1970,7 @@ int RunCalcChain()
             static_cast<unsigned long long>(TransportBufferedAmount()),
             g_PeakEnemies, g_PeakBullets, g_PeakLasers, g_PeakItems,
             g_PauseObserved ? 1 : 0, g_PauseResumeObserved ? 1 : 0,
+            static_cast<unsigned>(g_SessionGeneration),
             static_cast<unsigned>(g_HighestStageObserved));
         g_Done = true;
 #ifdef __EMSCRIPTEN__
@@ -1419,7 +1981,7 @@ int RunCalcChain()
     if (ProbeMode() && g_DriverTicks >= g_TestFrames * 6u)
     {
         Fail("timeout");
-        return CHAIN_CALLBACK_RESULT_EXIT_GAME_ERROR;
+        return -1;
     }
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }

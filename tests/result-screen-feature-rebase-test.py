@@ -28,9 +28,14 @@ def main():
     require("native Netplay shell is excluded", '#include "Netplay.hpp"' not in SOURCE and "Netplay::" not in SOURCE)
     require("multiplayer result writes do not persist score.dat", "ShouldSkipPersistentResultWrite" in SOURCE and "return MultiplayerGameplay::IsMultiplayer();" in SOURCE)
     require("ordinary result path retains persistent score writes", "#ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY" in SOURCE and "return false;" in SOURCE and "FileSystem::WriteDataToFile(\"score.dat\"" in SOURCE)
-    require("multiplayer result bypasses unusable replay save prompt", "ShouldSkipReplaySavePrompt" in SOURCE and "resultScreenState = ShouldSkipReplaySavePrompt() ? 18 : 11" in SOURCE)
-    require("result-name prompt remains ordinary-only", "if (!ShouldSkipReplaySavePrompt())" in SOURCE and "strcpy(arg->replayName" in SOURCE)
+    require("multiplayer result now keeps replay save prompt", "ShouldSkipReplaySavePrompt" in SOURCE and "return false;" in SOURCE and "resultScreenState = ShouldSkipReplaySavePrompt() ? 18 : 11" in SOURCE)
+    require("result-name prompt is available to multiplayer replay", "if (!ShouldSkipReplaySavePrompt())" in SOURCE and "strcpy(arg->replayName" in SOURCE)
     require("result screen keeps local score parsing for display", "OpenScore(FileSystem::GetPrefPath(\"score.dat\")" in SOURCE and "ParseCatk" in SOURCE and "ParsePscr" in SOURCE)
+    require(
+        "Phantasm final-stats difficulty tables cover all six enum values",
+        "g_DifficultyWeightsList[] = {-30.0f, -10.0f, 20.0f, 30.0f, 30.0f, 30.0f}" in SOURCE
+        and "g_DifficultySpellcardWeightsList[] = {1.0f, 1.5f, 1.5f, 2.0f, 2.5f, 2.5f}" in SOURCE,
+    )
     draw = function_body(SOURCE, "u32 ResultScreen::OnDraw")
     require("result drawing has no raw touch or presentation-offset dependency", "Touch::" not in draw and "GetPlayerPresentationOffset" not in draw)
     require("result path does not add hash or compatibility behavior", "HashState" not in diff and "Compatibility" not in diff and "checksum" not in diff.lower())

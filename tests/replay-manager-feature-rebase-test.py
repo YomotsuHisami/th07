@@ -11,6 +11,8 @@ import subprocess
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "src" / "ReplayManager.cpp").read_text(encoding="utf-8")
 EXTENSION = (ROOT / "src" / "ReplayExtension.cpp").read_text(encoding="utf-8")
+PLAYER = (ROOT / "src" / "Player.cpp").read_text(encoding="utf-8")
+MAIN_MENU = (ROOT / "src" / "MainMenu.cpp").read_text(encoding="utf-8")
 BASE = "5b9ebe892914ff5666ef68c0cd02719dde7d4ee9"
 FINAL = "022c533"
 
@@ -73,6 +75,48 @@ def main() -> None:
     require("multiplayer replay restores every synchronized player lane",
             "ReplayExtension::GetMultiplayerPlaybackFrame" in demo and
             "Netplay::Input::SetPlayerInputOverrides" in demo)
+    player_register = function_body(PLAYER, "ZunResult Player::RegisterChain")
+    require("multiplayer replay registers every active Player slot",
+            "if (MultiplayerGameplay::IsMultiplayer())" in player_register and
+            "!g_GameManager.replay" not in player_register and
+            "RegisterOnePlayer(&g_Players[playerId], playerId)" in player_register)
+    require("Replay menu restores multiplayer session metadata before gameplay starts",
+            "ReplayExtension::GetMultiplayerPlaybackConfig" in MAIN_MENU and
+            "MultiplayerGameplay::Configure(session)" in MAIN_MENU and
+            "session.localPlayer = replayConfig.localPlayer" in MAIN_MENU and
+            "session.stage4BossChain = replayConfig.stage4BossChain" in MAIN_MENU and
+            "session.showContributionStats = replayConfig.showContributionStats" in MAIN_MENU and
+            "session.showStagePlayerNames = replayConfig.showStagePlayerNames" in MAIN_MENU and
+            "session.players[playerId].character = replayConfig.characters[playerId]" in MAIN_MENU and
+            "session.players[playerId].shot = replayConfig.shots[playerId]" in MAIN_MENU)
+    added = function_body(SOURCE, "ZunResult ReplayManager::AddedCallback(ReplayManager")
+    require("multiplayer replay records deterministic Stage 4 chain and local presentation flags",
+            "config.stage4BossChain = MultiplayerGameplay::IsStage4BossChainEnabled()" in added and
+            "config.showContributionStats = MultiplayerGameplay::ShouldShowContributionStats()" in added and
+            "config.showStagePlayerNames = MultiplayerGameplay::ShouldShowStagePlayerNames()" in added)
+    require("multiplayer replay records each player's stage-start resources",
+            "ReplayExtension::MultiplayerPlayerResourceSnapshot resources" in added and
+            "resources[playerId].lives = GetPlayerLives(playerId)" in added and
+            "resources[playerId].bombs = GetPlayerBombs(playerId)" in added and
+            "resources[playerId].power = GetPlayerPower(playerId)" in added and
+            "ReplayExtension::CaptureMultiplayerStageResources" in added)
+    require("multiplayer replay records cumulative contribution HUD state at each stage start",
+            "ReplayExtension::MultiplayerContributionSnapshot contributions" in added and
+            "contributions[playerId].enemiesDefeated = GetPlayerEnemiesDefeated(playerId)" in added and
+            "contributions[playerId].damageDealt = GetPlayerDamageDealt(playerId)" in added and
+            "ReplayExtension::CaptureMultiplayerStageContributions" in added)
+    added_demo = function_body(SOURCE, "ZunResult ReplayManager::AddedCallbackDemo")
+    require("multiplayer replay restores stage resources after vanilla P1 state",
+            "ReplayExtension::GetMultiplayerPlaybackStageResources" in added_demo and
+            added_demo.index("g_GameManager.SetCurrentPower(replayData->currentPower)") <
+            added_demo.index("ReplayExtension::GetMultiplayerPlaybackStageResources") and
+            "SetPlayerLives(playerId, resources.lives)" in added_demo and
+            "SetPlayerBombs(playerId, resources.bombs)" in added_demo and
+            "SetPlayerPower(playerId, resources.power)" in added_demo)
+    require("direct later-stage replay restores cumulative contribution HUD state",
+            "ReplayExtension::GetMultiplayerPlaybackStageContributions" in added_demo and
+            "g_MultiplayerContributionStats[playerId].enemiesDefeated" in added_demo and
+            "g_MultiplayerContributionStats[playerId].damageDealt" in added_demo)
 
     require("replay Border cap uses shared multiplayer threshold",
             "const i32 borderThreshold" in SOURCE and
@@ -103,7 +147,23 @@ def main() -> None:
             "FLAG_MULTIPLAYER_INPUT" in EXTENSION and
             "MultiplayerInputSample" in EXTENSION and
             "MP_PLAYER_COUNT_OFFSET" in EXTENSION and
+            "MP_LOCAL_PLAYER_OFFSET" in EXTENSION and
+            "MP_SESSION_FLAGS_OFFSET" in EXTENSION and
+            "MP_SESSION_STAGE4_BOSS_CHAIN" in EXTENSION and
             "GetMultiplayerPlaybackConfig" in EXTENSION)
+    require("EAGX v1 optionally appends per-stage multiplayer resources",
+            "FLAG_MULTIPLAYER_STAGE_RESOURCES = 64" in EXTENSION and
+            "MP_STAGE_RESOURCE_BYTES" in EXTENSION and
+            "GetMultiplayerPlaybackStageResources" in EXTENSION and
+            "legacyMultiplayerV1Accepted" in EXTENSION)
+    require("EAGX v1 optionally appends per-stage multiplayer contribution HUD snapshots",
+            "FLAG_MULTIPLAYER_STAGE_CONTRIBUTIONS = 128" in EXTENSION and
+            "MP_STAGE_CONTRIBUTION_BYTES" in EXTENSION and
+            "GetMultiplayerPlaybackStageContributions" in EXTENSION and
+            "preContributionV1Accepted" in EXTENSION)
+    require("Power-transfer tap gesture is reset at stage registration",
+            "g_powerGiveTaps[playerId] = 0" in PLAYER and
+            "g_powerGiveWindow[playerId] = 0" in PLAYER)
 
 
 if __name__ == "__main__":

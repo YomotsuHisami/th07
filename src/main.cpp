@@ -219,6 +219,18 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
         else if (std::strcmp(argv[index], "--thprac-replay-selftest") == 0)
             g_ThpracReplaySelfTest = true;
 #endif
+
+#if defined(TH_DEV_TOOLS) && defined(__EMSCRIPTEN__)
+    // Hosted/browser audit paths already communicate through eaglerOptions.
+    // SDL3's callback-main wrapper does not preserve Module.callMain argv in
+    // the same shape as the native test executable, so bind this Web-only
+    // visual audit directly to the hidden debugHarness instead of changing the
+    // production launch argument contract.
+    if (EM_ASM_INT({
+            return Module.eaglerOptions?.debugHarness === 'result-stats-phantasm' ? 1 : 0;
+        }))
+        g_OpenResultStatsPhantasmForVisualTest = true;
+#endif
 #ifdef __EMSCRIPTEN__
     g_OpenMusicRoomForVisualTest = EM_ASM_INT({ return Module.eaglerOptions?.debugHarness === 'music-room'; }) != 0;
 #ifdef TH_ENABLE_NETPLAY
@@ -241,6 +253,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
         std::printf("th07 netplay audit: app init harness requested\n");
 #endif
 #ifdef TH_DEV_TOOLS
+    g_ReplayExtensionSelfTest = g_ReplayExtensionSelfTest || EM_ASM_INT({
+        return Module.eaglerOptions?.debugHarness === 'replay-extension' ? 1 : 0;
+    }) != 0;
     g_EndingViewerSelection = EM_ASM_INT({
         const id = Module.eaglerOptions?.debugHarness;
         return id === 'ending-reimu-a' ? 0 :

@@ -526,6 +526,13 @@ bool g_BossTitleImageReady = false;
 bool g_BossNameImageAttempted = false;
 bool g_BossNameImageReady = false;
 
+// Runtime-only localization textures must not alias ANM file/texture slots.
+// TH07MP uses 50/51 for the P2/P3 player ANMs, exactly where the old boss
+// title/name images lived. Keep them immediately below the top six CPU-backed
+// slots reserved for multiplayer ANMs.
+constexpr i32 TEXTURE_SLOT_LOCALIZED_BOSS_TITLE = 248;
+constexpr i32 TEXTURE_SLOT_LOCALIZED_BOSS_NAME = 249;
+
 bool LoadTextImage(i32 textureSlot, const char *path, bool &attempted, bool &ready)
 {
     if (!attempted)
@@ -550,9 +557,11 @@ bool LoadBossImages()
     // thcrap declares the title and name images as one group.  Keep the same
     // all-or-nothing activation rule so a missing half never leaves the
     // intro with one translated image and one rendered Japanese line.
-    return LoadTextImage(50, "ti_bosstitle.png", g_BossTitleImageAttempted,
+    return LoadTextImage(TEXTURE_SLOT_LOCALIZED_BOSS_TITLE, "ti_bosstitle.png",
+                         g_BossTitleImageAttempted,
                          g_BossTitleImageReady) &&
-           LoadTextImage(51, "ti_bossname.png", g_BossNameImageAttempted,
+           LoadTextImage(TEXTURE_SLOT_LOCALIZED_BOSS_NAME, "ti_bossname.png",
+                         g_BossNameImageAttempted,
                          g_BossNameImageReady);
 }
 
@@ -797,14 +806,16 @@ const char *Localization::LogString(const char *fallback)
 bool Localization::ApplyBossTitleImage(AnmVm *vm, std::uint32_t stage,
                                        std::int32_t rightPortraitSprite)
 {
-    return ApplyBossImage(vm, stage, rightPortraitSprite, 50, "ti_bosstitle.png",
+    return ApplyBossImage(vm, stage, rightPortraitSprite, TEXTURE_SLOT_LOCALIZED_BOSS_TITLE,
+                          "ti_bosstitle.png",
                           g_BossTitleImageAttempted, g_BossTitleImageReady, 0x702);
 }
 
 bool Localization::ApplyBossNameImage(AnmVm *vm, std::uint32_t stage,
                                       std::int32_t rightPortraitSprite)
 {
-    return ApplyBossImage(vm, stage, rightPortraitSprite, 51, "ti_bossname.png",
+    return ApplyBossImage(vm, stage, rightPortraitSprite, TEXTURE_SLOT_LOCALIZED_BOSS_NAME,
+                          "ti_bossname.png",
                           g_BossNameImageAttempted, g_BossNameImageReady, 0x703);
 }
 

@@ -21,8 +21,9 @@ EM_JS(int, th07_peer_connect, (const char *relayUrlPtr, int localPlayer, int pla
         signalUrl.searchParams.set('signal', '1');
 
         const state = {
-            relay: null, signal: null, peers: new Map(), received: [], pendingSignals: [],
+            relay: null, signal: null, peers: new Map(), received: [], receivedHead: 0, pendingSignals: [],
             localPlayer, playerCount, route: null, failed: false, error: String(), closed: false,
+            spectatorCount: Math.max(0, Number(Module.eaglerOptions?.netplaySpectatorCount) || 0),
             rtcReadySent: false, signalReconnectTimer: null, signalReconnectDelayMs: 500,
             iceServers: Array.isArray(Module.eaglerOptions?.netplayIceServers)
                 ? Module.eaglerOptions.netplayIceServers : [],
@@ -48,7 +49,9 @@ EM_JS(int, th07_peer_connect, (const char *relayUrlPtr, int localPlayer, int pla
                 this.route = mode;
                 globalThis.__eaglerNetplayTransport = mode;
                 if (mode === 'rtc') {
-                    try { this.relay?.close(1000, 'RTC route selected'); } catch {}
+                    if (this.spectatorCount === 0) {
+                        try { this.relay?.close(1000, 'RTC route selected'); } catch {}
+                    }
                     this.updateRtcPath().catch(() => {});
                 } else {
                     for (const peer of this.peers.values()) {
@@ -378,6 +381,7 @@ EM_JS(int, th07_peer_connect, (const char *relayUrlPtr, int localPlayer, int pla
                 }
                 this.peers.clear();
                 this.received.length = 0;
+                this.receivedHead = 0;
             },
         };
         globalThis.__th07PeerTransport = state;
@@ -419,6 +423,67 @@ EM_JS(int, th07_peer_connect, (const char *relayUrlPtr, int localPlayer, int pla
     }
 });
 
+EM_JS(int, th07_spectator_connect,
+      (const char *relayUrlPtr, const char *spectatorIdPtr, int playerCount), {
+    const decode = ptr => {
+        const end = HEAPU8.indexOf(0, ptr);
+        return new TextDecoder().decode(HEAPU8.subarray(ptr, end >= 0 ? end : HEAPU8.length));
+    };
+    try {
+        if (globalThis.__th07PeerTransport?.close) globalThis.__th07PeerTransport.close();
+        const relay = new URL(decode(relayUrlPtr), location.href);
+        relay.searchParams.delete('player');
+        relay.searchParams.delete('signal');
+        relay.searchParams.set('spectator', decode(spectatorIdPtr));
+        relay.searchParams.set('players', String(playerCount));
+        const state = {
+            relay: null, peers: new Map(), received: [], receivedHead: 0,
+            playerCount, route: 'spectator', failed: false, error: String(), closed: false,
+            maxReceivedPackets: 16384,
+            close() {
+                this.closed = true;
+                try { this.relay?.close(1000, 'spectator close'); } catch {}
+                this.received.length = 0;
+                this.receivedHead = 0;
+            },
+            receiveBinary(data) {
+                const append = packet => {
+                    if (this.closed || this.failed) return;
+                    if (this.received.length - this.receivedHead >= this.maxReceivedPackets) {
+                        this.failed = true;
+                        this.error = 'Spectator fell too far behind';
+                        try { this.relay?.close(1008, 'spectator fell too far behind'); } catch {}
+                        return;
+                    }
+                    this.received.push(packet);
+                };
+                if (data instanceof ArrayBuffer) append(new Uint8Array(data));
+                else if (data instanceof Blob) data.arrayBuffer().then(buffer => {
+                    append(new Uint8Array(buffer));
+                }).catch(() => {});
+            },
+        };
+        globalThis.__th07PeerTransport = state;
+        globalThis.__eaglerNetplayTransport = 'spectator';
+        globalThis.__eaglerNetplayPath = 'relay';
+        state.relay = new WebSocket(relay.href);
+        state.relay.binaryType = 'arraybuffer';
+        state.relay.onmessage = event => {
+            if (typeof event.data !== 'string') state.receiveBinary(event.data);
+        };
+        state.relay.onerror = () => {
+            if (!state.closed) { state.failed = true; state.error = 'Spectator relay error'; }
+        };
+        state.relay.onclose = event => {
+            if (!state.closed) { state.failed = true; state.error = event.reason || 'Spectator relay closed'; }
+        };
+        return 1;
+    } catch (error) {
+        globalThis.__th07PeerTransport = { failed: true, error: String(error), close() {} };
+        return 0;
+    }
+});
+
 EM_JS(void, th07_peer_close, (), {
     try { globalThis.__th07PeerTransport?.close?.(); } catch {}
     globalThis.__th07PeerTransport = null;
@@ -427,7 +492,7 @@ EM_JS(void, th07_peer_close, (), {
 EM_JS(int, th07_peer_is_open, (), {
     const state = globalThis.__th07PeerTransport;
     if (!state || state.failed || !state.route) return 0;
-    if (state.route === 'relay') return state.relay?.readyState === WebSocket.OPEN ? 1 : 0;
+    if (state.route === 'relay' || state.route === 'spectator') return state.relay?.readyState === WebSocket.OPEN ? 1 : 0;
     if (state.route === 'rtc') return [...state.peers.values()].every(peer => peer.inputOpen && peer.controlOpen) ? 1 : 0;
     return 0;
 });
@@ -485,16 +550,49 @@ EM_JS(int, th07_peer_send_to, (int peerId, const unsigned char *data, int size),
     return 0;
 });
 
+EM_JS(int, th07_peer_send_spectator, (const unsigned char *data, int size), {
+    const state = globalThis.__th07PeerTransport;
+    if (!state || state.closed || size <= 0 ||
+        state.relay?.readyState !== WebSocket.OPEN) return 0;
+    try {
+        const payload = HEAPU8.slice(data, data + size);
+        const envelope = new Uint8Array(payload.byteLength + 1);
+        envelope[0] = 0xe8;
+        envelope.set(payload, 1);
+        state.relay.send(envelope);
+        return 1;
+    } catch { return 0; }
+});
+
+EM_JS(int, th07_peer_has_spectators, (), {
+    return (globalThis.__th07PeerTransport?.spectatorCount || 0) > 0 ? 1 : 0;
+});
+
 EM_JS(int, th07_peer_poll_size, (), {
-    const packet = globalThis.__th07PeerTransport?.received?.[0];
+    const state = globalThis.__th07PeerTransport;
+    const packet = state?.received?.[state.receivedHead || 0];
     return packet ? packet.byteLength : 0;
 });
 
 EM_JS(int, th07_peer_poll_copy, (unsigned char *out, int capacity), {
     const state = globalThis.__th07PeerTransport;
-    const packet = state?.received?.shift();
+    if (!state) return 0;
+    const head = state.receivedHead || 0;
+    const packet = state.received?.[head];
     if (!packet || packet.byteLength > capacity) return 0;
     HEAPU8.set(packet, out);
+    state.received[head] = undefined;
+    state.receivedHead = head + 1;
+    // Compact only occasionally. Normal polling is O(1), while a peer that
+    // wakes from a long Restart stall no longer pays Array.shift()'s repeated
+    // whole-array moves for every queued control/input packet.
+    if (state.receivedHead >= 256 && state.receivedHead * 2 >= state.received.length) {
+        state.received = state.received.slice(state.receivedHead);
+        state.receivedHead = 0;
+    } else if (state.receivedHead >= state.received.length) {
+        state.received.length = 0;
+        state.receivedHead = 0;
+    }
     return packet.byteLength;
 });
 
@@ -537,6 +635,19 @@ bool BrowserPeerTransport::Connect(const char *relayUrl, std::uint8_t localPlaye
 #else
     (void)relayUrl; (void)localPlayer; (void)playerCount;
     lastError_ = "browser peer transport is Web-only";
+    return false;
+#endif
+}
+
+bool BrowserPeerTransport::ConnectSpectator(const char *relayUrl, const char *spectatorId,
+                                            std::uint8_t playerCount)
+{
+    Close();
+#ifdef __EMSCRIPTEN__
+    return relayUrl && relayUrl[0] && spectatorId && spectatorId[0] &&
+           th07_spectator_connect(relayUrl, spectatorId, playerCount) != 0;
+#else
+    (void)relayUrl; (void)spectatorId; (void)playerCount;
     return false;
 #endif
 }
@@ -595,6 +706,27 @@ bool BrowserPeerTransport::SendTo(std::uint8_t peer, const std::uint8_t *data, s
     return th07_peer_send_to(peer, data, static_cast<int>(size)) != 0;
 #else
     (void)peer; (void)data; (void)size;
+    return false;
+#endif
+}
+
+bool BrowserPeerTransport::SendSpectator(const std::uint8_t *data, std::size_t size)
+{
+#ifdef __EMSCRIPTEN__
+    if (!data || size == 0 || size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        return false;
+    return th07_peer_send_spectator(data, static_cast<int>(size)) != 0;
+#else
+    (void)data; (void)size;
+    return false;
+#endif
+}
+
+bool BrowserPeerTransport::HasSpectators() const
+{
+#ifdef __EMSCRIPTEN__
+    return th07_peer_has_spectators() != 0;
+#else
     return false;
 #endif
 }

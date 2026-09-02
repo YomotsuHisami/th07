@@ -210,14 +210,29 @@ bool CaptureFixedAndSparseState()
     if (!TouchObject(&g_Rng) || !TouchObject(&g_GlobalEclVars) ||
         !TouchObject(&g_Stage) || !TouchObject(&g_Gui) || !TouchObject(&g_AsciiManager))
         return false;
-    if (g_ReplayManager && !TouchObject(g_ReplayManager))
-        return false;
+    if (g_ReplayManager)
+    {
+        // Replay output is a committed side effect.  In particular frameId,
+        // replayInputs/fpsCursor and the destination pointers must keep the
+        // position reached by the original forward pass while rollback
+        // re-simulates gameplay with side effects suppressed.  Rewinding the
+        // whole ReplayManager here makes those cursors jump backwards even
+        // though the pointed-to replay bytes are intentionally not journaled,
+        // corrupting the next forward write after every real rollback.
+        //
+        // These two small fields are frame-local deterministic metadata that
+        // gameplay callbacks OR into before the recording callback consumes
+        // them, so keep only them rewindable.
+        if (!TouchObject(&g_ReplayManager->rngSeed) ||
+            !TouchObject(&g_ReplayManager->replayEventFlags))
+            return false;
+    }
     if (g_Gui.impl && !TouchObject(g_Gui.impl))
         return false;
 
     // Only Supervisor fields that can alter 60 Hz simulation semantics are
     // rewindable. Platform/render timing and device pointers stay local.
-    if (!TouchObject(&g_Supervisor.calcCount) || !TouchObject(&g_Supervisor.wantedState) ||
+    if (!TouchObject(&g_Supervisor.wantedState) ||
         !TouchObject(&g_Supervisor.curState) || !TouchObject(&g_Supervisor.prevState) ||
         !TouchObject(&g_Supervisor.isInEnding) ||
         !TouchObject(&g_Supervisor.effectiveFramerateMultiplier) ||
@@ -527,7 +542,6 @@ std::uint64_t DebugStateHash()
         HashObject(hash, g_ReplayManager->replayEventFlags);
     }
 
-    HashObject(hash, g_Supervisor.calcCount);
     HashObject(hash, g_Supervisor.wantedState);
     HashObject(hash, g_Supervisor.curState);
     HashObject(hash, g_Supervisor.prevState);
