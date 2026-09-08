@@ -432,7 +432,7 @@ void BulletManager::RemoveAllBullets(i32 param_1)
     laser = this->lasers;
     for (i = 0; i < ARRAY_SIZE_SIGNED(this->lasers); i++, laser++)
     {
-        if (!laser->inUse)
+        if (!laser->isInUse)
         {
             continue;
         }
@@ -472,7 +472,7 @@ void BulletManager::RemoveAllBullets(i32 param_1)
     this->screenClearTime = 10;
 }
 
-i32 BulletManager::DespawnBullets(i32 param_1, i32 turnIntoItem)
+i32 BulletManager::DespawnBullets(i32 param_1, ZunBool turnIntoItem)
 {
     f32 local_34;
     f32 local_30;
@@ -508,7 +508,7 @@ i32 BulletManager::DespawnBullets(i32 param_1, i32 turnIntoItem)
     laser = this->lasers;
     for (i = 0; i < ARRAY_SIZE_SIGNED(this->lasers); i++, laser++)
     {
-        if (!laser->inUse)
+        if (!laser->isInUse)
         {
             continue;
         }
@@ -609,7 +609,7 @@ Laser *BulletManager::SpawnLaserPattern(EnemyLaserShooter *laserShooter)
 
     for (i = 0; i < ARRAY_SIZE_SIGNED(this->lasers); i++, laser++)
     {
-        if (laser->inUse)
+        if (laser->isInUse)
         {
             continue;
         }
@@ -624,7 +624,7 @@ Laser *BulletManager::SpawnLaserPattern(EnemyLaserShooter *laserShooter)
         laser->vm1.blendMode = 1;
         laser->prevPos = laser->pos = laserShooter->pos;
         laser->color = laserShooter->spriteOffset;
-        laser->inUse = 1;
+        laser->isInUse = TRUE;
         laser->prevAngle = laser->angle = laserShooter->angle1;
         if (laserShooter->type == 0)
         {
@@ -1053,7 +1053,7 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
     laser = arg->lasers;
     for (i = 0; i < ARRAY_SIZE_SIGNED(arg->lasers); i++, laser++)
     {
-        if (!laser->inUse)
+        if (!laser->isInUse)
         {
             continue;
         }
@@ -1145,7 +1145,7 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
             laser->state++;
             if (laser->endTime == 0)
             {
-                laser->inUse = 0;
+                laser->isInUse = FALSE;
                 continue;
             }
         case LASER_DESPAWNING:
@@ -1180,12 +1180,12 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
             {
                 break;
             }
-            laser->inUse = 0;
+            laser->isInUse = FALSE;
             continue;
         }
         if (laser->startOffset >= (f32)GAME_WINDOW_WIDTH)
         {
-            laser->inUse = 0;
+            laser->isInUse = FALSE;
         }
         laser->timer++;
         g_AnmManager->ExecuteScript(&laser->vm0);
@@ -1252,7 +1252,7 @@ u32 BulletManager::OnDraw(BulletManager *arg)
     laser = arg->lasers;
     for (i = 0; i < ARRAY_SIZE_SIGNED(arg->lasers); i++, laser++)
     {
-        if (!laser->inUse)
+        if (!laser->isInUse)
         {
             continue;
         }
@@ -1366,9 +1366,7 @@ ZunResult BulletManager::AddedCallback(BulletManager *arg)
 {
     u32 i;
 
-    if ((u32)(g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_RESTART_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE_USELESS))
+    if (IsInitialStageLoad())
     {
         if (g_AnmManager->LoadAnms(ANM_FILE_BULLETS, "data/etama.anm", ANM_OFFSET_BULLETS) !=
             ZUN_SUCCESS)
@@ -1470,9 +1468,7 @@ ZunResult BulletManager::AddedCallback(BulletManager *arg)
 
 ZunResult BulletManager::DeletedCallback(BulletManager *arg)
 {
-    if ((u32)(g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_RESTART_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE_USELESS))
+    if (IsInitialStageLoad())
     {
         g_AnmManager->ReleaseAnm(ANM_FILE_BULLETS_0);
         g_AnmManager->ReleaseAnm(ANM_FILE_BULLETS_1);

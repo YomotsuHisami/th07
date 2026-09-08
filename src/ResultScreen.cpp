@@ -284,7 +284,7 @@ ZunResult ResultScreen::ParseCatk(ScoreDat *scoreDat, Catk *outCatk)
     return ZUN_SUCCESS;
 }
 
-i32 ResultScreen::ParseLsnm(ScoreDat *scoreDat, Lsnm *outLsnm)
+ZunBool ResultScreen::ParseLsnm(ScoreDat *scoreDat, Lsnm *outLsnm)
 {
     i32 cursor;
     Lsnm *parsedLsnm;
@@ -297,12 +297,12 @@ i32 ResultScreen::ParseLsnm(ScoreDat *scoreDat, Lsnm *outLsnm)
         if (parsedLsnm->base.magic == LSNM_MAGIC && parsedLsnm->base.version == 1)
         {
             *outLsnm = *parsedLsnm;
-            return 1;
+            return TRUE;
         }
         cursor -= parsedLsnm->base.th7kLen;
         parsedLsnm = (Lsnm *)((u8 *)parsedLsnm + parsedLsnm->base.th7kLen);
     }
-    return 0;
+    return FALSE;
 }
 
 ZunResult ResultScreen::ParseClrd(ScoreDat *scoreDat, Clrd *outClrd)
@@ -745,7 +745,7 @@ u32 ResultScreen::OnUpdate(ResultScreen *arg)
                     vm->offset = ZunVec3(0.0f, 0.0f, 0.0f);
                 }
             }
-            if (!g_GameManager.HasUnlockedPhantomAndMaxClears())
+            if (!g_GameManager.HasUnlockedPhantasmAndMaxClears())
             {
                 arg->vms[5].active = 0;
                 arg->vms[6].offset.y += -32.0f;
@@ -765,7 +765,7 @@ u32 ResultScreen::OnUpdate(ResultScreen *arg)
         arg->frameTimer = 0;
     case RESULT_STATE_DIFFICULTY_SELECT:
         vmIdx = MoveCursor(arg, 9);
-        if (arg->cursor == 5 && !g_GameManager.HasUnlockedPhantomAndMaxClears())
+        if (arg->cursor == 5 && !g_GameManager.HasUnlockedPhantasmAndMaxClears())
         {
             arg->cursor += vmIdx;
         }
@@ -783,7 +783,7 @@ u32 ResultScreen::OnUpdate(ResultScreen *arg)
                 vm->offset = ZunVec3(0.0f, 0.0f, 0.0f);
             }
         }
-        if (!g_GameManager.HasUnlockedPhantomAndMaxClears())
+        if (!g_GameManager.HasUnlockedPhantasmAndMaxClears())
         {
             arg->vms[5].active = 0;
             arg->vms[6].offset.y += -32.0f;
@@ -1675,7 +1675,7 @@ i32 ResultScreen::DrawStats()
             vm++;
             pos.y += 17.0f;
             vm->pos = pos;
-            if (g_GameManager.HasUnlockedPhantomAndMaxClears())
+            if (g_GameManager.HasUnlockedPhantasmAndMaxClears())
             {
                 AnmManager::DrawVmTextFmt(
                     g_AnmManager, vm, 0xffffff, 0,
@@ -1693,7 +1693,7 @@ i32 ResultScreen::DrawStats()
                 vm++;
                 pos.y += 17.0f;
                 vm->pos = pos;
-                if (g_GameManager.HasUnlockedPhantomAndMaxClears())
+                if (g_GameManager.HasUnlockedPhantasmAndMaxClears())
                 {
                     AnmManager::DrawVmTextFmt(
                         g_AnmManager, vm, 0xffffff, 0, "%s %6d %6d %6d %6d %6d %6d %6d",
@@ -1723,7 +1723,7 @@ i32 ResultScreen::DrawStats()
             vm++;
             pos.y += 17.0f;
             vm->pos = pos;
-            if (g_GameManager.HasUnlockedPhantomAndMaxClears())
+            if (g_GameManager.HasUnlockedPhantasmAndMaxClears())
             {
                 AnmManager::DrawVmTextFmt(
                     g_AnmManager, vm, 0xffffff, 0, "%s %6d %6d %6d %6d %6d %6d %6d",
@@ -1758,7 +1758,7 @@ i32 ResultScreen::DrawStats()
                 g_GameManager.plst.playDataByDifficulty[4].noContinueClearCount +
                 g_GameManager.plst.playDataByDifficulty[5].noContinueClearCount;
 
-            if (g_GameManager.HasUnlockedPhantomAndMaxClears())
+            if (g_GameManager.HasUnlockedPhantasmAndMaxClears())
             {
                 AnmManager::DrawVmTextFmt(
                     g_AnmManager, vm, 0xffffff, 0, "クリア回数  　　 %6d %6d %6d %6d %6d %6d %6d",
@@ -1785,7 +1785,7 @@ i32 ResultScreen::DrawStats()
             vm++;
             pos.y += 17.0f;
             vm->pos = pos;
-            if (g_GameManager.HasUnlockedPhantomAndMaxClears())
+            if (g_GameManager.HasUnlockedPhantasmAndMaxClears())
             {
                 AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
                                           "コンティニュー   %6d %6d %6d %6d %6d %6d %6d",
@@ -1812,7 +1812,7 @@ i32 ResultScreen::DrawStats()
             vm++;
             pos.y += 17.0f;
             vm->pos = pos;
-            if (g_GameManager.HasUnlockedPhantomAndMaxClears())
+            if (g_GameManager.HasUnlockedPhantasmAndMaxClears())
             {
                 AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
                                           "プラクティス　   %6d %6d %6d %6d %6d %6d %6d",
@@ -1839,7 +1839,7 @@ i32 ResultScreen::DrawStats()
             vm++;
             pos.y += 17.0f;
             vm->pos = pos;
-            if (g_GameManager.HasUnlockedPhantomAndMaxClears())
+            if (g_GameManager.HasUnlockedPhantasmAndMaxClears())
             {
                 AnmManager::DrawVmTextFmt(g_AnmManager, vm, 0xffffff, 0,
                                           "リトライ回数  　 %6d %6d %6d %6d %6d %6d %6d",
@@ -2393,7 +2393,7 @@ ZunResult ResultScreen::AddedCallback(ResultScreen *arg)
     AnmVm *vm;
     i32 i;
 
-    g_GameManager.HasUnlockedPhantomAndMaxClears();
+    g_GameManager.HasUnlockedPhantasmAndMaxClears();
     for (i = 0; i < DIFF_COUNT; i++)
     {
         for (j = 0; j < SHOT_COUNT; j++)
@@ -2466,7 +2466,7 @@ ZunResult ResultScreen::AddedCallback(ResultScreen *arg)
     {
         ParseCatk(arg->scoreDat, g_GameManager.catk);
         ParseClrd(arg->scoreDat, g_GameManager.clrd);
-        g_GameManager.HasUnlockedPhantomAndMaxClears();
+        g_GameManager.HasUnlockedPhantasmAndMaxClears();
         ParsePscr(arg->scoreDat, &g_GameManager.pscr[0][0][0]);
     }
     if (arg->resultScreenState == RESULT_STATE_PRACTICE_END)

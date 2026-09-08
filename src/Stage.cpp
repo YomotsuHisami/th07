@@ -537,7 +537,7 @@ u32 Stage::OnDrawHighPrio(Stage *arg)
         g_Supervisor.gfxDevice->SetViewport(viewport);
         g_Supervisor.gfxDevice->SetClearColor({0xff000000});
         g_Supervisor.gfxDevice->Clear(CLEAR_COLOR_BUFFER);
-        arg->clearBackground = 0;
+        arg->clearBackground = FALSE;
     }
     g_Supervisor.gfxDevice->SetViewport(g_Supervisor.viewport);
     if (arg->color2.bytes.a > 0)
@@ -649,7 +649,7 @@ u32 Stage::OnDrawLowPrio(Stage *arg)
     g_Supervisor.gfxDevice->SetFogRange(1000.0f, 2000.0f);
 
     g_AnmManager->SetColor(0x80808080);
-    arg->isDarkening = 0;
+    arg->isDarkening = FALSE;
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }

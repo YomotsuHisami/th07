@@ -333,7 +333,7 @@ i32 ShtData::UpdateOrbLaser(Player *player, PlayerBullet *bullet)
         bullet->vm.pendingInterrupt = 1;
     }
     if ((g_Gui.HasCurrentMsgIdx() || player->bombInfo.isInUse) &&
-        20 < player->timers[bullet->timerIdx].timer.GetCurrent())
+        player->timers[bullet->timerIdx].timer.GetCurrent() > 20)
     {
         player->timers[bullet->timerIdx].timer = 20;
     }
@@ -1067,7 +1067,7 @@ i32 Player::CalcItemBoxCollision(ZunVec3 *center, ZunVec3 *size)
 }
 
 i32 Player::CalcLaserHitbox(ZunVec3 *center, ZunVec3 *size, ZunVec3 *origin, f32 rotation,
-                            i32 canGraze)
+                            ZunBool canGraze)
 {
     ZunVec3 playerRelativeTopLeft;
     ZunVec3 playerRelativeBottomRight;
@@ -1261,7 +1261,7 @@ i32 Player::HandlePlayerInputs()
 
     if (IS_PRESSED_GAME(TH_BUTTON_FOCUS))
     {
-        this->isFocus = 1;
+        this->isFocus = TRUE;
         switch (this->playerDirection)
         {
         case MOVEMENT_RIGHT:
@@ -1298,7 +1298,7 @@ i32 Player::HandlePlayerInputs()
     }
     else
     {
-        this->isFocus = 0;
+        this->isFocus = FALSE;
         switch (this->playerDirection)
         {
         case MOVEMENT_RIGHT:
@@ -1799,7 +1799,7 @@ void Player::UpdateBorderAndBombState()
         IS_PRESSED_GAME(TH_BUTTON_BOMB))
     {
         BreakBorder();
-        this->isBombing = 0;
+        this->isBombing = FALSE;
         g_ItemManager.RemoveAllItems();
     }
     else
@@ -1849,8 +1849,8 @@ void Player::UpdateBorderAndBombState()
                 g_GameManager.AddBombsRemaining(-1);
                 g_Gui.bombDisplayUpdateFrames = 2;
                 this->bombInfo.isFocus = (i32)this->isFocus;
-                this->bombInfo.isInUse = 1;
-                this->isBombing = 1;
+                this->bombInfo.isInUse = TRUE;
+                this->isBombing = TRUE;
                 this->bombInfo.bombTimer = 0;
                 this->bombInfo.bombDuration = 999;
                 if (!this->bombInfo.isFocus)
@@ -1873,7 +1873,7 @@ void Player::UpdateBorderAndBombState()
             }
             else
             {
-                this->isBombing = 0;
+                this->isBombing = FALSE;
             }
         }
     }
@@ -2291,7 +2291,7 @@ void Player::UpdateUI()
 {
     this->positionOfLastEnemyHit = ZunVec3(-999.0f, -999.0f, 0.0f);
     this->sakuyaTargetPosition = ZunVec3(-999.0f, -999.0f, 0.0f);
-    this->targetingEnemy = 0;
+    this->targetingEnemy = FALSE;
     if (this->pos.y >= 400.0f)
     {
         if (g_AsciiManager.GetFadeState() != 2 && this->pos.x < 160.0f)
@@ -2447,9 +2447,7 @@ ZunResult Player::AddedCallback(Player *arg)
         return ZUN_ERROR;
     }
 
-    if ((u32)(g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_RESTART_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE_USELESS))
+    if (IsInitialStageLoad())
     {
         switch (g_GameManager.character)
         {
@@ -2518,16 +2516,14 @@ ZunResult Player::AddedCallback(Player *arg)
     arg->bombInfo.draw = g_BombData[g_GameManager.shotTypeAndCharacter].draw;
     arg->bombInfo.bombFocusCalc = g_BombData[g_GameManager.shotTypeAndCharacter].calcFocus;
     arg->bombInfo.drawFocus = g_BombData[g_GameManager.shotTypeAndCharacter].drawFocus;
-    arg->bombInfo.isInUse = 0;
+    arg->bombInfo.isInUse = FALSE;
     arg->dirtyBombBoxes = true;
     arg->numActiveBombClearBoxes = 0;
     arg->optionAngle = -ZUN_PI / 2.0f;
     arg->verticalMovementSpeedMultiplierDuringBomb = 1.0f;
     arg->horizontalMovementSpeedMultiplierDuringBomb = 1.0f;
     arg->respawnTimer = g_Player.shooterData->initialRespawnTimer;
-    if ((u32)(g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_RESTART_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE_USELESS))
+    if (IsInitialStageLoad())
     {
         g_AsciiManager.cherryGauge.pendingInterrupt = 1;
         g_AsciiManager.uiFadeState = 1;
@@ -2545,11 +2541,7 @@ ZunResult Player::AddedCallback(Player *arg)
 
 ZunResult Player::DeletedCallback(Player *arg)
 {
-    (void)arg;
-
-    if ((u32)(g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_RESTART_STAGE &&
-              g_Supervisor.curState != SUPERVISOR_STATE_NEXT_STAGE_USELESS))
+    if (IsInitialStageLoad())
     {
         g_AnmManager->ReleaseAnm(ANM_FILE_PLAYER);
         g_AsciiManager.cherryGauge.pendingInterrupt = 99;
