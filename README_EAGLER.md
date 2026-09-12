@@ -142,6 +142,23 @@ Common PBG/archive helpers used by Eagler packaging live in
 `eagler-touhou/scripts/touhou_formats.py`. TH07 conversion scripts should reuse
 that implementation rather than maintain a second PBG4 decompressor.
 
+## Validation and test ownership
+
+The fast CI gate for multiplayer/runtime core behavior is:
+
+```sh
+bash scripts/run-core-tests.sh
+```
+
+It compiles and executes the netplay protocol/session, rollback journal and
+multiplayer input-lane tests. GitHub `Eagler Web CI` runs that core suite
+alongside source-only `web-ci-normal` and `web-ci-netplay` Emscripten builds.
+
+The broader `tests/` directory contains executable browser, replay, relay, TURN
+and spectator behavior harnesses. Static source-text checks live under
+`audit/source-contracts/`; historical rebase evidence lives under
+`audit/feature-rebase/`. Neither audit directory is runtime/gameplay acceptance.
+
 ## Repository boundaries
 
 Do not commit original game archives, generated playable DATA, local build/test
