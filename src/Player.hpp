@@ -226,7 +226,6 @@ struct Player
     i32 CalcLaserHitbox(ZunVec3 *center, ZunVec3 *size, ZunVec3 *origin, f32 rotation,
                         ZunBool canGraze);
     i32 CalcBombCollision(ZunVec3 *center, ZunVec3 *size);
-    i32 CheckBombGraze(ZunVec3 *center, ZunVec3 *size);
     i32 CalcDamageToEnemy(ZunVec3 *param_1, ZunVec3 *param_2, i32 *param_3);
     i32 CheckGraze(ZunVec3 *center, ZunVec3 *size);
 

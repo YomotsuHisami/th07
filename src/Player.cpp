@@ -2156,7 +2156,7 @@ void Player::RebuildBombBoxCache()
     }
 }
 
-i32 Player::CheckBombGraze(ZunVec3 *center, ZunVec3 *size)
+i32 Player::CalcBombCollision(ZunVec3 *center, ZunVec3 *size)
 {
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
     if (MultiplayerGameplay::IsMultiplayer() &&
@@ -2219,7 +2219,7 @@ i32 Player::CalcKillboxCollision(ZunVec3 *center, ZunVec3 *size)
 #endif
 
     this->itemType = ITEM_POINT_BULLET;
-    if (CheckBombGraze(center, size))
+    if (CalcBombCollision(center, size))
     {
         return 2;
     }
