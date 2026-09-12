@@ -22,6 +22,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Check Python and integration script syntax
+        shell: bash
+        run: |
+          python3 -m py_compile tests/*.py audit/source-contracts/*.py scripts/convert_bgm_ogg.py
+          for file in tests/*.cjs; do
+            node --check "$file"
+          done
+
       - name: Compile and run core behavior tests
         run: bash scripts/run-core-tests.sh
 

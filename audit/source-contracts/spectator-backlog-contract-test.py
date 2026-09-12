@@ -1,10 +1,23 @@
+import os
 from pathlib import Path
 
 
-WORKSPACE = Path(__file__).resolve().parents[3]
-RELAY = (WORKSPACE / "eagler-touhou/server/netplay-relay.mjs").read_text(encoding="utf-8")
-TH06 = (WORKSPACE / "th06-eagler/src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
-TH07 = (WORKSPACE / "th07-eagler/src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
+def require_checkout(name: str, description: str) -> Path:
+    raw = os.environ.get(name)
+    if not raw:
+        raise RuntimeError(f"{name} must point to {description}")
+    root = Path(raw).expanduser().resolve()
+    if not root.is_dir():
+        raise RuntimeError(f"{name} is not a directory: {root}")
+    return root
+
+
+ROOT = Path(__file__).resolve().parents[2]
+HOST_ROOT = require_checkout("TH_EAGLER_HOST_ROOT", "an eagler-touhou checkout")
+TH06_ROOT = require_checkout("TH_EAGLER_TH06_ROOT", "a TH06 eagler checkout")
+RELAY = (HOST_ROOT / "server/netplay-relay.mjs").read_text(encoding="utf-8")
+TH06 = (TH06_ROOT / "src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
+TH07 = (ROOT / "src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
 
 
 def require(ok: bool, label: str) -> None:
