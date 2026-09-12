@@ -1,6 +1,6 @@
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 player = (ROOT / "src" / "Player.cpp").read_text(encoding="utf-8")
 game = (ROOT / "src" / "GameManager.cpp").read_text(encoding="utf-8")
 driver = (ROOT / "src" / "netplay" / "Th07LanStageProbe.cpp").read_text(encoding="utf-8")

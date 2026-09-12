@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-WORKSPACE = Path(__file__).resolve().parents[2]
+WORKSPACE = Path(__file__).resolve().parents[3]
 RELAY = (WORKSPACE / "eagler-touhou/server/netplay-relay.mjs").read_text(encoding="utf-8")
 TH06 = (WORKSPACE / "th06-eagler/src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
 TH07 = (WORKSPACE / "th07-eagler/src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
