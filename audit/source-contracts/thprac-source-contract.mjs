@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const project = path.resolve(here, '..');
+const project = path.resolve(here, '../..');
 const workspace = path.resolve(project, '..');
 
 function read(rel) {
@@ -675,7 +675,7 @@ if (portableAscii.includes('PracticeRuntime::DrawPauseMenuPanel()') ||
 
 // Always accompany the detailed state assertions with the independent
 // mechanically enumerated upstream hook/surface/state inventory.
-await import('./audit-thprac-upstream-hooks.mjs');
+await import('./thprac-upstream-hooks.mjs');
 
 console.log(
     'TH07 thprac source contract PASS: TH07-specific Stage1..6/Extra/Phantasm menu; ' +

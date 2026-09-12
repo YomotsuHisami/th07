@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repo = path.resolve(here, '..');
+const repo = path.resolve(here, '../..');
 const workspace = path.resolve(repo, '..');
 const read = rel => fs.readFileSync(path.join(workspace, rel), 'utf8').replaceAll('\r\n', '\n');
 
@@ -65,7 +65,7 @@ function exact(actual, expected, label) {
 }
 
 const version = read('dependencies/upstream-thcrap-tsa/base_tsa/th07.v1.00b.js');
-const sourceContract = read('th07-eagler/scripts/test-thcrap-source-contract.mjs');
+const sourceContract = read('th07-eagler/audit/source-contracts/thcrap-source-contract.mjs');
 const expectedBinhacks = [
   'antitamper_remove_check','sprintf_call_ebp-208','sprintf_call_ebp-50','sprintf_rep','sprintf_replay_1',
   'sprintf_replay_2','sprintf_replay_3','menu_desc_align','boss_title_align','spell_loop','music_cmt_prepare',

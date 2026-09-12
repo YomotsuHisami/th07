@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(scriptDir, '..');
+const repoRoot = path.resolve(scriptDir, '../..');
 const upstreamPath = path.resolve(repoRoot, '../thprac-reallyportable/thprac/src/thprac/thprac_th07.cpp');
 const upstream = fs.readFileSync(upstreamPath, 'utf8');
 

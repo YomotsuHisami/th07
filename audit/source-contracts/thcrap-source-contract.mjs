@@ -3,7 +3,7 @@ import path from "node:path";
 import process from "node:process";
 import { createHash } from "node:crypto";
 
-const root = path.resolve(import.meta.dirname, "..", "..");
+const root = path.resolve(import.meta.dirname, "..", "..", "..");
 const read = rel => fs.readFileSync(path.join(root, rel), "utf8");
 const requireText = (haystack, needle, label) => {
   if (!haystack.includes(needle)) throw new Error(`missing ${label}: ${needle}`);
@@ -699,6 +699,6 @@ requireText(gui, "th07 thcrap stage result align: localization=0", "Japanese Sta
 // The detailed assertions above are necessary but not sufficient: also fail
 // closed on the complete v1.00b site inventory and reverse portable consumer
 // inventory every time this normal contract entrypoint runs.
-await import('./audit-thcrap-proof-ledger.mjs');
+await import('./thcrap-proof-ledger.mjs');
 
 console.log("th07 thcrap source contract: PASS");

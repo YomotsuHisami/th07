@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const project = path.resolve(here, '..');
+const project = path.resolve(here, '../..');
 const workspace = path.resolve(project, '..');
 const read = rel => fs.readFileSync(path.join(workspace, rel), 'utf8').replaceAll('\r\n', '\n');
 
@@ -381,7 +381,7 @@ if (missing.length) {
 // a typed portable owner.  Also require the independent address/decomp audit so
 // anonymous F1-F6 PATCH_HK/EHOOK_HK sites cannot fall outside the 34-name
 // inventory unnoticed.
-execFileSync(process.execPath, [path.join(here, 'audit-thprac-address-map.mjs')], {
+execFileSync(process.execPath, [path.join(here, 'thprac-address-map.mjs')], {
     cwd: project,
     stdio: 'inherit',
 });

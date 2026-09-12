@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const musicRoom = fs.readFileSync(path.join(root, 'src/MusicRoom.cpp'), 'utf8');
 
 function requireText(needle, label) {
