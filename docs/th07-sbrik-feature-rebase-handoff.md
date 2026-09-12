@@ -137,7 +137,7 @@ The fix is in `src/netplay/Th07LanStageProbe.cpp`:
 - The retry path never calls `CaptureLocalInput`, so keyboard, controller and one-frame direct-touch displacement are not sampled again.
 - The application-level redundant tail remains 32 frames, matching final sbrik behavior.
 
-The focused contract is in `tests/netplay-rollback-feature-rebase-test.py` and explicitly rejects a retry helper that calls `CaptureLocalInput`.
+The focused contract is in `audit/feature-rebase/netplay-rollback-feature-rebase-test.py` and explicitly rejects a retry helper that calls `CaptureLocalInput`.
 
 TH06 reuse lesson was added to `docs/th06-th07-multiplayer-feature-rebase-notes.md`: redundancy alone is insufficient at frame zero/prediction-window stalls; resend scheduled logical input without resampling the device.
 
@@ -204,7 +204,7 @@ Latest relevant evidence:
 - Multiplayer-gameplay desktop Release build: PASS.
 - Production shared-font Emscripten Web build: PASS.
 - Acceptance-only embedded-font Emscripten Web build: PASS. This separate cache exists only because a standalone direct server does not run the production package-font installer.
-- `tests/netplay-rollback-feature-rebase-test.py`: PASS, 16/16.
+- `audit/feature-rebase/netplay-rollback-feature-rebase-test.py`: PASS, 16/16.
 - Fresh C++ `netplay-core-test`: PASS.
 - Fresh C++ sparse rollback-journal test: PASS.
 - Fresh C++ multiplayer input-lane test: PASS.
@@ -301,7 +301,7 @@ Standalone acceptance Web with embedded fonts:
 Latest rollback contract:
 
 ```powershell
-python tests/netplay-rollback-feature-rebase-test.py
+python audit/feature-rebase/netplay-rollback-feature-rebase-test.py
 ```
 
 Before handing off any future change:

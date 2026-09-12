@@ -8,7 +8,7 @@ import re
 import subprocess
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "src" / "ReplayManager.cpp").read_text(encoding="utf-8")
 EXTENSION = (ROOT / "src" / "ReplayExtension.cpp").read_text(encoding="utf-8")
 PLAYER = (ROOT / "src" / "Player.cpp").read_text(encoding="utf-8")

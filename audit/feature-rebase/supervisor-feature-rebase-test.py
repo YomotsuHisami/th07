@@ -3,7 +3,7 @@
 from __future__ import annotations
 import pathlib, re, subprocess
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "src" / "Supervisor.cpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "src" / "Supervisor.hpp").read_text(encoding="utf-8")
 INPUT = (ROOT / "src" / "netplay" / "NetplayInput.cpp").read_text(encoding="utf-8")

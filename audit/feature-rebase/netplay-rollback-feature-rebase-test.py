@@ -7,7 +7,7 @@ import re
 import subprocess
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 CORE_H = (ROOT / "src/netplay/NetplayCore.hpp").read_text(encoding="utf-8")
 CORE = (ROOT / "src/netplay/NetplayCore.cpp").read_text(encoding="utf-8")
 PROTOCOL = (ROOT / "src/netplay/NetplayProtocol.hpp").read_text(encoding="utf-8")

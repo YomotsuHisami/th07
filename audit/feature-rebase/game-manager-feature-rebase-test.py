@@ -8,7 +8,7 @@ import re
 import subprocess
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "src" / "GameManager.cpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "src" / "GameManager.hpp").read_text(encoding="utf-8")
 RESOURCES = (ROOT / "src" / "MultiplayerResources.cpp").read_text(encoding="utf-8")

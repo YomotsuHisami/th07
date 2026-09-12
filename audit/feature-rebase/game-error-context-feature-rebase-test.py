@@ -8,7 +8,7 @@ import re
 import subprocess
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "src" / "GameErrorContext.cpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "src" / "GameErrorContext.hpp").read_text(encoding="utf-8")
 BASE = "5b9ebe892914ff5666ef68c0cd02719dde7d4ee9"

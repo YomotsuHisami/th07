@@ -8,7 +8,7 @@ import re
 import subprocess
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "src" / "Controller.cpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "src" / "Controller.hpp").read_text(encoding="utf-8")
 NET_INPUT = (ROOT / "src" / "netplay" / "NetplayInput.cpp").read_text(encoding="utf-8")

@@ -8,7 +8,7 @@ import re
 import subprocess
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "src" / "EffectManager.cpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "src" / "EffectManager.hpp").read_text(encoding="utf-8")
 ROLLBACK = (ROOT / "src" / "netplay" / "Th07RollbackState.cpp").read_text(encoding="utf-8")

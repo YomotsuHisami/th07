@@ -3,7 +3,7 @@
 from __future__ import annotations
 import pathlib, re, subprocess
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "src" / "EnemyManager.cpp").read_text(encoding="utf-8")
 MAIN = (ROOT / "src" / "main.cpp").read_text(encoding="utf-8")
 BASE = "5b9ebe892914ff5666ef68c0cd02719dde7d4ee9"

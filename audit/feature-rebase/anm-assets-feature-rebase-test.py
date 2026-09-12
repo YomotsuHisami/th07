@@ -8,7 +8,7 @@ import re
 import subprocess
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 INDEX = (ROOT / "src" / "AnmIdx.hpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "src" / "AnmManager.hpp").read_text(encoding="utf-8")
 SOURCE = (ROOT / "src" / "AnmManager.cpp").read_text(encoding="utf-8")

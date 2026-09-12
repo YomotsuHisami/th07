@@ -8,7 +8,7 @@ import re
 import subprocess
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOUND = (ROOT / "src" / "SoundPlayer.cpp").read_text(encoding="utf-8")
 WINDOW = (ROOT / "src" / "GameWindow.cpp").read_text(encoding="utf-8")
 STAGE = (ROOT / "src" / "netplay" / "Th07LanStageProbe.cpp").read_text(encoding="utf-8")

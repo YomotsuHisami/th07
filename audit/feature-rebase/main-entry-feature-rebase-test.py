@@ -7,7 +7,7 @@ import re
 import subprocess
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / "src" / "main.cpp").read_text(encoding="utf-8")
 SESSION = (ROOT / "src" / "multiplayer" / "GameplaySession.cpp").read_text(encoding="utf-8")
 RESULT = (ROOT / "src" / "ResultScreen.cpp").read_text(encoding="utf-8")

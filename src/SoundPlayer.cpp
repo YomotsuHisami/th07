@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdio>
+#include <SDL3/SDL_hints.h>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
@@ -565,7 +566,7 @@ bool SoundPlayer::PumpWebAudio()
         return true;
     }
 
-    // A/B robustness envelope paired with the Web SDL backend's 4096-frame
+    // A/B robustness envelope paired with the configured 4096-frame Web SDL
     // ScriptProcessor block. Vorbis/miniaudio work stays in small 1024-frame
     // slices; only the queued safety window is deeper.
     constexpr ma_uint64 FRAMES_PER_CHUNK = 1024;
@@ -669,6 +670,11 @@ ZunResult SoundPlayer::InitializeSound()
     }
 
     SDL_AudioSpec desiredAudio = {SDL_AUDIO_F32, 2, 44100};
+    // SDL's stock Emscripten backend doubles SDL_GetDefaultSampleFramesFromFreq().
+    // Requesting 2048 therefore yields the 4096-frame ScriptProcessor block
+    // that this Runtime's Web audio queue is tuned around, without modifying
+    // the vendored SDL submodule in-place.
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "2048", SDL_HINT_OVERRIDE);
     this->webAudioStream =
         SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &desiredAudio, NULL, NULL);
     if (!this->webAudioStream)
