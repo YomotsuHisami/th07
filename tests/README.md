@@ -9,3 +9,9 @@ Historical `*-feature-rebase-test.py` source-text checks are kept separately in
 not be reported as product behavior coverage.
 
 Static source-contract checks that are not tied to the historical feature rebase live in `audit/source-contracts/`.
+
+The fast, dependency-light C++ core suite is the CI entry point:
+
+```sh
+bash scripts/run-core-tests.sh
+```
