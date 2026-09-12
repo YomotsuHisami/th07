@@ -676,7 +676,12 @@
         preRun: [() => {
           addRunDependency("savesth07-sync");
           try { FS.mkdir(saveRoot); } catch (error) { if (!String(error).includes("File exists")) console.error(error); }
-          FS.mount(IDBFS, { autoPersist: true }, saveRoot);
+          const saveMountRoot = FS.mount(IDBFS, { autoPersist: true }, saveRoot);
+          const saveMount = saveMountRoot?.mount;
+          // Suppress autoPersist writes created by populate itself. Otherwise
+          // a nested restore can queue a partial memory tree back to IndexedDB
+          // and delete entries that WebKit has not restored yet.
+          if (saveMount) saveMount.idbPersistState = "restore";
           let settled = false;
           const timer = setTimeout(() => {
             if (settled) return;
@@ -694,6 +699,7 @@
               failHostedStartup(new Error(`Local save restore failed: ${error?.message || error}`));
               return;
             }
+            if (saveMount) saveMount.idbPersistState = 0;
             removeRunDependency("savesth07-sync");
           });
         }],

@@ -142,9 +142,9 @@ Current `BrowserPeerTransport` buffers RTC packets while route is undecided, sym
 
 ## Signaling / TURN credential server
 
-Current development/public server code:
+Current development/public server code is Host-owned and shared by TH06/TH07:
 
-`th07-eagler/tools/netplay/lan-relay.cjs`
+`eagler-touhou/server/netplay-relay.mjs`
 
 It currently combines:
 
@@ -183,11 +183,11 @@ Do not add a new room JWT/custom TURN token system merely for theoretical harden
 
 ## coturn deployment files in the repository
 
-Already added:
+Current owners:
 
-- `tools/netplay/render-coturn-config.cjs`
-- `tools/netplay/coturn.env.example`
-- `tools/netplay/TURN.md`
+- `eagler-touhou/server/render-coturn-config.cjs`
+- `eagler-touhou/server/coturn.env.example`
+- `eagler-touhou/docs/SELF_HOSTING_REFERENCE.md`
 - `tests/coturn-config-contract-test.cjs`
 - `tests/turn-signaling-contract-test.cjs`
 

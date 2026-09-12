@@ -13,7 +13,8 @@ from playwright.sync_api import sync_playwright
 
 
 WORKSPACE = Path(__file__).resolve().parents[2]
-RELAY_ROOT = WORKSPACE / "th07-eagler" / "tools" / "netplay"
+RELAY_ROOT = WORKSPACE / "eagler-touhou"
+RELAY_SCRIPT = RELAY_ROOT / "server" / "netplay-relay.mjs"
 
 
 def free_port() -> int:
@@ -158,7 +159,7 @@ def run_game(game: str, force_relay: bool, spectator_delay_ms: int = 0,
         cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     relay = subprocess.Popen(
-        ["node", "lan-relay.cjs"], cwd=RELAY_ROOT, env=env,
+        ["node", str(RELAY_SCRIPT)], cwd=RELAY_ROOT, env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
     browsers = []

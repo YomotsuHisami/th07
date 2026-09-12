@@ -6,7 +6,7 @@ const WebSocket = globalThis.WebSocket;
 const port = 18143;
 const secret = 'turn-contract-test-secret';
 const ttl = 600;
-const relayPath = path.resolve(__dirname, '../tools/netplay/lan-relay.cjs');
+const relayPath = path.resolve(__dirname, '../../eagler-touhou/server/netplay-relay.mjs');
 
 function fail(message) {
   throw new Error(message);
