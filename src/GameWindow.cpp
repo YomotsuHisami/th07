@@ -81,7 +81,7 @@ static void ReportNativePerfTelemetry(u64 nowNs)
         "native-perf callbacks=%u updates=%u draws=%u calc_ms=%.3f draw_ms=%.3f max_draw_ms=%.3f vsync=%d display_hz=%.3f gl_draws=%llu gl_vertices=%llu subdata=%llu subdata_bytes=%llu bufferdata=%llu binds=%llu uniforms=%llu swaps=%llu\n",
         perf.callbacks, perf.updates, perf.draws,
         (double)perf.calcNs / 1000000.0, (double)perf.drawNs / 1000000.0,
-        (double)perf.maxDrawNs / 1000000.0, g_Supervisor.vsyncEnabled,
+        (double)perf.maxDrawNs / 1000000.0, g_Supervisor.vsyncDisabled,
         (double)GetNativePresentationHz(),
         (unsigned long long)glPerf.drawCalls, (unsigned long long)glPerf.drawVertices,
         (unsigned long long)glPerf.bufferSubDataCalls,
@@ -488,7 +488,7 @@ RenderResult GameWindow::Render()
 
     constexpr u64 nsPerFrame = 1000000000 / 60;
 #ifdef __EMSCRIPTEN__
-    if (g_Supervisor.vsyncEnabled && timeToRender < nsPerFrame)
+    if (g_Supervisor.vsyncDisabled && timeToRender < nsPerFrame)
 #else
     // Keep the original 60 Hz simulation, but pace presentation to the actual
     // display refresh rate. SDL_GL_GetSwapInterval(1) is only a request: some
@@ -518,7 +518,7 @@ ZunResult GameWindow::InitInterface()
         g_Supervisor.gfxDevice = gfxInit();
         if (g_Supervisor.gfxDevice)
         {
-            g_Supervisor.flags |= 2;
+            g_Supervisor.hasLockableBackbuffer = 1;
             g_Supervisor.lockableBackBuffer = 1;
             return ZUN_SUCCESS;
         }
@@ -766,8 +766,8 @@ ZunResult GameWindow::InitRendering()
 
     halfWidth = 320.0f;
     halfHeight = 240.0f;
-    aspectRatio = 1.3333334f;
-    fov = 0.5235988f;
+    aspectRatio = 4.0f / 3.0f;
+    fov = ZUN_PI / 6.0f;
     halfCameraDistance = halfHeight / tanf(fov / 2.0f);
     pUp.x = 0.0f;
     pUp.y = 1.0f;
@@ -787,8 +787,8 @@ ZunResult GameWindow::InitRendering()
 
     g_Supervisor.viewport.x = 0;
     g_Supervisor.viewport.y = 0;
-    g_Supervisor.viewport.width = 640;
-    g_Supervisor.viewport.height = 480;
+    g_Supervisor.viewport.width = GAME_WINDOW_WIDTH;
+    g_Supervisor.viewport.height = GAME_WINDOW_HEIGHT;
     g_Supervisor.viewport.minZ = 0.0f;
     g_Supervisor.viewport.maxZ = 1.0f;
     g_Supervisor.gfxDevice->SetViewport(g_Supervisor.viewport);

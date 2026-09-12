@@ -1,4 +1,5 @@
 #include "SoundPlayer.hpp"
+#include "utils.hpp"
 #ifdef TH_ENABLE_NETPLAY
 #include "netplay/NetplaySideEffects.hpp"
 #endif
@@ -488,7 +489,7 @@ static bool ThBgmDataSource_init_ogg(ThBgmDataSource *pBgm, const char *path, Th
 SoundPlayer::SoundPlayer()
 {
     memset(this, 0, sizeof(SoundPlayer));
-    for (i32 i = 0; i < 128; i++)
+    for (i32 i = 0; i < ARRAY_SIZE_SIGNED(this->unusedSoundVolRelated); i++)
     {
         this->unusedSoundVolRelated[i] = -1;
     }
@@ -635,7 +636,7 @@ ZunResult SoundPlayer::InitializeSound()
     ma_engine_config engineConfig;
 
     memset(this, 0, sizeof(SoundPlayer));
-    for (i32 i = 0; i < 128; i++)
+    for (i32 i = 0; i < ARRAY_SIZE_SIGNED(this->unusedSoundVolRelated); i++)
     {
         this->unusedSoundVolRelated[i] = -1;
     }
@@ -716,7 +717,7 @@ ZunResult SoundPlayer::Release()
         return ZUN_SUCCESS;
     }
 
-    for (i = 0; i < 128; i++)
+    for (i = 0; i < ARRAY_SIZE_SIGNED(this->soundBuffers); i++)
     {
         if (this->soundBuffers[i])
         {
@@ -1192,11 +1193,11 @@ ZunResult SoundPlayer::InitSoundBuffers()
         return ZUN_ERROR;
     }
 
-    for (i = 0; i < 5; i++)
+    for (i = 0; i < ARRAY_SIZE_SIGNED(this->soundQueue); i++)
     {
         this->soundQueue[i] = -1;
     }
-    for (i = 0; i < 30; i++)
+    for (i = 0; i < ARRAY_SIZE_SIGNED(g_SFXList); i++)
     {
         if (LoadSound(i, g_SFXList[i]) != ZUN_SUCCESS)
         {
@@ -1205,7 +1206,7 @@ ZunResult SoundPlayer::InitSoundBuffers()
             return ZUN_ERROR;
         }
     }
-    for (i = 0; (u32)i < 38; i++)
+    for (i = 0; i < ARRAY_SIZE(SOUND_BUFFER_IDX_VOL); i++)
     {
         i32 bufIdx = SOUND_BUFFER_IDX_VOL[i].bufferIdx;
 
@@ -1450,7 +1451,7 @@ loop:
     default:
         goto loop_breakout;
     }
-    for (i = 0; i < 31; i++, commandCursor++)
+    for (i = 0; i < MAX_SOUND_COMMANDS; i++, commandCursor++)
     {
         if (commandCursor->opcode == 0)
         {

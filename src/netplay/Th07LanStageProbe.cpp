@@ -993,7 +993,7 @@ bool Initialize()
     stateConfig.maxBlocksPerFrame = 4096;
     // Final sbrik raised the 3P rollback ceiling to 1024 after simultaneous
     // Bombs routinely exceeded the earlier two-player-sized budget. The
-    // journal stores only live BombEffects, so retain that gameplay-derived
+    // journal stores only live ScreenEffect, so retain that gameplay-derived
     // headroom without importing the native snapshot/network shell.
     stateConfig.maxBombEffectsPerFrame = 1024;
     if (!Th07Rollback::Reset(stateConfig))
@@ -1399,7 +1399,7 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
         g_PeakItems, static_cast<std::uint32_t>(g_ItemManager.activeItemCount));
     std::uint32_t activeLasers = 0;
     for (const auto &laser : g_BulletManager.lasers)
-        activeLasers += laser.inUse ? 1u : 0u;
+        activeLasers += laser.isInUse ? 1u : 0u;
     g_PeakLasers = std::max(g_PeakLasers, activeLasers);
     if (UseStageTransitionTest() && !resimulation && (frame % 1800u) == 0u)
     {
@@ -1421,8 +1421,8 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
             boss ? 1 : 0, boss ? boss->life : -1, boss ? boss->maxLife : -1,
             boss ? boss->timer.GetCurrent() : -1, boss ? boss->canBeDamaged : 0,
             boss ? boss->pos.x : -999.0f, boss ? boss->pos.y : -999.0f,
-            g_Players[0].positionCenter.x, g_Players[1].positionCenter.x,
-            g_Players[2].positionCenter.x,
+            g_Players[0].pos.x, g_Players[1].pos.x,
+            g_Players[2].pos.x,
             g_Players[0].playerState, g_Players[1].playerState, g_Players[2].playerState,
             GetPlayerLives(0), GetPlayerLives(1), GetPlayerLives(2));
     }
@@ -1945,17 +1945,17 @@ int RunCalcChain()
         {
             std::printf(
                 "netplay lan stage: PLAYERS p1=(%.2f,%.2f) p2=(%.2f,%.2f) p3=(%.2f,%.2f) independentInputs=1 physicalInput=%d\n",
-                g_Players[0].positionCenter.x, g_Players[0].positionCenter.y,
-                g_Players[1].positionCenter.x, g_Players[1].positionCenter.y,
-                g_Players[2].positionCenter.x, g_Players[2].positionCenter.y,
+                g_Players[0].pos.x, g_Players[0].pos.y,
+                g_Players[1].pos.x, g_Players[1].pos.y,
+                g_Players[2].pos.x, g_Players[2].pos.y,
                 UsePhysicalInput() ? 1 : 0);
         }
         else
         {
             std::printf(
                 "netplay lan stage: PLAYERS p1=(%.2f,%.2f) p2=(%.2f,%.2f) independentInputs=1 physicalInput=%d\n",
-                g_Players[0].positionCenter.x, g_Players[0].positionCenter.y,
-                g_Players[1].positionCenter.x, g_Players[1].positionCenter.y,
+                g_Players[0].pos.x, g_Players[0].pos.y,
+                g_Players[1].pos.x, g_Players[1].pos.y,
                 UsePhysicalInput() ? 1 : 0);
         }
 #endif

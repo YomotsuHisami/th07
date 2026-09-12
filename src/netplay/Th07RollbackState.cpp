@@ -33,7 +33,7 @@ struct BombFrame
 {
     std::uint32_t startFrame = 0;
     std::uint32_t endFrame = 0;
-    std::vector<BombEffects> effects;
+    std::vector<ScreenEffect> effects;
 };
 
 constexpr std::size_t CHECKPOINT_LOGICAL_FRAMES = 2;
@@ -86,10 +86,10 @@ bool TouchRange(void *begin, void *end)
 
 bool IsBombEffectCallback(ChainCallback callback)
 {
-    return callback == reinterpret_cast<ChainCallback>(BombEffects::OnUpdateFadeIn) ||
-           callback == reinterpret_cast<ChainCallback>(BombEffects::OnUpdateFadeOut) ||
-           callback == reinterpret_cast<ChainCallback>(BombEffects::OnUpdatePulse) ||
-           callback == reinterpret_cast<ChainCallback>(BombEffects::OnUpdateScreenShake);
+    return callback == reinterpret_cast<ChainCallback>(ScreenEffect::OnUpdateFadeIn) ||
+           callback == reinterpret_cast<ChainCallback>(ScreenEffect::OnUpdateFadeOut) ||
+           callback == reinterpret_cast<ChainCallback>(ScreenEffect::OnUpdatePulse) ||
+           callback == reinterpret_cast<ChainCallback>(ScreenEffect::OnUpdateScreenShake);
 }
 
 bool CaptureBombEffects(std::uint32_t frame)
@@ -114,7 +114,7 @@ bool CaptureBombEffects(std::uint32_t frame)
             g_Failed = true;
             return false;
         }
-        snapshot.effects.push_back(*static_cast<BombEffects *>(element->arg));
+        snapshot.effects.push_back(*static_cast<ScreenEffect *>(element->arg));
     }
     return true;
 }
@@ -144,9 +144,9 @@ void RemoveCurrentBombEffects()
 
 bool RestoreBombEffects(const BombFrame &snapshot)
 {
-    for (const BombEffects &saved : snapshot.effects)
+    for (const ScreenEffect &saved : snapshot.effects)
     {
-        BombEffects *restored = BombEffects::RegisterChain(
+        ScreenEffect *restored = ScreenEffect::RegisterChain(
             saved.type, saved.duration, saved.args[0], saved.args[1], saved.args[2]);
         if (!restored)
         {
@@ -316,7 +316,7 @@ bool CaptureFixedAndSparseState()
     if (!TouchRange(bulletsEnd, lasersBegin))
         return false;
     for (int i = 0; i < 64; ++i)
-        if (g_BulletManager.lasers[i].inUse && !TouchLaser(&g_BulletManager.lasers[i]))
+        if (g_BulletManager.lasers[i].isInUse && !TouchLaser(&g_BulletManager.lasers[i]))
             return false;
     if (!TouchRange(lasersEnd, bulletManagerEnd))
         return false;
@@ -499,7 +499,7 @@ void HashBombEffects(std::uint64_t &hash)
     {
         if (!IsBombEffectCallback(element->callback) || !element->arg)
             continue;
-        const BombEffects &effect = *static_cast<BombEffects *>(element->arg);
+        const ScreenEffect &effect = *static_cast<ScreenEffect *>(element->arg);
         HashObject(hash, effect.type);
         HashObject(hash, effect.field3_0xc);
         HashObject(hash, effect.alpha);
@@ -611,7 +611,7 @@ std::uint64_t DebugStateHash()
                   (reinterpret_cast<const std::uint8_t *>(&g_BulletManager.bullets[0]) +
                    sizeof(g_BulletManager.bullets)));
     for (int i = 0; i < 64; ++i)
-        if (g_BulletManager.lasers[i].inUse)
+        if (g_BulletManager.lasers[i].isInUse)
             HashObject(hash, g_BulletManager.lasers[i]);
     HashBytes(hash,
               reinterpret_cast<const std::uint8_t *>(&g_BulletManager.lasers[0]) +
