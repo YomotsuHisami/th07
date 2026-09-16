@@ -48,7 +48,7 @@
       await send("configure", {
         music: "none",
         resources: [],
-        sharedResources: [],
+        sharedResources: [{ url: "/assets/msgothic.ttc", path: "/msgothic.ttc" }],
         thpracCatalog: [],
         options: {
           debugHarness: "netplay-lan-stage1",
@@ -66,6 +66,8 @@
           ],
           netplayPhysicalInput: false,
           netplayScriptedInput: true,
+          netplayTestIncrementalTouch: true,
+          netplayTouchWorkload: "burst",
           netplayRollbackProbe: true,
           netplaySpectator: spectator,
           netplaySpectatorId: spectator ? String(params.get("spectatorId") || "") : "",

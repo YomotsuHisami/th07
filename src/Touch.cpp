@@ -48,6 +48,7 @@ f32 g_DialogueTapStartY = 0.0f;
 
 f32 g_AccumDx = 0.0f;
 f32 g_AccumDy = 0.0f;
+bool g_MoveGestureUncaptured = false;
 
 bool g_UsedThisRun = false;
 bool g_UsedCheatMovementThisRun = false;
@@ -511,6 +512,7 @@ void ReleaseGameplayFingerState(SDL_FingerID id)
     if (IsFinger(g_MoveFinger, id))
     {
         ReleaseFinger(&g_MoveFinger);
+        g_MoveGestureUncaptured = false;
         g_AccumDx = 0.0f;
         g_AccumDy = 0.0f;
     }
@@ -560,6 +562,7 @@ void Touch::CancelTouches()
     ReleaseFinger(&g_MoveFinger);
     ReleaseFinger(&g_FocusFinger);
     ReleaseFinger(&g_DialogueHoldFinger);
+    g_MoveGestureUncaptured = false;
 
     g_AccumDx = 0.0f;
     g_AccumDy = 0.0f;
@@ -679,6 +682,7 @@ void Touch::FingerDown(const SDL_TouchFingerEvent &f)
             }
 
             AssignFinger(&g_MoveFinger, f.fingerID, px, py);
+            g_MoveGestureUncaptured = true;
             MarkNonReplayableTouchUse();
             CaptureReplayTouchEvent(f, ReplayExtension::TOUCH_ACTION_DOWN);
             return;
@@ -862,6 +866,7 @@ u16 Touch::GetButtonBits()
         {
             AssignFinger(&g_MoveFinger, g_DialogueHoldFinger.id, g_DialogueHoldFinger.lastPxX,
                          g_DialogueHoldFinger.lastPxY);
+            g_MoveGestureUncaptured = true;
         }
         ReleaseFinger(&g_DialogueHoldFinger);
     }
@@ -962,6 +967,16 @@ void Touch::SetPlayerDelta(f32 dx, f32 dy)
 {
     g_AccumDx = dx;
     g_AccumDy = dy;
+}
+
+bool Touch::TakePlayerDelta(f32 *dx, f32 *dy, bool *beginGesture)
+{
+    if (!GetPlayerDelta(dx, dy))
+        return false;
+    *beginGesture = g_MoveGestureUncaptured;
+    g_MoveGestureUncaptured = false;
+    g_AccumDx = g_AccumDy = 0.0f;
+    return true;
 }
 
 void Touch::ConsumePlayerDelta(f32 dx, f32 dy)

@@ -1,6 +1,7 @@
 #include "Th07RollbackState.hpp"
 
 #include "RollbackJournal.hpp"
+#include "NetplayInput.hpp"
 
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
@@ -201,6 +202,8 @@ bool CapturePlayer(Player *player)
 
 bool CaptureFixedAndSparseState()
 {
+    if (!TouchObject(&Input::GetDirectTouchStates()))
+        return false;
     if (!TouchObject(&g_GameManager))
         return false;
     if (g_GameManager.globals && !TouchObject(g_GameManager.globals))
@@ -519,6 +522,12 @@ std::uint64_t DebugStateHash()
     // proves restore/replay locally. A later dual-Runtime probe will use a
     // pointer-neutral canonical hash for cross-instance determinism.
     std::uint64_t hash = 1469598103934665603ull;
+    for (const auto &touch : Input::GetDirectTouchStates())
+    {
+        HashObject(hash, touch.x);
+        HashObject(hash, touch.y);
+        HashObject(hash, touch.active);
+    }
     HashObject(hash, g_GameManager);
     if (g_GameManager.globals)
         HashObject(hash, *g_GameManager.globals);

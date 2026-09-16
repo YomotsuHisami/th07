@@ -118,9 +118,11 @@ constexpr std::size_t MP_COUNTS_OFFSET = 128;
 constexpr u32 MP_SESSION_STAGE4_BOSS_CHAIN = 1u;
 constexpr u32 MP_SESSION_HIDE_CONTRIBUTION_STATS = 2u;
 constexpr u32 MP_SESSION_HIDE_STAGE_PLAYER_NAMES = 4u;
+constexpr u32 MP_SESSION_INCREMENTAL_TOUCH = 8u;
 constexpr u32 MP_SESSION_FLAGS_MASK = MP_SESSION_STAGE4_BOSS_CHAIN |
                                       MP_SESSION_HIDE_CONTRIBUTION_STATS |
-                                      MP_SESSION_HIDE_STAGE_PLAYER_NAMES;
+                                      MP_SESSION_HIDE_STAGE_PLAYER_NAMES |
+                                      MP_SESSION_INCREMENTAL_TOUCH;
 constexpr std::size_t MP_STAGE_RESOURCE_BYTES_PER_STAGE = 4 + 3 * 3 * 4;
 constexpr std::size_t MP_STAGE_RESOURCE_BYTES = 7 * MP_STAGE_RESOURCE_BYTES_PER_STAGE;
 constexpr std::size_t MP_STAGE_CONTRIBUTION_BYTES_PER_STAGE = 4 + 3 * 2 * 4;
@@ -144,7 +146,7 @@ Netplay::FrameInput UnpackInput(const PackedFrameInput &input)
 {
     Netplay::FrameInput result;
     result.buttons = input.buttons;
-    result.analogMode = input.analogMode <= static_cast<u8>(Netplay::AnalogMode::DirectTouch)
+    result.analogMode = input.analogMode <= static_cast<u8>(Netplay::AnalogMode::DirectTouchBegin)
                             ? static_cast<Netplay::AnalogMode>(input.analogMode)
                             : Netplay::AnalogMode::None;
     result.x = input.x;
@@ -246,6 +248,19 @@ bool FindTrailer(const u8 *bytes, std::size_t size, std::size_t &payloadOffset, 
             if (expected > payloadSize ||
                 count > (payloadSize - expected) / sizeof(MultiplayerInputSample))
                 return false;
+            const bool incremental = (ReadLe32(bytes + payloadOffset + MP_SESSION_FLAGS_OFFSET) &
+                                      MP_SESSION_INCREMENTAL_TOUCH) != 0;
+            for (u32 frame = 0; frame < count; ++frame)
+            {
+                MultiplayerInputSample sample;
+                std::memcpy(&sample, bytes + payloadOffset + expected +
+                            frame * sizeof(MultiplayerInputSample), sizeof(sample));
+                for (const auto &input : sample.players)
+                    if (input.analogMode > static_cast<u8>(incremental ? Netplay::AnalogMode::DirectTouchBegin
+                                                                       : Netplay::AnalogMode::DirectTouch) ||
+                        (input.flags & ~7u) != 0 || !std::isfinite(input.x) || !std::isfinite(input.y))
+                        return false;
+            }
             expected += static_cast<std::size_t>(count) * sizeof(MultiplayerInputSample);
         }
     }
@@ -445,11 +460,18 @@ bool AppendInputEvents(const char *path, const std::vector<InputSample> (&inputs
     }
     const bool hasMultiplayer = multiplayerConfig.playerCount >= 2 &&
                                 multiplayerConfig.playerCount <= 3;
+    bool hasIncrementalTouch = false;
     if (hasMultiplayer)
     {
         flags |= FLAG_MULTIPLAYER_INPUT;
         for (const auto &stage : multiplayerInputs)
+        {
             bodySize += stage.size() * sizeof(MultiplayerInputSample);
+            for (const auto &frame : stage)
+                for (const auto &input : frame.players)
+                    hasIncrementalTouch |= input.analogMode == static_cast<u8>(Netplay::AnalogMode::DirectTouchDelta) ||
+                                           input.analogMode == static_cast<u8>(Netplay::AnalogMode::DirectTouchBegin);
+        }
         bool hasStageResources = false;
         for (u8 mask : stageResourceMask)
             hasStageResources = hasStageResources || mask != 0;
@@ -495,6 +517,10 @@ bool AppendInputEvents(const char *path, const std::vector<InputSample> (&inputs
             sessionFlags |= MP_SESSION_HIDE_CONTRIBUTION_STATS;
         if (!multiplayerConfig.showStagePlayerNames)
             sessionFlags |= MP_SESSION_HIDE_STAGE_PLAYER_NAMES;
+        // Old readers reject unknown session flags instead of silently
+        // interpreting fresh displacement as a legacy pending snapshot.
+        if (hasIncrementalTouch)
+            sessionFlags |= MP_SESSION_INCREMENTAL_TOUCH;
         WriteLe32(bytes.data() + payloadOffset + MP_SESSION_FLAGS_OFFSET, sessionFlags);
         for (u32 player = 0; player < 3; ++player)
         {
@@ -1178,7 +1204,9 @@ void DebugExpectMultiplayerPlaybackFrame(i32 stage, i32 frame,
         expected.players[player] = inputs[player];
         if (inputs[player].analogMode == Netplay::AnalogMode::Joystick)
             g_ExpectedMultiplayerPlaybackCoverage |= 1u;
-        if (inputs[player].analogMode == Netplay::AnalogMode::DirectTouch)
+        if (inputs[player].analogMode == Netplay::AnalogMode::DirectTouch ||
+            inputs[player].analogMode == Netplay::AnalogMode::DirectTouchDelta ||
+            inputs[player].analogMode == Netplay::AnalogMode::DirectTouchBegin)
             g_ExpectedMultiplayerPlaybackCoverage |= 2u;
         if (inputs[player].unlimited)
             g_ExpectedMultiplayerPlaybackCoverage |= 4u;
@@ -1507,6 +1535,42 @@ bool DebugRoundTrip(const char *path)
             !GetMultiplayerPlaybackStageContributions(0, 1, &legacyContributions);
     }
 
+    // New streams round-trip both gesture reset and continuation. Old readers
+    // must reject their session capability flag, not map an unknown mode to
+    // None; conversely, old mode-2 Replays above keep their original meaning.
+    bool incrementalRoundTrip = false;
+    bool unflaggedIncrementalRejected = false;
+    mpInputs[2].analogMode = Netplay::AnalogMode::DirectTouchBegin;
+    RecordMultiplayerFrame(0, 0, mpInputs, 3);
+    mpInputs[2].analogMode = Netplay::AnalogMode::DirectTouchDelta;
+    mpInputs[2].x = 0.0f;
+    mpInputs[2].y = 0.0f;
+    RecordMultiplayerFrame(0, 1, mpInputs, 3);
+    std::vector<u8> incrementalBytes;
+    if (WriteWholeFile(multiplayerPath.c_str(), base) && AppendRecording(multiplayerPath.c_str()) &&
+        ReadWholeFile(multiplayerPath.c_str(), incrementalBytes) &&
+        LoadPlayback(incrementalBytes.data(), incrementalBytes.size()))
+    {
+        Netplay::FrameInput first[3]{}, second[3]{};
+        std::size_t offset = 0, size = 0;
+        incrementalRoundTrip = GetMultiplayerPlaybackFrame(0, 0, first, 3) &&
+            GetMultiplayerPlaybackFrame(0, 1, second, 3) &&
+            first[2].analogMode == Netplay::AnalogMode::DirectTouchBegin &&
+            first[2].x == 6.5f && first[2].y == -2.25f &&
+            second[2].analogMode == Netplay::AnalogMode::DirectTouchDelta &&
+            second[2].x == 0.0f && second[2].y == 0.0f &&
+            FindTrailer(incrementalBytes.data(), incrementalBytes.size(), offset, size);
+        if (incrementalRoundTrip)
+        {
+            const u32 flags = ReadLe32(incrementalBytes.data() + offset + MP_SESSION_FLAGS_OFFSET);
+            incrementalRoundTrip = (flags & MP_SESSION_INCREMENTAL_TOUCH) != 0;
+            WriteLe32(incrementalBytes.data() + offset + MP_SESSION_FLAGS_OFFSET,
+                      flags & ~MP_SESSION_INCREMENTAL_TOUCH);
+            RecalculateChecksum(incrementalBytes);
+            unflaggedIncrementalRejected = !LoadPlayback(incrementalBytes.data(), incrementalBytes.size());
+        }
+    }
+
     std::remove(extendedPath.c_str());
     std::remove(multiplayerPath.c_str());
     ResetRecording();
@@ -1514,7 +1578,7 @@ bool DebugRoundTrip(const char *path)
     return frame0 && frame1 && oldAttemptGone && incompatibleRejected &&
            developmentVersionRejected && multiplayerRoundTrip && multiplayerHeader &&
            invalidLocalPlayerRejected && preContributionV1Accepted &&
-           legacyMultiplayerV1Accepted;
+           legacyMultiplayerV1Accepted && incrementalRoundTrip && unflaggedIncrementalRejected;
 }
 #endif
 } // namespace ReplayExtension

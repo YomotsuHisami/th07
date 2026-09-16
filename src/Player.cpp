@@ -2709,9 +2709,15 @@ i32 Player::HandlePlayerInputs()
                 ReplayExtension::CaptureDirectTouch(touchDx, touchDy, touchUnlimited);
 
             const bool sampledLogicalTouch = sampledReplayTouch || sampledNetplayTouch;
+            const bool incrementalLogicalTouch =
+#ifdef TH_ENABLE_NETPLAY
+                sampledNetplayTouch && Netplay::Input::UsesIncrementalDirectTouch(this->initParam);
+#else
+                false;
+#endif
             const bool consumeSynchronizedLocalTouch =
 #ifdef TH_ENABLE_NETPLAY
-                sampledNetplayTouch && !speculative &&
+                sampledNetplayTouch && !incrementalLogicalTouch && !speculative &&
                 this->initParam == MultiplayerGameplay::GetLocalPlayerSlot();
 #else
                 false;
@@ -2759,6 +2765,11 @@ i32 Player::HandlePlayerInputs()
             {
                 Touch::SetPlayerDelta(reqGameDx / focusRatio, reqGameDy / focusRatio);
             }
+#ifdef TH_ENABLE_NETPLAY
+            if (focusRatio != 0.0f && incrementalLogicalTouch)
+                Netplay::Input::SetDirectTouchRemainder(this->initParam,
+                    reqGameDx / focusRatio, reqGameDy / focusRatio);
+#endif
 
         f32 hx = this->horizontalMovementSpeedMultiplierDuringBomb *
                  g_Supervisor.effectiveFramerateMultiplier;
@@ -2817,6 +2828,17 @@ i32 Player::HandlePlayerInputs()
                 }
             }
 
+#ifdef TH_ENABLE_NETPLAY
+            if (focusRatio != 0.0f && incrementalLogicalTouch)
+            {
+                if (!touchUnlimited && currentSpeedSq > maxSpeed * maxSpeed && currentSpeedSq > 0.0f)
+                    Netplay::Input::ConsumeDirectTouchRemainder(this->initParam,
+                        hx != 0.0f ? consumedGameDx / focusRatio : touchDx,
+                        vy != 0.0f ? consumedGameDy / focusRatio : touchDy);
+                else
+                    Netplay::Input::SetDirectTouchRemainder(this->initParam, 0.0f, 0.0f);
+            }
+#endif
             this->playerDirection = MOVEMENT_NONE;
 
         // this is actually pretty useless since playerdirection handling is above which we
@@ -4422,6 +4444,9 @@ static ZunResult RegisterOnePlayer(Player *mgr, u8 playerId)
 
 ZunResult Player::RegisterChain(u32 param_1)
 {
+#ifdef TH_ENABLE_NETPLAY
+    Netplay::Input::ResetDirectTouchStates();
+#endif
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
     // Multiplayer Replay is still a multiplayer gameplay session. The Replay
     // menu has already restored playerCount/loadouts from the EAGX metadata,

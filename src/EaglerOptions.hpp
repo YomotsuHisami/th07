@@ -80,7 +80,7 @@ inline f32 TouchSensitivity()
     return static_cast<f32>(EM_ASM_DOUBLE({
         const value = Number(Module.eaglerOptions?.touchSensitivity);
         if (!Number.isFinite(value)) return 1.0;
-        return Math.min(300, Math.max(50, value)) / 100.0;
+        return Math.min(300, Math.max(100, value)) / 100.0;
     }));
 #else
     return 1.0f;

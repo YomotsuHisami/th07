@@ -8,4 +8,6 @@
 // locally without pulling a socket implementation into Player/GameManager.
 constexpr int TH07_MULTI_MAX_PLAYERS = 3;
 constexpr int TH07_MULTI_MAX_GUESTS = TH07_MULTI_MAX_PLAYERS - 1;
-constexpr unsigned int TH07_MULTI_GAMEPLAY_ABI = 4;
+// ABI 5 adds once-only touch displacement streams and rewindable remainder.
+// Older live peers must reject the session before seeing the new analog modes.
+constexpr unsigned int TH07_MULTI_GAMEPLAY_ABI = 5;

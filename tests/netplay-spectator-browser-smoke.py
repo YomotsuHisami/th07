@@ -13,7 +13,8 @@ from playwright.sync_api import sync_playwright
 
 
 WORKSPACE = Path(__file__).resolve().parents[2]
-RELAY_ROOT = WORKSPACE / "th07-eagler" / "tools" / "netplay"
+RELAY_ROOT = WORKSPACE / "eagler-touhou"
+RELAY_SCRIPT = RELAY_ROOT / "server" / "netplay-relay.mjs"
 
 
 def free_port() -> int:
@@ -39,7 +40,7 @@ def wait_relay(process: subprocess.Popen[str]) -> None:
     deadline = time.time() + 10
     while time.time() < deadline:
         line = process.stdout.readline()
-        if "LAN relay listening" in line:
+        if " relay listening " in line.lower():
             return
         if process.poll() is not None:
             raise RuntimeError(f"relay exited early: {process.returncode}")
@@ -64,7 +65,10 @@ def admit_lobby(setup, relay_base: str, room: str, spectator_id: str) -> dict:
                 ws,
                 next() {
                   if (queue.length) return Promise.resolve(queue.shift());
-                  return new Promise(done => waiters.push(done));
+                  return new Promise((resolveNext, rejectNext) => {
+                    const timer = setTimeout(() => rejectNext(new Error(`lobby response timeout: ${id}`)), 10000);
+                    waiters.push(value => { clearTimeout(timer); resolveNext(value); });
+                  });
                 },
               });
             });
@@ -75,21 +79,28 @@ def admit_lobby(setup, relay_base: str, room: str, spectator_id: str) -> dict:
               if (value.type === type) return value;
             }
           }
-          async function nextReadyRoom(client) {
+          async function nextReadyRoom(client, requireReady = true) {
             for (;;) {
               const value = await client.next();
               const seats = value.room?.seats || [];
               const active = seats.slice(0, Number(value.room?.playerCount || 0));
+              if (value.type === 'error') throw new Error(value.error || 'lobby rejected test setup');
               if (value.type === 'state' && active.length === 2 &&
-                  active.every(seat => seat?.ready === true)) return value;
+                  Number(value.room?.spectatorCount) === 1 &&
+                  active.every(seat => seat && (!requireReady || seat.ready === true))) return value;
             }
           }
           const p1 = await connect('player_one_0001'); await p1.next();
           const p2 = await connect('player_two_0002'); await p2.next();
           const spectator = await connect(spectatorId); await spectator.next();
-          p1.ws.send(JSON.stringify({ type: 'take-seat', seat: 0, loadout: 0, ready: true }));
-          p2.ws.send(JSON.stringify({ type: 'take-seat', seat: 1, loadout: 1, ready: true }));
+          p1.ws.send(JSON.stringify({ type: 'take-seat', seat: 0, loadout: 0 }));
+          p2.ws.send(JSON.stringify({ type: 'take-seat', seat: 1, loadout: 1 }));
           spectator.ws.send(JSON.stringify({ type: 'spectate' }));
+          // Seat/loadout changes invalidate all ready votes. Wait for the
+          // final roster before explicitly acknowledging its settings version.
+          await nextReadyRoom(spectator, false);
+          p1.ws.send(JSON.stringify({ type: 'set-ready', ready: true }));
+          p2.ws.send(JSON.stringify({ type: 'set-ready', ready: true }));
           await nextReadyRoom(spectator);
           const started = nextType(spectator, 'start');
           p1.ws.send(JSON.stringify({ type: 'start' }));
@@ -158,7 +169,7 @@ def run_game(game: str, force_relay: bool, spectator_delay_ms: int = 0,
         cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     relay = subprocess.Popen(
-        ["node", "lan-relay.cjs"], cwd=RELAY_ROOT, env=env,
+        ["node", str(RELAY_SCRIPT)], cwd=RELAY_ROOT, env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
     browsers = []

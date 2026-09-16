@@ -18,7 +18,9 @@ from playwright.sync_api import sync_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RELAY_ROOT = ROOT / "tools" / "netplay"
+WORKSPACE = ROOT.parent
+RELAY_ROOT = WORKSPACE / "eagler-touhou"
+RELAY_SCRIPT = RELAY_ROOT / "server" / "netplay-relay.mjs"
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -96,7 +98,7 @@ def main() -> int:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         relay = subprocess.Popen(
-            ["node", "lan-relay.cjs"], cwd=RELAY_ROOT, env=env,
+            ["node", str(RELAY_SCRIPT)], cwd=RELAY_ROOT, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         failures = [""] * player_count
@@ -104,7 +106,7 @@ def main() -> int:
         try:
             assert relay.stdout is not None
             relay_line = relay.stdout.readline().strip()
-            if "LAN relay listening" not in relay_line:
+            if " relay listening " not in relay_line.lower():
                 raise RuntimeError(f"relay failed to start: {relay_line}")
             with sync_playwright() as playwright:
                 browsers = []

@@ -68,7 +68,9 @@ bool ValidInput(const FrameInput &input)
 {
     return (input.analogMode == AnalogMode::None ||
             input.analogMode == AnalogMode::Joystick ||
-            input.analogMode == AnalogMode::DirectTouch) &&
+            input.analogMode == AnalogMode::DirectTouch ||
+            input.analogMode == AnalogMode::DirectTouchDelta ||
+            input.analogMode == AnalogMode::DirectTouchBegin) &&
            std::isfinite(input.x) && std::isfinite(input.y);
 }
 

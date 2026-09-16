@@ -16,6 +16,7 @@ PLAYER = (ROOT / "src/Player.cpp").read_text(encoding="utf-8")
 ROLLBACK = (ROOT / "src/netplay/Th07RollbackState.cpp").read_text(encoding="utf-8")
 JOURNAL_H = (ROOT / "src/netplay/RollbackJournal.hpp").read_text(encoding="utf-8")
 JOURNAL = (ROOT / "src/netplay/RollbackJournal.cpp").read_text(encoding="utf-8")
+FRAME_BUDGET = (ROOT / "src/netplay/FrameBudget.hpp").read_text(encoding="utf-8")
 SIDE_EFFECTS = (ROOT / "src/netplay/NetplaySideEffects.cpp").read_text(encoding="utf-8")
 WINDOW = (ROOT / "src/GameWindow.cpp").read_text(encoding="utf-8")
 TRANSPORT = (ROOT / "src/netplay/WebSocketTransport.cpp").read_text(encoding="utf-8")
@@ -145,7 +146,8 @@ def main() -> None:
         and "CaptureLocalInput" not in scheduled_sender.group("body")
         and "g_Core.BuildInputPacket" in scheduled_sender.group("body")
         and "localPresent && (g_DriverTicks % 3u) == 0u" in DRIVER
-        and "SendScheduledLocalFrame(g_SimFrame)" in DRIVER,
+        and "g_Core.HasLocalCapture(g_SimFrame)" in DRIVER
+        and "SendScheduledLocalFrame(g_Core.LocalFrameForCapture(g_SimFrame))" in DRIVER,
     )
     require(
         "production input packets carry peer-relative ACK and timing state",
@@ -262,16 +264,20 @@ def main() -> None:
     )
     require(
         "dense rollback overlap lookup remains logarithmic",
-        "std::map<std::uintptr_t, Block> blocks" in JOURNAL_H
-        and "record->blocks.lower_bound(start)" in JOURNAL
-        and "std::prev(next)->second" in JOURNAL
+        "std::vector<Block> blocks" in JOURNAL_H
+        and "RotateLeft" in JOURNAL and "RotateRight" in JOURNAL
+        and "Height(record, block.left) - Height(record, block.right)" in JOURNAL
+        and "while (index != NO_BLOCK)" in JOURNAL
         and "for (const Block &block : record->blocks)" not in JOURNAL,
     )
     require(
-        "evicted rollback byte buffers are reused",
-        "FrameRecord recycled = std::move(frames_.front())" in JOURNAL
-        and "recycled.bytes.clear()" in JOURNAL
-        and "frames_.push_back(std::move(recycled))" in JOURNAL,
+        "eviction, rollback and confirmation reuse bounded snapshot arenas",
+        "std::vector<FrameRecord> frames_" in JOURNAL_H
+        and "frames_.resize(config_.maxFrames)" in JOURNAL
+        and "record.byteSize = 0" in JOURNAL
+        and "--frameCount_" in JOURNAL
+        and "frames_.pop_back()" not in JOURNAL
+        and "frames_.pop_front()" not in JOURNAL,
     )
     require(
         "production rollback keeps first-write state across two logical frames and replays from checkpoint start",
@@ -296,7 +302,11 @@ def main() -> None:
     )
     require(
         "network stalls keep bounded presentation catch-up",
-        "maxNetplayCatchupTicks = 6" in WINDOW
+        "MaxCatchupTicks = 6" in FRAME_BUDGET
+        and "maxNetplayCatchupTicks = Netplay::FrameBudget::MaxCatchupTicks" in WINDOW
+        and "Netplay::FrameBudget::CanStartTick(" in WINDOW
+        and "SDL_GetTicksNS() - catchupStartNs" in WINDOW
+        and "completedTicks == 0 || elapsedNs < CatchupBudgetNs" in FRAME_BUDGET
         and "lastSimulationTickAdvanced" in WINDOW,
     )
     require(

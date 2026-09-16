@@ -1,4 +1,5 @@
 #include "Th07CanonicalHash.hpp"
+#include "NetplayInput.hpp"
 
 #include "BulletManager.hpp"
 #include "Controller.hpp"
@@ -682,6 +683,14 @@ Sample Capture()
     sample.metaGame = game.value;
 
     Hasher input;
+#ifdef TH_ENABLE_NETPLAY
+    for (const auto &touch : Input::GetDirectTouchStates())
+    {
+        input.Scalar(touch.x);
+        input.Scalar(touch.y);
+        input.Scalar(touch.active);
+    }
+#endif
     input.Scalar(g_CurFrameRawInput);
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
     for (u16 value : g_CurFrameGameInputs)

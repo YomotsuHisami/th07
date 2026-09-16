@@ -3,6 +3,8 @@
 #include <array>
 #include <cassert>
 #include <cstdio>
+#include <limits>
+#include <vector>
 
 using Netplay::RollbackJournal;
 using Netplay::RollbackJournalConfig;
@@ -164,6 +166,196 @@ static void TestBoundsAndEviction()
     assert(limited.Failed());
 }
 
+static void TestAllOverlapDirectionsAndAdjacency()
+{
+    const std::array<std::array<std::size_t, 2>, 7> overlaps{{
+        {{0, 20}}, {{20, 4}}, {{16, 8}}, {{16, 24}},
+        {{32, 36}}, {{0, 100}}, {{72, 16}}
+    }};
+    for (const auto &range : overlaps)
+    {
+        auto journal = MakeJournal();
+        std::array<unsigned char, 128> bytes{};
+        assert(journal.BeginFrame(1));
+        assert(journal.Touch(bytes.data() + 64, 16));
+        assert(journal.Touch(bytes.data() + 16, 16));
+        assert(!journal.Touch(bytes.data() + range[0], range[1]));
+        assert(journal.Failed());
+        assert(!journal.EndFrame());
+    }
+    auto journal = MakeJournal();
+    std::array<unsigned char, 128> bytes{};
+    assert(journal.BeginFrame(1));
+    assert(journal.Touch(bytes.data() + 16, 16));
+    assert(journal.Touch(bytes.data(), 16));
+    assert(journal.Touch(bytes.data() + 32, 16));
+    assert(journal.EndFrame());
+    assert(journal.BlocksForFrame(1) == 3);
+}
+
+static void TestAddressOverflowIsRejectedBeforeCopy()
+{
+    auto journal = MakeJournal();
+    assert(journal.BeginFrame(1));
+    auto *invalid = reinterpret_cast<void *>(std::numeric_limits<std::uintptr_t>::max() - 3);
+    assert(!journal.Touch(invalid, 8));
+    assert(journal.Failed());
+}
+
+static void TestOrderedAndScatteredIndex()
+{
+    constexpr std::size_t count = 4093;
+    for (unsigned order = 0; order < 4; ++order)
+    {
+        auto journal = MakeJournal(2, count * sizeof(std::uint32_t), count);
+        std::array<std::uint32_t, count> values{};
+        for (std::size_t index = 0; index < count; ++index)
+            values[index] = static_cast<std::uint32_t>(index);
+        const auto original = values;
+        assert(journal.BeginFrame(1));
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            const std::size_t slot = order == 0 ? index : order == 1 ? count - 1 - index
+                : order == 2 ? (index * 127) % count
+                : (index % 2 == 0 ? index / 2 : count - 1 - index / 2);
+            assert(journal.Touch(&values[slot], sizeof(values[slot])));
+            values[slot] += 1000;
+        }
+        // Duplicate first-write touches are valid even at both capacity limits.
+        for (std::size_t index = count; index-- > 0;)
+        {
+            assert(journal.Touch(&values[index], sizeof(values[index])));
+            ++values[index];
+        }
+        assert(journal.EndFrame());
+        assert(journal.BlocksForFrame(1) == count);
+        assert(journal.BytesForFrame(1) == sizeof(values));
+        assert(journal.UndoTo(1));
+        assert(values == original);
+    }
+}
+
+static void TestArenaGrowthPreservesCapturedBytes()
+{
+    constexpr std::size_t blockSize = 96 * 1024;
+    constexpr std::size_t count = 5;
+    auto journal = MakeJournal(2, blockSize * count, count);
+    std::vector<unsigned char> world(blockSize * count);
+    for (std::size_t index = 0; index < world.size(); ++index)
+        world[index] = static_cast<unsigned char>((index * 73 + index / 997) & 255);
+    const auto before = world;
+    assert(journal.BeginFrame(7));
+    for (std::size_t slot : {3u, 0u, 4u})
+    {
+        auto *address = world.data() + slot * blockSize;
+        assert(journal.Touch(address, blockSize));
+        for (std::size_t byte = 0; byte < blockSize; ++byte)
+            address[byte] ^= 0x5a;
+    }
+    assert(journal.EndFrame());
+    assert(journal.BeginFrame(8, true));
+    for (std::size_t slot : {2u, 1u, 3u})
+    {
+        auto *address = world.data() + slot * blockSize;
+        assert(journal.Touch(address, blockSize));
+        for (std::size_t byte = 0; byte < blockSize; ++byte)
+            address[byte] ^= 0xa5;
+    }
+    assert(journal.EndFrame());
+    assert(journal.BytesForFrame(8) == world.size());
+    std::uint32_t restored = 0;
+    assert(journal.UndoTo(8, &restored));
+    assert(restored == 7 && world == before);
+    // Reuse the arena for unrelated addresses, then discard the whole ring.
+    int other = 42;
+    assert(journal.BeginFrame(7));
+    assert(journal.Touch(&other, sizeof(other)));
+    other = 11;
+    assert(journal.EndFrame());
+    assert(journal.UndoTo(7));
+    assert(other == 42 && world == before);
+    journal.Clear();
+    assert(journal.FrameCount() == 0 && !journal.BeginFrame(0));
+    assert(!journal.Reset({0, 1024, 16}));
+    assert(journal.Reset({2, 1024, 16}));
+    assert(journal.BeginFrame(0) && journal.EndFrame());
+}
+
+static void TestRandomizedHistoryAgainstFullCopyReference()
+{
+    using World = std::array<std::uint32_t, 96>;
+    struct Reference
+    {
+        std::uint32_t first;
+        std::uint32_t last;
+        World before;
+    };
+    constexpr std::size_t capacity = 5;
+    auto journal = MakeJournal(capacity, sizeof(World), World{}.size());
+    World world{};
+    std::vector<Reference> reference;
+    std::uint32_t nextFrame = 0;
+    std::uint32_t randomState = 0x7135abcd;
+    const auto random = [&]() {
+        randomState = randomState * 1664525u + 1013904223u;
+        return randomState;
+    };
+
+    for (unsigned step = 0; step < 2000; ++step)
+    {
+        const unsigned action = random() % 7;
+        if (!reference.empty() && action < 2)
+        {
+            const std::size_t target = random() % reference.size();
+            const Reference saved = reference[target];
+            const auto requested = saved.first + random() % (saved.last - saved.first + 1);
+            std::uint32_t restored = 0;
+            assert(journal.UndoTo(requested, &restored));
+            assert(restored == saved.first);
+            assert(world == saved.before);
+            nextFrame = restored;
+            reference.erase(reference.begin() + target, reference.end());
+        }
+        else if (!reference.empty() && action == 2)
+        {
+            const auto boundary = reference[random() % reference.size()].last;
+            journal.DiscardBefore(boundary);
+            while (!reference.empty() && reference.front().last < boundary)
+                reference.erase(reference.begin());
+        }
+        else
+        {
+            if (reference.size() == capacity)
+                reference.erase(reference.begin());
+            reference.push_back({nextFrame, nextFrame, world});
+            const unsigned ticks = 1 + random() % 3;
+            for (unsigned tick = 0; tick < ticks; ++tick)
+            {
+                assert(journal.BeginFrame(nextFrame, tick != 0));
+                reference.back().last = nextFrame++;
+                for (unsigned write = 0; write < 137; ++write)
+                {
+                    const std::size_t slot = random() % world.size();
+                    assert(journal.Touch(&world[slot], sizeof(world[slot])));
+                    world[slot] ^= random();
+                }
+                assert(journal.EndFrame());
+            }
+        }
+        assert(journal.FrameCount() == reference.size());
+        for (const auto &record : reference)
+        {
+            assert(journal.BytesForFrame(record.first) == journal.BytesForFrame(record.last));
+            assert(journal.BlocksForFrame(record.first) <= world.size());
+        }
+    }
+    if (!reference.empty())
+    {
+        assert(journal.UndoTo(reference.front().first));
+        assert(world == reference.front().before);
+    }
+}
+
 int main()
 {
     TestFirstWriteWins();
@@ -173,5 +365,10 @@ int main()
     TestSlotReuseInOneFrame();
     TestRejectsPartialOverlap();
     TestBoundsAndEviction();
+    TestAllOverlapDirectionsAndAdjacency();
+    TestAddressOverflowIsRejectedBeforeCopy();
+    TestOrderedAndScatteredIndex();
+    TestArenaGrowthPreservesCapturedBytes();
+    TestRandomizedHistoryAgainstFullCopyReference();
     std::puts("TH07 rollback journal: PASS");
 }

@@ -1,16 +1,18 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include "NetplayProtocol.hpp"
+#include "DirectTouchState.hpp"
 
 namespace Netplay::Input
 {
 using FrameInput = Netplay::FrameInput;
 using AnalogMode = Netplay::AnalogMode;
 
-// A speculative pass samples physical producers exactly once. The committed
-// replay pass then uses the captured logical input without touching SDL/DOM or
-// consuming Touch state a second time.
+// The new logical capture tick samples physical producers exactly once and
+// schedules its future input. Simulation, retries and correction consume the
+// stored sample, not the SDL/DOM producer. Fresh touch remainder is journaled.
 void BeginCapture();
 FrameInput EndCapture();
 bool CaptureActive();
@@ -20,6 +22,15 @@ bool CaptureActive();
 std::uint16_t ResolveLocal(std::uint16_t physicalBits);
 void CaptureJoystick(float x, float y);
 void CaptureDirectTouch(float x, float y, bool unlimited);
+void CaptureDirectTouchDelta(float x, float y, bool unlimited, bool begin);
+
+using DirectTouchStates = std::array<DirectTouchState, MAX_PLAYERS>;
+DirectTouchStates &GetDirectTouchStates();
+void ResetDirectTouchStates();
+void ResetPlayerDirectTouch(std::size_t player);
+bool UsesIncrementalDirectTouch(std::size_t player);
+void SetDirectTouchRemainder(std::size_t player, float x, float y);
+void ConsumeDirectTouchRemainder(std::size_t player, float x, float y);
 
 void SetReplayOverride(const FrameInput &input);
 void SetReplayOverride(std::uint16_t bits);

@@ -1,5 +1,6 @@
 #include "Th07LanStageProbe.hpp"
 
+#include "FrameAdvantageWindow.hpp"
 #include "NetplayCore.hpp"
 #include "NetplayInput.hpp"
 #include "NetplayProtocol.hpp"
@@ -46,9 +47,9 @@ namespace
 {
 constexpr std::uint64_t SESSION_ID = 0x5448374c414e5331ull; // TH7LANS1
 constexpr std::uint32_t GAME_ID_TH07 = 7;
-// ABI 3 fixes 3P CherryMax scaling so the 1.5x range is applied once per
-// fresh run instead of once per stage-local Player chain reconstruction.
-// Refuse older live peers because they simulate different Cherry economics.
+// Gameplay ABI also guards the supported input semantics. ABI 5 accepts
+// once-only touch deltas and keeps their remainder in rewindable state.
+// Refuse older live peers before they could misinterpret those new modes.
 constexpr std::uint32_t GAMEPLAY_ABI = TH07_MULTI_GAMEPLAY_ABI;
 constexpr std::uint32_t DEFAULT_TEST_FRAMES = 300;
 
@@ -80,6 +81,16 @@ std::uint32_t g_RollbackCount = 0;
 std::uint32_t g_ResimulatedFrames = 0;
 std::uint32_t g_MaxRollbackSpan = 0;
 std::size_t g_MaxSnapshotBytes = 0;
+bool g_PerfTelemetry = false;
+int g_TouchWorkload = 0;
+bool g_TestIncrementalTouch = false;
+std::uint64_t g_ForwardCostNs = 0;
+std::uint64_t g_ResimulationCostNs = 0;
+std::uint64_t g_ReconcileCostNs = 0;
+std::uint64_t g_MaxReconcileCostNs = 0;
+std::uint32_t g_LocalCaptures = 0;
+double g_CapturedTouchX = 0.0;
+double g_CapturedTouchY = 0.0;
 
 struct ReplayFrameBinding
 {
@@ -116,15 +127,7 @@ std::uint32_t g_PeakBullets = 0;
 std::uint32_t g_PeakLasers = 0;
 std::uint32_t g_PeakItems = 0;
 std::array<std::uint32_t, MAX_PLAYERS> g_LastRemoteSenderFrame{};
-struct PeerTimeSyncState
-{
-    std::array<std::int32_t, 64> samples{};
-    std::size_t sampleCount = 0;
-    std::size_t sampleCursor = 0;
-    double averageLead = 0.0;
-    bool ready = false;
-};
-std::array<PeerTimeSyncState, MAX_PLAYERS> g_PeerTimeSync{};
+std::array<FrameAdvantageWindow, MAX_PLAYERS> g_PeerTimeSync{};
 std::array<std::uint32_t, MAX_PLAYERS> g_PredictionDepth{};
 std::array<std::uint32_t, MAX_PLAYERS> g_RollbackByPlayer{};
 double g_RecommendedLead = 0.0;
@@ -325,25 +328,9 @@ void RecordTimeSyncSample(const InputPacket &packet)
     if (std::abs(inferredLead) > 30)
         return;
 
-    PeerTimeSyncState &state = g_PeerTimeSync[packet.senderPlayer];
-    state.samples[state.sampleCursor] = inferredLead;
-    state.sampleCursor = (state.sampleCursor + 1) % state.samples.size();
-    state.sampleCount = std::min(state.sampleCount + 1, state.samples.size());
-    if (state.sampleCount < 20)
+    FrameAdvantageWindow &state = g_PeerTimeSync[packet.senderPlayer];
+    if (!state.AddSample(inferredLead))
         return;
-
-    std::vector<std::int32_t> sorted;
-    sorted.reserve(state.sampleCount);
-    for (std::size_t i = 0; i < state.sampleCount; ++i)
-        sorted.push_back(state.samples[i]);
-    std::sort(sorted.begin(), sorted.end());
-    const std::size_t trim = std::min<std::size_t>(4, sorted.size() / 8);
-    std::int64_t sum = 0;
-    for (std::size_t i = trim; i < sorted.size() - trim; ++i)
-        sum += sorted[i];
-    state.averageLead = static_cast<double>(sum) /
-        static_cast<double>(sorted.size() - trim * 2);
-    state.ready = true;
 
     bool haveRecommendation = false;
     double recommendedLead = 0.0;
@@ -449,7 +436,7 @@ void PublishConfirmedSpectatorFrames()
 #ifdef __EMSCRIPTEN__
     if (ProductionLanMode())
         EM_ASM({
-            const state = globalThis.__eaglerNetplaySpectatorPublish = {};
+            const state = globalThis.__eaglerNetplaySpectatorPublish ||= {};
             state.hasSpectators = !!$0;
             state.cursor = $1 >>> 0;
             state.simFrame = $2 >>> 0;
@@ -457,7 +444,7 @@ void PublishConfirmedSpectatorFrames()
         }, hasSpectators ? 1 : 0, g_NextSpectatorPublishFrame, g_SimFrame,
             ConfirmedThroughAllRemotes());
 #endif
-    if (g_SpectatorMode || g_LocalPlayer != 0 || g_SimFrame == 0)
+    if (!hasSpectators || g_SpectatorMode || g_LocalPlayer != 0 || g_SimFrame == 0)
         return;
     const std::uint32_t lastAvailable =
         std::min(ConfirmedThroughAllRemotes(), g_SimFrame - 1);
@@ -579,6 +566,38 @@ FrameInput CaptureLocalInput(std::uint32_t frame)
     if (!UsePhysicalInput())
     {
         FrameInput input(LocalScript(g_LocalPlayer, frame));
+        // Controlled test-only traces. Production touch samples are unmodified.
+        if (g_TouchWorkload != 0)
+        {
+            input.analogMode = AnalogMode::DirectTouch;
+            input.touchUsed = true;
+            const auto phase = (frame + g_LocalPlayer * 13u) % 300u;
+            input.x = g_LocalPlayer == 0 ? 0.5f : -0.5f;
+            input.y = 0.125f;
+            if (g_TouchWorkload == 2)
+            {
+                input.x += (static_cast<int>(phase % 17) - 8) * 0.015625f;
+                input.y = (static_cast<int>(phase % 11) - 5) * 0.03125f;
+            }
+            if (g_TouchWorkload == 3 && phase >= 120)
+                input.x = input.y = 0.0f;
+            if (g_TouchWorkload == 4 && phase >= 150)
+            {
+                input.x = -input.x;
+                input.y = -input.y;
+            }
+            if (g_TouchWorkload == 5)
+            {
+                input.x = phase % 3 == 0 ? input.x * 3 : 0.0f;
+                input.y = phase % 3 == 0 ? input.y * 3 : 0.0f;
+            }
+            if (g_TestIncrementalTouch)
+            {
+                input.analogMode = frame % 300 == 0 ? AnalogMode::DirectTouchBegin : AnalogMode::DirectTouchDelta;
+                if (g_TouchWorkload == 3 && phase >= 120) input.analogMode = AnalogMode::None;
+            }
+            return input;
+        }
         if (UseReplayPlaybackCycle())
         {
             // Match TH06's hidden Replay profile and cover the complete input
@@ -594,6 +613,8 @@ FrameInput CaptureLocalInput(std::uint32_t frame)
             else if (phase == 2u)
             {
                 input.analogMode = AnalogMode::DirectTouch;
+                if (g_TestIncrementalTouch)
+                    input.analogMode = frame % 20 == 0 ? AnalogMode::DirectTouchBegin : AnalogMode::DirectTouchDelta;
                 input.x = g_LocalPlayer == 0 ? 0.5f : -0.5f;
                 input.y = (frame & 1u) != 0 ? 0.25f : -0.25f;
                 input.unlimited = ((frame / 20u) & 1u) != 0;
@@ -613,10 +634,14 @@ FrameInput CaptureLocalInput(std::uint32_t frame)
     (void)Controller::GetInput();
     float x = 0.0f;
     float y = 0.0f;
+    bool beginGesture = false;
     if (Touch::GetFreeJoystickVector(&x, &y))
         Input::CaptureJoystick(x, y);
-    else if (Touch::GetPlayerDelta(&x, &y))
-        Input::CaptureDirectTouch(x, y, Touch::IsUnlimited());
+    else if (Touch::TakePlayerDelta(&x, &y, &beginGesture))
+    {
+        Input::CaptureDirectTouchDelta(x, y, Touch::IsUnlimited(), beginGesture);
+        if (g_PerfTelemetry) { g_CapturedTouchX += x; g_CapturedTouchY += y; }
+    }
     FrameInput input = Input::EndCapture();
     input.touchUsed = Touch::WasUsedThisRun();
     input.touchBomb = Touch::UsedTouchToBomb();
@@ -960,8 +985,37 @@ bool Initialize()
     coreConfig.sessionId = CurrentSessionId();
     coreConfig.playerCount = g_PlayerCount;
     coreConfig.localPlayer = g_LocalPlayer;
-    coreConfig.inputDelay = 0;
+    coreConfig.inputDelay = ProductionLanMode() ? 3 : 0;
+#ifdef __EMSCRIPTEN__
+    coreConfig.inputDelay = static_cast<std::uint8_t>(EM_ASM_INT({
+        const value = Module.eaglerOptions?.netplayInputDelayFrames;
+        return Number.isInteger(value) && value >= 0 && value <= 6 ? value : $0;
+    }, coreConfig.inputDelay));
+    coreConfig.predictStableDirectTouch = EM_ASM_INT({
+        return Module.eaglerOptions?.netplayTouchPrediction === 'stable' ? 1 : 0;
+    }) != 0;
+    EM_ASM({ globalThis.__eaglerNetplayInputDelayFrames = $0; }, coreConfig.inputDelay);
+    g_PerfTelemetry = EM_ASM_INT({ return Module.eaglerOptions?.netplayPerfTelemetry ? 1 : 0; }) != 0;
+    g_TestIncrementalTouch = ProbeMode() && EM_ASM_INT({
+        return Module.eaglerOptions?.netplayTestIncrementalTouch ? 1 : 0;
+    }) != 0;
+    g_TouchWorkload = ProbeMode() ? EM_ASM_INT({
+        return Math.max(0, ['default', 'steady', 'variable', 'stop', 'reverse', 'burst']
+            .indexOf(Module.eaglerOptions?.netplayTouchWorkload));
+    }) : 0;
+#endif
+    g_ForwardCostNs = g_ResimulationCostNs = g_ReconcileCostNs = g_MaxReconcileCostNs = 0;
+    g_LocalCaptures = 0;
+    g_CapturedTouchX = g_CapturedTouchY = 0.0;
+    Input::ResetDirectTouchStates();
     coreConfig.maxRollbackFrames = 12;
+#ifdef __EMSCRIPTEN__
+    coreConfig.maxRollbackFrames = static_cast<std::uint8_t>(EM_ASM_INT({
+        const value = Module.eaglerOptions?.netplayMaxPredictionFrames;
+        return Number.isInteger(value) && value >= 1 && value <= 12 ? value : 12;
+    }));
+    EM_ASM({ globalThis.__eaglerNetplayMaxPredictionFrames = $0; }, coreConfig.maxRollbackFrames);
+#endif
     coreConfig.predictableButtons =
         TH_BUTTON_DIRECTION | TH_BUTTON_FOCUS | TH_BUTTON_SHOOT | TH_BUTTON_SKIP;
     coreConfig.directionButtons = TH_BUTTON_DIRECTION;
@@ -1039,8 +1093,8 @@ bool Initialize()
     g_LastConfirmedFrame.fill(INVALID_FRAME);
     g_LastRemoteSenderFrame.fill(INVALID_FRAME);
     g_RemoteTimeoutArmed.fill(false);
-    for (PeerTimeSyncState &state : g_PeerTimeSync)
-        state = PeerTimeSyncState{};
+    for (FrameAdvantageWindow &state : g_PeerTimeSync)
+        state = FrameAdvantageWindow{};
     g_PredictionDepth.fill(0);
     g_RollbackByPlayer.fill(0);
     g_RecommendedLead = 0.0;
@@ -1062,7 +1116,7 @@ bool Initialize()
     if (ProductionLanMode())
     {
         EM_ASM({
-            globalThis.__eaglerNetplayRuntimeBuild = "th07mp-20260829-anmfix1";
+            globalThis.__eaglerNetplayRuntimeBuild = "th07mp-20260916-buffer-touch-abi5";
             globalThis.__eaglerNetplayFailed = false;
             globalThis.__eaglerNetplayError = "";
             globalThis.__eaglerNetplayLanActive = true;
@@ -1072,6 +1126,7 @@ bool Initialize()
             globalThis.__eaglerNetplayLanHashes = Object.create(null);
             globalThis.__eaglerNetplayLanPeerAdvantages = [];
             globalThis.__eaglerNetplayLanPeers = [];
+            globalThis.__eaglerNetplayPerf = {};
         }, g_SessionGeneration);
     }
 #endif
@@ -1187,7 +1242,8 @@ bool SendLocalFrame(std::uint32_t frame)
     }
     if (!g_Core.ScheduleLocalInput(frame, input))
         return false;
-    return SendScheduledLocalFrame(frame);
+    ++g_LocalCaptures;
+    return SendScheduledLocalFrame(g_Core.LocalFrameForCapture(frame));
 }
 
 bool SendScheduledLocalFrame(std::uint32_t frame)
@@ -1247,6 +1303,7 @@ bool SendTailKeepalive()
 
 int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resimulation)
 {
+    const std::uint64_t costStartNs = g_PerfTelemetry ? SDL_GetTicksNS() : 0;
     if (UsePhysicalInput() && frame == 0 && !g_PhysicalLoggedFrame0Sim)
     {
         g_PhysicalLoggedFrame0Sim = true;
@@ -1521,6 +1578,8 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
 #endif
     if (resimulation)
         ++g_ResimulatedFrames;
+    if (g_PerfTelemetry)
+        (resimulation ? g_ResimulationCostNs : g_ForwardCostNs) += SDL_GetTicksNS() - costStartNs;
     return result;
 }
 
@@ -1528,6 +1587,7 @@ bool ReconcileRollback()
 {
     if (!g_Core.HasRollbackRequest())
         return true;
+    const std::uint64_t costStartNs = g_PerfTelemetry ? SDL_GetTicksNS() : 0;
 
     const std::uint32_t rollback = g_Core.RollbackFrame();
     const std::uint32_t last = g_Core.LastSimulatedFrame();
@@ -1566,6 +1626,12 @@ bool ReconcileRollback()
         if (result == 0 || result == -1)
             return false;
     }
+    if (g_PerfTelemetry)
+    {
+        const auto elapsed = SDL_GetTicksNS() - costStartNs;
+        g_ReconcileCostNs += elapsed;
+        g_MaxReconcileCostNs = std::max(g_MaxReconcileCostNs, elapsed);
+    }
     return true;
 }
 } // namespace
@@ -1594,6 +1660,44 @@ bool Requested()
 double SimulationIntervalScale()
 {
     return ProductionLanMode() ? g_SimulationIntervalScale : 1.0;
+}
+
+bool PerformanceTelemetryEnabled()
+{
+    return g_PerfTelemetry && g_Active && g_SimFrame >= 120 &&
+           (!ProbeMode() || g_SimFrame < g_TestFrames);
+}
+
+void RecordPresentationCost(double driverMs, double drawMs)
+{
+#ifdef __EMSCRIPTEN__
+    // Bounded observations of actual Present calls, distinct from an unrelated
+    // RAF counter. Draw timing includes submission/swap, not GPU completion.
+    EM_ASM({
+        const perf = globalThis.__eaglerNetplayPerf;
+        if (!perf) return;
+        const draw = perf.drawMs ||= [];
+        const driver = perf.driverMs ||= [];
+        const gaps = perf.presentGapMs ||= [];
+        const now = performance.now();
+        if (draw.length < 4096) { draw.push($1); driver.push($0); }
+        if (perf.lastPresentMs && gaps.length < 4096) gaps.push(now - perf.lastPresentMs);
+        perf.lastPresentMs = now;
+        perf.presented = (perf.presented || 0) + 1;
+        const positions = perf.positions ||= new Array(6);
+        positions[0] = $2; positions[1] = $3;
+        positions[2] = $4; positions[3] = $5;
+        positions[4] = $6; positions[5] = $7;
+        perf.capturedTouchX = $8; perf.capturedTouchY = $9;
+    }, driverMs, drawMs,
+       g_Players[0].positionCenter.x, g_Players[0].positionCenter.y,
+       g_Players[1].positionCenter.x, g_Players[1].positionCenter.y,
+       g_Players[2].positionCenter.x, g_Players[2].positionCenter.y,
+       g_CapturedTouchX, g_CapturedTouchY);
+#else
+    (void)driverMs;
+    (void)drawMs;
+#endif
 }
 
 int RunCalcChain()
@@ -1778,20 +1882,29 @@ int RunCalcChain()
             globalThis.__eaglerNetplayLanRollback = $1;
             globalThis.__eaglerNetplayLanResimulated = $2;
         }, confirmed, g_RollbackCount, g_ResimulatedFrames);
+        if (g_PerfTelemetry && ((g_DriverTicks % 15u) == 0u || g_SimFrame >= g_TestFrames))
+            EM_ASM({
+                const perf = globalThis.__eaglerNetplayPerf;
+                perf.forwardMs = $0; perf.resimulationMs = $1; perf.reconcileMs = $2;
+                perf.captures = $3; perf.driverTicks = $4; perf.maxReconcileMs = $5;
+            }, g_ForwardCostNs / 1000000.0, g_ResimulationCostNs / 1000000.0,
+               g_ReconcileCostNs / 1000000.0, g_LocalCaptures, g_DriverTicks,
+               g_MaxReconcileCostNs / 1000000.0);
     }
 #endif
 
     if ((!ProbeMode() || g_SimFrame < g_TestFrames) && TransportIsOpen())
     {
-        bool localPresent = false;
-        (void)g_Core.LocalInput(g_SimFrame, &localPresent);
+        // During the neutral lead-in the due input exists but the future
+        // capture does not. Only the future slot proves we sampled this tick.
+        const bool localPresent = g_Core.HasLocalCapture(g_SimFrame);
         if (!localPresent && !SendLocalFrame(g_SimFrame))
         {
             Fail("send local input");
             return -1;
         }
         if (localPresent && (g_DriverTicks % 3u) == 0u &&
-            !SendScheduledLocalFrame(g_SimFrame))
+            !SendScheduledLocalFrame(g_Core.LocalFrameForCapture(g_SimFrame)))
         {
             Fail("input retry");
             return -1;

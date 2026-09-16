@@ -18,6 +18,27 @@ FrameInput g_ReplayOverride{};
 bool g_PlayerButtonOverridesActive = false;
 std::array<std::uint16_t, 3> g_PlayerButtonOverrides{};
 std::array<FrameInput, 3> g_PlayerInputOverrides{};
+DirectTouchStates g_DirectTouchStates{};
+}
+
+DirectTouchStates &GetDirectTouchStates() { return g_DirectTouchStates; }
+void ResetDirectTouchStates() { g_DirectTouchStates = {}; }
+void ResetPlayerDirectTouch(std::size_t player)
+{
+    if (player < g_DirectTouchStates.size()) g_DirectTouchStates[player] = {};
+}
+bool UsesIncrementalDirectTouch(std::size_t player)
+{
+    return g_PlayerButtonOverridesActive && player < g_DirectTouchStates.size() &&
+           g_DirectTouchStates[player].active;
+}
+void SetDirectTouchRemainder(std::size_t player, float x, float y)
+{
+    if (UsesIncrementalDirectTouch(player)) g_DirectTouchStates[player].Set(x, y);
+}
+void ConsumeDirectTouchRemainder(std::size_t player, float x, float y)
+{
+    if (UsesIncrementalDirectTouch(player)) g_DirectTouchStates[player].Consume(x, y);
 }
 
 void BeginCapture()
@@ -72,6 +93,13 @@ void SetReplayOverride(const FrameInput &input)
     g_ReplayOverrideActive = true;
 }
 
+void CaptureDirectTouchDelta(float x, float y, bool unlimited, bool begin)
+{
+    CaptureDirectTouch(x, y, unlimited);
+    if (g_CaptureActive && !g_ReplayOverrideActive)
+        g_Captured.analogMode = begin ? AnalogMode::DirectTouchBegin : AnalogMode::DirectTouchDelta;
+}
+
 void SetReplayOverride(std::uint16_t bits)
 {
     FrameInput input;
@@ -106,13 +134,14 @@ bool ReplayJoystick(std::size_t player, float *x, float *y)
 bool ReplayDirectTouch(std::size_t player, float *x, float *y, bool *unlimited)
 {
     if (!g_PlayerButtonOverridesActive || player >= g_PlayerInputOverrides.size() ||
-        g_PlayerInputOverrides[player].analogMode != AnalogMode::DirectTouch)
+        (g_PlayerInputOverrides[player].analogMode != AnalogMode::DirectTouch &&
+         !UsesIncrementalDirectTouch(player)))
         return false;
     const FrameInput &input = g_PlayerInputOverrides[player];
     if (x)
-        *x = input.x;
+        *x = UsesIncrementalDirectTouch(player) ? g_DirectTouchStates[player].x : input.x;
     if (y)
-        *y = input.y;
+        *y = UsesIncrementalDirectTouch(player) ? g_DirectTouchStates[player].y : input.y;
     if (unlimited)
         *unlimited = input.unlimited;
     return true;
@@ -156,6 +185,8 @@ void SetPlayerInputOverrides(const FrameInput *inputs, std::size_t count)
         }
     }
     g_PlayerButtonOverridesActive = true;
+    for (std::size_t player = 0; player < g_DirectTouchStates.size(); ++player)
+        g_DirectTouchStates[player].Apply(g_PlayerInputOverrides[player]);
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
     // Commit the synchronized logical lanes before the simulation chain runs.
     // GameManager can BREAK the chain on the very frame that opens pause, so

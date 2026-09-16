@@ -23,6 +23,10 @@ EM_JS(int, th07_peer_connect, (const char *relayUrlPtr, int localPlayer, int pla
         const state = {
             relay: null, signal: null, peers: new Map(), received: [], receivedHead: 0, pendingSignals: [],
             localPlayer, playerCount, route: null, failed: false, error: String(), closed: false,
+            perf: Module.eaglerOptions?.netplayPerfTelemetry
+                ? { count: 0, totalQueueMs: 0, maxQueueMs: 0, bins: new Array(128).fill(0),
+                    received: 0, lastEventMs: 0, maxEventGapMs: 0, lastInputFrame: -1,
+                    sent: 0, lastSendMs: 0, maxSendGapMs: 0 } : null,
             spectatorCount: Math.max(0, Number(Module.eaglerOptions?.netplaySpectatorCount) || 0),
             rtcReadySent: false, signalReconnectTimer: null, signalReconnectDelayMs: 500,
             iceServers: Array.isArray(Module.eaglerOptions?.netplayIceServers)
@@ -63,11 +67,25 @@ EM_JS(int, th07_peer_connect, (const char *relayUrlPtr, int localPlayer, int pla
                     try { this.signal?.close(1000, 'relay route selected'); } catch {}
                 }
             },
+            appendReceived(packet) {
+                if (this.closed) return;
+                if (this.perf) {
+                    const now = performance.now();
+                    packet.queuedAt = now;
+                    if (packet.length >= 32 && packet[5] === 1 && globalThis.__eaglerNetplayLanFrame >= 0) {
+                        if (this.perf.lastEventMs) this.perf.maxEventGapMs = Math.max(this.perf.maxEventGapMs, now - this.perf.lastEventMs);
+                        this.perf.lastEventMs = now;
+                        this.perf.lastInputFrame = new DataView(packet.buffer, packet.byteOffset, packet.byteLength).getUint32(24, true);
+                        this.perf.received++;
+                    }
+                }
+                this.received.push(packet);
+            },
             receiveBinary(data) {
-                if (data instanceof ArrayBuffer) this.received.push(new Uint8Array(data));
-                else if (ArrayBuffer.isView(data)) this.received.push(new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)));
+                if (data instanceof ArrayBuffer) this.appendReceived(new Uint8Array(data));
+                else if (ArrayBuffer.isView(data)) this.appendReceived(new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)));
                 else if (data instanceof Blob) data.arrayBuffer().then(buffer => {
-                    if (!this.closed) this.received.push(new Uint8Array(buffer));
+                    this.appendReceived(new Uint8Array(buffer));
                 }).catch(() => {});
             },
             setupChannel(peerId, dc, kind) {
@@ -527,6 +545,12 @@ EM_JS(int, th07_peer_send_to, (int peerId, const unsigned char *data, int size),
     const state = globalThis.__th07PeerTransport;
     if (!state || state.failed || size <= 0 || !Number.isInteger(peerId) ||
         peerId < 0 || peerId >= state.playerCount || peerId === state.localPlayer) return 0;
+    if (state.perf && globalThis.__eaglerNetplayLanFrame >= 0) {
+        const now = performance.now();
+        if (state.perf.lastSendMs) state.perf.maxSendGapMs = Math.max(state.perf.maxSendGapMs, now - state.perf.lastSendMs);
+        state.perf.lastSendMs = now;
+        state.perf.sent++;
+    }
     const payload = HEAPU8.slice(data, data + size);
     try {
         if (state.route === 'relay') {
@@ -580,6 +604,15 @@ EM_JS(int, th07_peer_poll_copy, (unsigned char *out, int capacity), {
     const head = state.receivedHead || 0;
     const packet = state.received?.[head];
     if (!packet || packet.byteLength > capacity) return 0;
+    // Opt-in diagnostics: JS-handler enqueue -> WASM poll only. This is NOT
+    // one-way network latency or time spent waiting before the JS handler ran.
+    if (state.perf && packet.queuedAt != null && globalThis.__eaglerNetplayLanFrame >= 120) {
+        const age = Math.max(0, performance.now() - packet.queuedAt);
+        state.perf.count++;
+        state.perf.totalQueueMs += age;
+        state.perf.maxQueueMs = Math.max(state.perf.maxQueueMs, age);
+        state.perf.bins[Math.min(127, Math.floor(age))]++;
+    }
     HEAPU8.set(packet, out);
     state.received[head] = undefined;
     state.receivedHead = head + 1;

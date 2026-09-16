@@ -255,8 +255,7 @@ void RefreshFromHost()
     const bool active = EM_ASM_INT({
         const session = Module.eaglerOptions?.thpracSession;
         return !!session && session.game === 'th07' &&
-            (session.schema === 'eagler-touhou/thprac-session/1' ||
-             session.schema === 'eagler-touhou/thprac-replay/1');
+            session.schema === 'eagler-touhou/thprac-session/1';
     }) != 0;
     if (!active)
     {
@@ -1339,9 +1338,7 @@ static bool JsonBool(const std::string &json, const char *key, bool fallback)
 static bool LoadConfigJson(const std::string &json)
 {
     const bool portableSchema =
-        json.find("\"schema\":\"eagler-touhou/thprac-session/1\"") != std::string::npos ||
-        json.find("\"schema\":\"eagler-touhou/thprac-replay/1\"") != std::string::npos ||
-        json.find("\"schema\":\"thprac/portable-replay/1\"") != std::string::npos;
+        json.find("\"schema\":\"eagler-touhou/thprac-session/1\"") != std::string::npos;
     // Upstream v2.3.0.3 stores THPracParam::GetJson() directly: no schema
     // field, only the thprac version plus game="th07".
     const bool upstreamSchema = json.find("\"version\":") != std::string::npos;

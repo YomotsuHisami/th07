@@ -16,4 +16,7 @@ bool LastTickAdvanced();
 // 60 Hz cadence; production LAN may make a small temporary adjustment to
 // converge frame advantage without changing deterministic simulation state.
 double SimulationIntervalScale();
+// Optional read-only performance observation. No GPU readback or pacing input.
+bool PerformanceTelemetryEnabled();
+void RecordPresentationCost(double driverMs, double drawMs);
 } // namespace Netplay::Th07LanStageProbe

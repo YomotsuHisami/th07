@@ -31,6 +31,7 @@
 #include "ThpracImGui.hpp"
 #endif
 #ifdef TH_ENABLE_NETPLAY
+#include "netplay/FrameBudget.hpp"
 #include "netplay/Th07DeterminismProbe.hpp"
 #include "netplay/Th07LanCoreProbe.hpp"
 #include "netplay/Th07LanStageProbe.hpp"
@@ -226,7 +227,13 @@ RenderResult GameWindow::Render()
     bool updated = false;
     bool lastSimulationTickAdvanced = true;
 
+#if defined(__EMSCRIPTEN__) && defined(TH_ENABLE_NETPLAY)
+    const bool netplayPerf = Netplay::Th07LanStageProbe::PerformanceTelemetryEnabled();
+    const u64 netplayDriverStartNs = netplayPerf ? SDL_GetTicksNS() : 0;
+#endif
+#ifndef __EMSCRIPTEN__
     u64 timeToRender = SDL_GetTicksNS();
+#endif
 
     const auto runSimulationTick = [&]() -> i32
     {
@@ -282,9 +289,15 @@ RenderResult GameWindow::Render()
         // bounded wall-clock backlog while presentation continues, then catch
         // up several fixed ticks before the next draw once packets resume.
         // This prevents a brief network stall from becoming lasting slow time.
-        constexpr i32 maxNetplayCatchupTicks = 6;
+        // A tick may itself replay up to the rollback window. A count-only
+        // limit can therefore monopolize the browser long after its render
+        // deadline. Keep the original tick bound and also yield on elapsed
+        // cost; unconsumed accumulator time remains for the next callback.
+        constexpr i32 maxNetplayCatchupTicks = Netplay::FrameBudget::MaxCatchupTicks;
+        const u64 catchupStartNs = SDL_GetTicksNS();
         i32 catchupTicks = 0;
-        while (this->accumulator >= targetDt && catchupTicks < maxNetplayCatchupTicks)
+        while (this->accumulator >= targetDt && Netplay::FrameBudget::CanStartTick(
+                   catchupTicks, SDL_GetTicksNS() - catchupStartNs))
         {
             const i32 res = runSimulationTick();
             if (res == 0)
@@ -380,6 +393,9 @@ RenderResult GameWindow::Render()
 #ifndef __EMSCRIPTEN__
     const u64 drawStartNs = g_NativePerfTelemetry.enabled ? SDL_GetTicksNS() : 0;
 #endif
+#if defined(__EMSCRIPTEN__) && defined(TH_ENABLE_NETPLAY)
+    const u64 netplayDrawStartNs = netplayPerf ? SDL_GetTicksNS() : 0;
+#endif
 
     g_Supervisor.gfxDevice->BeginFrame();
     g_AnmManager->ResetVertexBuffer();
@@ -435,6 +451,12 @@ RenderResult GameWindow::Render()
 
     Present();
 
+#if defined(__EMSCRIPTEN__) && defined(TH_ENABLE_NETPLAY)
+    if (netplayPerf)
+        Netplay::Th07LanStageProbe::RecordPresentationCost(
+            (netplayDrawStartNs - netplayDriverStartNs) / 1000000.0,
+            (SDL_GetTicksNS() - netplayDrawStartNs) / 1000000.0);
+#endif
 #ifdef __EMSCRIPTEN__
     // One-shot observability only: distinguish "runtime loaded" from "the
     // game actually presented a frame" without altering either cadence.
@@ -484,12 +506,8 @@ RenderResult GameWindow::Render()
         g_FrameCount++;
     }
 
+#ifndef __EMSCRIPTEN__
     timeToRender = SDL_GetTicksNS() - timeToRender;
-
-    constexpr u64 nsPerFrame = 1000000000 / 60;
-#ifdef __EMSCRIPTEN__
-    if (g_Supervisor.vsyncEnabled && timeToRender < nsPerFrame)
-#else
     // Keep the original 60 Hz simulation, but pace presentation to the actual
     // display refresh rate. SDL_GL_GetSwapInterval(1) is only a request: some
     // GLES translation layers report it as enabled while returning from swap
@@ -499,14 +517,16 @@ RenderResult GameWindow::Render()
     const f64 presentationHz = GetNativePresentationHz();
     const u64 presentationFrameNs = (u64)(1000000000.0 / presentationHz);
     if (timeToRender < presentationFrameNs)
-#endif
     {
-#ifdef __EMSCRIPTEN__
-        SDL_DelayNS(nsPerFrame - timeToRender);
-#else
         SDL_DelayPrecise(presentationFrameNs - timeToRender);
-#endif
     }
+#else
+    // SDL's browser callback already runs from requestAnimationFrame. Return
+    // immediately so network/input/audio tasks can run; the imported desktop
+    // vsync flag must never add a synchronous sleep to the browser main thread.
+    // LimitPresentationTo60 above caps presentation without blocking, and the
+    // fixed-step accumulator remains the sole owner of logical game time.
+#endif
 
     return RENDER_RESULT_KEEP_RUNNING;
 }
