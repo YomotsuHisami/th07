@@ -5,9 +5,15 @@ from argparse import ArgumentParser
 from hashlib import sha256
 import json
 from pathlib import Path
-from struct import Struct, unpack_from
+from struct import Struct
+import sys
 
 import soundfile as sf
+
+SHARED_TOOLS = Path(__file__).resolve().parents[2] / "eagler-touhou" / "scripts"
+if str(SHARED_TOOLS) not in sys.path:
+    sys.path.insert(0, str(SHARED_TOOLS))
+from touhou_formats import extract_pbg4_entry
 
 
 OGG_CRC_POLYNOMIAL = 0x04C11DB7
@@ -49,75 +55,6 @@ def load_server_baseline(path: Path) -> dict:
     if baseline.get("schema") != "eagler-touhou/ogg-server-baseline/1" or baseline.get("game") != "th07":
         raise RuntimeError(f"invalid TH07 OGG server baseline: {path}")
     return baseline
-
-
-def lzss_decompress(source: bytes, expected_size: int) -> bytes:
-    dictionary = bytearray(8192)
-    dictionary_head = 1
-    output = bytearray()
-    byte_index = 0
-    bit_mask = 0x80
-
-    def read_bit() -> int:
-        nonlocal byte_index, bit_mask
-        if byte_index >= len(source):
-            raise ValueError("truncated PBG4 LZSS stream")
-        value = 1 if source[byte_index] & bit_mask else 0
-        bit_mask >>= 1
-        if bit_mask == 0:
-            bit_mask = 0x80
-            byte_index += 1
-        return value
-
-    def read_bits(count: int) -> int:
-        value = 0
-        for _ in range(count):
-            value = (value << 1) | read_bit()
-        return value
-
-    while len(output) < expected_size:
-        if read_bit():
-            value = read_bits(8)
-            output.append(value)
-            dictionary[dictionary_head] = value
-            dictionary_head = (dictionary_head + 1) & 0x1FFF
-        else:
-            offset = read_bits(13)
-            if offset == 0:
-                break
-            length = read_bits(4) + 3
-            for index in range(length):
-                value = dictionary[(offset + index) & 0x1FFF]
-                output.append(value)
-                dictionary[dictionary_head] = value
-                dictionary_head = (dictionary_head + 1) & 0x1FFF
-        if len(output) > expected_size:
-            raise ValueError("PBG4 stream exceeds declared size")
-    if len(output) != expected_size:
-        raise ValueError(f"PBG4 size mismatch: expected {expected_size}, got {len(output)}")
-    return bytes(output)
-
-
-def extract_pbg4_entry(archive_path: Path, wanted: str) -> bytes:
-    archive = archive_path.read_bytes()
-    magic, count, header_offset, header_size = unpack_from("<4sIII", archive)
-    if magic != b"PBG4" or not 0 < count < 100000 or not 16 <= header_offset < len(archive):
-        raise ValueError("invalid PBG4 header")
-    header = lzss_decompress(archive[header_offset:], header_size)
-    cursor = 0
-    entries = []
-    for _ in range(count):
-        end = header.index(0, cursor)
-        name = header[cursor:end].decode("shift_jis")
-        cursor = end + 1
-        data_offset, size, magic_value = unpack_from("<III", header, cursor)
-        cursor += 12
-        entries.append((name, data_offset, size, magic_value))
-    entries.append(("", header_offset, 0, 0))
-    for index, (name, offset, size, _) in enumerate(entries[:-1]):
-        if name.replace("\\", "/").lower() == wanted.replace("\\", "/").lower():
-            return lzss_decompress(archive[offset : entries[index + 1][1]], size)
-    raise FileNotFoundError(f"{wanted} not found in {archive_path}")
 
 
 BGM_FORMAT = Struct("<16s i I i i H H I I H H H 2x")

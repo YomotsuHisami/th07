@@ -17,6 +17,7 @@ scripts/__pycache__/
 **/__pycache__/
 tools/netplay/node_modules/
 tools/rebase-preview/
+.codex-tmp/
 compile_commands.json
 netplay-rollback-probe.enable
 

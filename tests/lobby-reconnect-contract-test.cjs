@@ -3,7 +3,7 @@ const path = require('node:path');
 
 const WebSocket = globalThis.WebSocket;
 const port = 18145;
-const relayPath = path.resolve(__dirname, '../tools/netplay/lan-relay.cjs');
+const relayPath = path.resolve(__dirname, '../../eagler-touhou/server/netplay-relay.mjs');
 
 function waitListening(child) {
   return new Promise((resolve, reject) => {

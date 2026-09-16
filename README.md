@@ -79,6 +79,20 @@ You'll also need to upscale your png from earlier to 1024x1024 so that it can be
 
 In the build directory, run `emcmake` and build as usual. You'll find the built webpage in the directory as your build directory. 
 
+For repository CI or source-only compile validation, the checked-in presets
+build ordinary and netplay Web Runtimes with `TH_EXTERNAL_ASSETS=ON`. These
+commands require the vendored SDL submodules but no original game resources;
+their output is a compile/link artifact rather than a playable asset bundle:
+
+```sh
+git submodule update --init --recursive
+emcmake cmake -G Ninja --preset web-ci-normal
+cmake --build --preset web-ci-normal --parallel
+
+emcmake cmake -G Ninja --preset web-ci-netplay
+cmake --build --preset web-ci-netplay --parallel
+```
+
 ## Controls
 
 Controls are identical to the original game for non-touch users.

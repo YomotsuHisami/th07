@@ -3,7 +3,7 @@ const { spawnSync } = require('node:child_process');
 const { join, resolve } = require('node:path');
 const { tmpdir } = require('node:os');
 
-const renderer = resolve(__dirname, '../tools/netplay/render-coturn-config.cjs');
+const renderer = resolve(__dirname, '../../eagler-touhou/server/render-coturn-config.cjs');
 
 function run(extraEnv = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'th07-coturn-'));
