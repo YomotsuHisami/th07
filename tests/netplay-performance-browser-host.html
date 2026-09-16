@@ -54,6 +54,8 @@
           netplayTouchWorkload: params.get("trace") || "default",
           netplayPerfTelemetry: true,
           netplayTestIncrementalTouch: params.get("touchStream") === "delta",
+          netplayTestNoRollback: params.get("noRollback") === "1",
+          netplayTestDenseBullets: Number(params.get("denseBullets") || 0),
           touchEnabled: params.get("physicalTouch") === "1",
           touchMovementMode: "touch", touchFocusMode: "two-finger",
           netplayTestFrames: Number(params.get("frames") || 900),

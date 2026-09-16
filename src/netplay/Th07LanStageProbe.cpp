@@ -84,6 +84,8 @@ std::size_t g_MaxSnapshotBytes = 0;
 bool g_PerfTelemetry = false;
 int g_TouchWorkload = 0;
 bool g_TestIncrementalTouch = false;
+bool g_TestNoRollback = false;
+std::uint32_t g_TestDenseBullets = 0;
 std::uint64_t g_ForwardCostNs = 0;
 std::uint64_t g_ResimulationCostNs = 0;
 std::uint64_t g_ReconcileCostNs = 0;
@@ -91,6 +93,8 @@ std::uint64_t g_MaxReconcileCostNs = 0;
 std::uint32_t g_LocalCaptures = 0;
 double g_CapturedTouchX = 0.0;
 double g_CapturedTouchY = 0.0;
+std::uint32_t g_InputCaptureFrame = 0;
+std::uint64_t g_NextInputCaptureNs = 0;
 
 struct ReplayFrameBinding
 {
@@ -138,6 +142,47 @@ bool UseReplayPlaybackCycle();
 bool UsePauseCycle();
 bool UseRestartCycle();
 bool UseStageTransitionTest();
+
+bool AllRemoteInputsReady(std::uint32_t frame)
+{
+    for (std::uint8_t player = 0; player < g_PlayerCount; ++player)
+    {
+        if (player == g_LocalPlayer)
+            continue;
+        const std::uint32_t confirmed = g_Core.ConfirmedThrough(player);
+        if (confirmed == INVALID_FRAME || confirmed < frame)
+            return false;
+    }
+    return true;
+}
+
+void InjectDenseBulletLoad(std::uint32_t frame)
+{
+    if (g_TestDenseBullets == 0 || frame != 60)
+        return;
+
+    // Test-only deterministic real BulletManager load. Keep the bullets in the
+    // upper half and stationary so both variants simulate/draw the same dense
+    // world for the rest of the sample window. Running this inside SimulateFrame
+    // means rollback resimulation of frame 60 recreates the same authored state.
+    EnemyBulletShooter shooter;
+    shooter.sprite = 0;
+    shooter.spriteOffset = 0;
+    shooter.count1 = 1;
+    shooter.count2 = 1;
+    shooter.aimMode = BULLET_AIM_RING_ABSOLUTE;
+    shooter.speed1 = 0.0f;
+    shooter.speed2 = 0.0f;
+    shooter.flags = 0;
+    for (std::uint32_t index = 0; index < g_TestDenseBullets; ++index)
+    {
+        shooter.pos.x = 48.0f + static_cast<float>(index % 32u) * 10.0f;
+        shooter.pos.y = 48.0f + static_cast<float>((index / 32u) % 12u) * 11.0f;
+        shooter.pos.z = 0.0f;
+        if (g_BulletManager.SpawnBulletPattern(&shooter) != 0)
+            break;
+    }
+}
 bool ProbeMode();
 bool ProductionLanMode();
 void ClearTransientModes();
@@ -999,6 +1044,17 @@ bool Initialize()
     g_TestIncrementalTouch = ProbeMode() && EM_ASM_INT({
         return Module.eaglerOptions?.netplayTestIncrementalTouch ? 1 : 0;
     }) != 0;
+    g_TestNoRollback = ProbeMode() && EM_ASM_INT({
+        return Module.eaglerOptions?.netplayTestNoRollback ? 1 : 0;
+    }) != 0;
+    g_TestDenseBullets = ProbeMode() ? static_cast<std::uint32_t>(EM_ASM_INT({
+        const value = Module.eaglerOptions?.netplayTestDenseBullets;
+        return Number.isInteger(value) && value >= 0 && value <= 960 ? value : 0;
+    })) : 0u;
+    EM_ASM({
+        globalThis.__eaglerNetplayNoRollback = !!$0;
+        globalThis.__eaglerNetplayDenseBullets = $1 >>> 0;
+    }, g_TestNoRollback ? 1 : 0, g_TestDenseBullets);
     g_TouchWorkload = ProbeMode() ? EM_ASM_INT({
         return Math.max(0, ['default', 'steady', 'variable', 'stop', 'reverse', 'burst']
             .indexOf(Module.eaglerOptions?.netplayTouchWorkload));
@@ -1007,6 +1063,8 @@ bool Initialize()
     g_ForwardCostNs = g_ResimulationCostNs = g_ReconcileCostNs = g_MaxReconcileCostNs = 0;
     g_LocalCaptures = 0;
     g_CapturedTouchX = g_CapturedTouchY = 0.0;
+    g_InputCaptureFrame = 0;
+    g_NextInputCaptureNs = 0;
     Input::ResetDirectTouchStates();
     coreConfig.maxRollbackFrames = 12;
 #ifdef __EMSCRIPTEN__
@@ -1229,6 +1287,42 @@ bool SendSessionControl(bool forceReady = false)
 }
 
 bool SendScheduledLocalFrame(std::uint32_t frame);
+bool SendLocalFrame(std::uint32_t frame);
+
+bool PumpBufferedLockstepInput()
+{
+    constexpr std::uint64_t captureIntervalNs = 1000000000ull / 60ull;
+    const std::uint64_t now = SDL_GetTicksNS();
+    if (g_NextInputCaptureNs == 0)
+        g_NextInputCaptureNs = now;
+
+    if (now >= g_NextInputCaptureNs)
+    {
+        const std::uint32_t scheduled = g_Core.LocalFrameForCapture(g_InputCaptureFrame);
+        if (scheduled != INVALID_FRAME && (!ProbeMode() || scheduled < g_TestFrames))
+        {
+            if (!SendLocalFrame(g_InputCaptureFrame))
+                return false;
+        }
+        ++g_InputCaptureFrame;
+        // Do not synthesize several device samples after a long browser stall.
+        // One fresh sample is enough; the extra wall-clock gap becomes more
+        // buffering instead of duplicated direct-touch deltas.
+        g_NextInputCaptureNs = now + captureIntervalNs;
+        return true;
+    }
+
+    // Keep the most recent future slot redundant on the wire without sampling
+    // input again. This preserves the ordinary packet-loss recovery contract.
+    if (g_InputCaptureFrame != 0 && (g_DriverTicks % 3u) == 0u)
+    {
+        const std::uint32_t latest = g_Core.LocalFrameForCapture(g_InputCaptureFrame - 1u);
+        if (latest != INVALID_FRAME && (!ProbeMode() || latest < g_TestFrames) &&
+            !SendScheduledLocalFrame(latest))
+            return false;
+    }
+    return true;
+}
 
 bool SendLocalFrame(std::uint32_t frame)
 {
@@ -1335,9 +1429,10 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
     }
 #endif
     NormalizeMultiplayerEndingSkipHistory();
-    const bool captureRollback = !g_SpectatorMode;
+    const bool captureRollback = !g_SpectatorMode && !g_TestNoRollback;
     if (captureRollback && !Th07Rollback::BeginFrame(frame))
         return -1;
+    InjectDenseBulletLoad(frame);
     SideEffects::SetSpeculative(resimulation);
     // Legacy/global raw-input owners still need one deterministic word. Use
     // the synchronized union on every peer while Player consumes its own
@@ -1483,11 +1578,10 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
             g_Players[0].playerState, g_Players[1].playerState, g_Players[2].playerState,
             GetPlayerLives(0), GetPlayerLives(1), GetPlayerLives(2));
     }
-    if (captureRollback)
-    {
-        if (!Th07Rollback::EndFrame() || !g_Core.MarkSimulated(frame, decision))
-            return -1;
-    }
+    if (captureRollback && !Th07Rollback::EndFrame())
+        return -1;
+    if (!g_SpectatorMode && !g_Core.MarkSimulated(frame, decision))
+        return -1;
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
     if (replayBinding.simFrame == frame && replayBinding.stage >= 0 &&
         replayBinding.replayFrame >= 0)
@@ -1585,6 +1679,8 @@ int SimulateFrame(std::uint32_t frame, const FrameDecision &decision, bool resim
 
 bool ReconcileRollback()
 {
+    if (g_TestNoRollback)
+        return !g_Core.HasRollbackRequest();
     if (!g_Core.HasRollbackRequest())
         return true;
     const std::uint64_t costStartNs = g_PerfTelemetry ? SDL_GetTicksNS() : 0;
@@ -1887,27 +1983,39 @@ int RunCalcChain()
                 const perf = globalThis.__eaglerNetplayPerf;
                 perf.forwardMs = $0; perf.resimulationMs = $1; perf.reconcileMs = $2;
                 perf.captures = $3; perf.driverTicks = $4; perf.maxReconcileMs = $5;
+                perf.maxSnapshotBytes = $6; perf.peakBullets = $7;
             }, g_ForwardCostNs / 1000000.0, g_ResimulationCostNs / 1000000.0,
                g_ReconcileCostNs / 1000000.0, g_LocalCaptures, g_DriverTicks,
-               g_MaxReconcileCostNs / 1000000.0);
+               g_MaxReconcileCostNs / 1000000.0, g_MaxSnapshotBytes, g_PeakBullets);
     }
 #endif
 
     if ((!ProbeMode() || g_SimFrame < g_TestFrames) && TransportIsOpen())
     {
-        // During the neutral lead-in the due input exists but the future
-        // capture does not. Only the future slot proves we sampled this tick.
-        const bool localPresent = g_Core.HasLocalCapture(g_SimFrame);
-        if (!localPresent && !SendLocalFrame(g_SimFrame))
+        if (g_TestNoRollback)
         {
-            Fail("send local input");
-            return -1;
+            if (!PumpBufferedLockstepInput())
+            {
+                Fail("buffered input pump");
+                return -1;
+            }
         }
-        if (localPresent && (g_DriverTicks % 3u) == 0u &&
-            !SendScheduledLocalFrame(g_Core.LocalFrameForCapture(g_SimFrame)))
+        else
         {
-            Fail("input retry");
-            return -1;
+            // During the neutral lead-in the due input exists but the future
+            // capture does not. Only the future slot proves we sampled this tick.
+            const bool localPresent = g_Core.HasLocalCapture(g_SimFrame);
+            if (!localPresent && !SendLocalFrame(g_SimFrame))
+            {
+                Fail("send local input");
+                return -1;
+            }
+            if (localPresent && (g_DriverTicks % 3u) == 0u &&
+                !SendScheduledLocalFrame(g_Core.LocalFrameForCapture(g_SimFrame)))
+            {
+                Fail("input retry");
+                return -1;
+            }
         }
 
         // Frame zero is the session barrier. Receive every peer's real first
@@ -1941,6 +2049,12 @@ int RunCalcChain()
         // for every remote player's real input while shared UI is active.
         if (SharedUiNeedsConfirmedInputs() &&
             ConfirmedThroughAllRemotes() < g_SimFrame)
+            return CHAIN_CALLBACK_RESULT_CONTINUE;
+
+        // Pure buffered lockstep experiment: never create predicted logical
+        // state. If the jitter buffer did not absorb this packet's lateness,
+        // yield the browser callback and wait for the exact remote sample.
+        if (g_TestNoRollback && !AllRemoteInputsReady(g_SimFrame))
             return CHAIN_CALLBACK_RESULT_CONTINUE;
 
         const FrameDecision decision = g_Core.PrepareFrame(g_SimFrame);

@@ -324,7 +324,7 @@
         if (!Array.isArray(message.thpracCatalog ?? []) || (message.thpracCatalog?.length || 0) > 256) throw new Error("invalid thprac catalog");
         thpracCatalog = message.thpracCatalog ?? [];
         Module.eaglerThpracCatalog = thpracCatalog;
-        for (const key of ["thpracEnabled", "limitPresentationTo60", "touchEnabled", "unlimitedTouch", "touchBombZoneEnabled", "doubleTapBombEnabled", "alwaysHitbox", "enhanceLocalPlayerVisibility", "focusHitboxEnabled", "th06FocusHitbox", "replayViewer", "netplayRollbackProbe", "netplayScriptedInput", "netplayReplayPlaybackCycle", "netplayPauseCycle", "netplayRestartCycle", "netplayStageTransition", "netplayStage4BossChain", "netplaySpectator"]) {
+        for (const key of ["thpracEnabled", "limitPresentationTo60", "touchEnabled", "unlimitedTouch", "touchBombZoneEnabled", "doubleTapBombEnabled", "alwaysHitbox", "enhanceLocalPlayerVisibility", "focusHitboxEnabled", "th06FocusHitbox", "replayViewer", "netplayRollbackProbe", "netplayScriptedInput", "netplayReplayPlaybackCycle", "netplayPauseCycle", "netplayRestartCycle", "netplayStageTransition", "netplayStage4BossChain", "netplaySpectator", "netplayTestNoRollback"]) {
           if (options[key] != null && typeof options[key] !== "boolean") throw new Error("invalid eagler-touhou option");
         }
         if (options.touchSensitivity != null && (!Number.isFinite(options.touchSensitivity) || options.touchSensitivity < 100 || options.touchSensitivity > 300)) throw new Error("invalid touch sensitivity");
@@ -343,6 +343,8 @@
         if (options.netplayTouchPrediction != null && !["legacy", "stable"].includes(options.netplayTouchPrediction)) throw new Error("invalid netplay touch prediction");
         if (options.netplayPerfTelemetry != null && typeof options.netplayPerfTelemetry !== "boolean") throw new Error("invalid netplay telemetry");
         if (options.netplayTestIncrementalTouch != null && typeof options.netplayTestIncrementalTouch !== "boolean") throw new Error("invalid touch test stream");
+        if (options.netplayTestDenseBullets != null && (!Number.isInteger(options.netplayTestDenseBullets) || options.netplayTestDenseBullets < 0 || options.netplayTestDenseBullets > 960)) throw new Error("invalid dense bullet test load");
+        if ((options.netplayTestNoRollback || options.netplayTestDenseBullets) && options.debugHarness !== "netplay-lan-stage1") throw new Error("netplay performance experiments require the test harness");
         if (options.netplayTouchWorkload != null && !["default", "steady", "variable", "stop", "reverse", "burst"].includes(options.netplayTouchWorkload)) throw new Error("invalid netplay touch workload");
         if (options.netplayTouchWorkload && options.netplayTouchWorkload !== "default" && options.debugHarness !== "netplay-lan-stage1") throw new Error("touch workloads require the test harness");
         if (options.netplaySeed != null && (!Number.isInteger(options.netplaySeed) || options.netplaySeed < 0 || options.netplaySeed > 65535)) throw new Error("invalid netplay seed");
@@ -411,6 +413,8 @@
           netplayTouchPrediction: options.netplayTouchPrediction || "legacy",
           netplayPerfTelemetry: !!options.netplayPerfTelemetry,
           netplayTestIncrementalTouch: options.debugHarness === "netplay-lan-stage1" && !!options.netplayTestIncrementalTouch,
+          netplayTestNoRollback: options.debugHarness === "netplay-lan-stage1" && !!options.netplayTestNoRollback,
+          netplayTestDenseBullets: options.debugHarness === "netplay-lan-stage1" ? (options.netplayTestDenseBullets ?? 0) : 0,
           netplayTouchWorkload: options.netplayTouchWorkload || "default",
           netplayUrl: options.netplayUrl || "",
           netplayPlayer: options.netplayPlayer ?? -1,

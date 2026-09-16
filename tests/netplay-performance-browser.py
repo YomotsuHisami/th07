@@ -70,6 +70,8 @@ def main() -> int:
     parser.add_argument("--prediction-window", type=int, choices=range(1, 13), default=12)
     parser.add_argument("--touch-prediction", choices=("legacy", "stable"), default="legacy")
     parser.add_argument("--touch-workload", choices=("default", "steady", "variable", "stop", "reverse", "burst"), default="default")
+    parser.add_argument("--no-rollback", action="store_true", help="Pure buffered lockstep: exact remote input only, no rollback snapshots")
+    parser.add_argument("--dense-bullets", type=int, default=0, help="Test-only stationary BulletManager load (0..960)")
     parser.add_argument("--require-rollback", action="store_true")
     parser.add_argument("--relay-diagnostics", action="store_true")
     parser.add_argument("--rtc", action="store_true", help="Use real RTC; relay delay does not affect RTC input")
@@ -82,7 +84,9 @@ def main() -> int:
     if (not re.fullmatch(r"[A-Za-z0-9_.-]+", args.build) or args.frames < 600
             or args.frames > 12000 or args.frames % 300 or args.cpu_rate < 1
             or not 0 <= args.slow_player < args.players
-            or args.delay_ms < 0 or args.jitter_ms < 0 or args.timeout <= 0):
+            or args.delay_ms < 0 or args.jitter_ms < 0 or args.timeout <= 0
+            or args.dense_bullets < 0 or args.dense_bullets > 960
+            or (args.no_rollback and args.require_rollback)):
         parser.error("invalid build/timing settings; frames must be 600..12000 in steps of 300")
     build = ROOT / args.build
     if not (build / "th07.wasm").is_file():
@@ -183,6 +187,8 @@ def main() -> int:
                             "inputDelay": args.input_delay, "prediction": args.touch_prediction,
                             "predictionWindow": args.prediction_window,
                             "trace": args.touch_workload,
+                            "noRollback": int(args.no_rollback),
+                            "denseBullets": args.dense_bullets,
                             "touchStream": args.touch_stream,
                             "physicalTouch": int(args.physical_touch),
                         })
@@ -271,6 +277,8 @@ def main() -> int:
                             costs: w.__eaglerNetplayPerf,
                             input_delay: w.__eaglerNetplayInputDelayFrames,
                             prediction_window: w.__eaglerNetplayMaxPredictionFrames,
+                            no_rollback: !!w.__eaglerNetplayNoRollback,
+                            dense_bullets: w.__eaglerNetplayDenseBullets || 0,
                             queue_stats: w.__th07PeerTransport?.perf || null,
                             transport: w.__eaglerNetplayTransport,
                             rollback: w.__eaglerNetplayLanRollback, resimulated: w.__eaglerNetplayLanResimulated,
@@ -302,6 +310,10 @@ def main() -> int:
                         raise AssertionError("requested input delay was not applied")
                     if any(peer.get("prediction_window") != args.prediction_window for peer in report["peers"]):
                         raise AssertionError("requested prediction window was not applied")
+                    if any(bool(peer.get("no_rollback")) != args.no_rollback for peer in report["peers"]):
+                        raise AssertionError("requested rollback mode was not applied")
+                    if any(peer.get("dense_bullets") != args.dense_bullets for peer in report["peers"]):
+                        raise AssertionError("requested dense bullet load was not applied")
                     if any(not peer.get("costs", {}).get("captures") for peer in report["peers"]):
                         raise AssertionError("cost instrumentation was not active")
                     report["status"] = "PASS"
