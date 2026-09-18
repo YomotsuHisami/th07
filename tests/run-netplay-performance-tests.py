@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+COMMON = ROOT / "third_party" / "eagler-common"
 CASES = {
     "touch-pipeline": ["tests/netplay-touch-pipeline-test.cpp", "src/netplay/NetplayCore.cpp",
                        "src/netplay/NetplayProtocol.cpp", "src/netplay/NetplayInput.cpp",
@@ -19,7 +20,7 @@ CASES = {
     "frame-budget": ["tests/netplay-frame-budget-test.cpp"],
     "frame-advantage": ["tests/netplay-frame-advantage-test.cpp"],
     "netplay-core": ["tests/netplay-core-test.cpp", "src/netplay/NetplayCore.cpp",
-                     "src/netplay/NetplayProtocol.cpp", "src/netplay/NetplaySession.cpp"],
+                     "src/netplay/NetplayProtocol.cpp", str(COMMON / "src/netplay/NetplaySession.cpp")],
 }
 
 
@@ -39,7 +40,8 @@ def main() -> int:
                 for name, sources in CASES.items():
                     executable = Path(directory) / (name + (".cjs" if toolchain == "wasm" else ".exe"))
                     command = [empp if toolchain == "wasm" else "g++", "-std=c++17", "-O2", "-UNDEBUG",
-                               "-Wall", "-Wextra", "-Isrc", *sources, "-o", str(executable)]
+                               "-Wall", "-Wextra", "-Isrc", "-I", str(COMMON / "include"),
+                               *sources, "-o", str(executable)]
                     if toolchain == "wasm":
                         # The standalone core test places several complete
                         # input histories on its stack (production uses globals).

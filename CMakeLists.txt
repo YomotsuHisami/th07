@@ -97,15 +97,25 @@ if(TH_ENABLE_NETPLAY OR TH_ENABLE_MULTIPLAYER_GAMEPLAY)
 endif()
 
 if(TH_ENABLE_NETPLAY)
+    set(EAGLER_COMMON_ROOT "" CACHE PATH "Shared Eagler runtime infrastructure")
+    if(NOT EAGLER_COMMON_ROOT)
+        if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/eagler-common/cmake/EaglerCommon.cmake")
+            set(EAGLER_COMMON_ROOT "${CMAKE_SOURCE_DIR}/third_party/eagler-common")
+        else()
+            set(EAGLER_COMMON_ROOT "${CMAKE_SOURCE_DIR}/../eagler-common")
+        endif()
+    endif()
+    if(NOT EXISTS "${EAGLER_COMMON_ROOT}/cmake/EaglerCommon.cmake")
+        message(FATAL_ERROR "TH_ENABLE_NETPLAY requires eagler-common at ${EAGLER_COMMON_ROOT}")
+    endif()
+    include("${EAGLER_COMMON_ROOT}/cmake/EaglerCommon.cmake")
     list(APPEND SOURCES
         src/netplay/NetplayCore.cpp
         src/netplay/NetplayInput.cpp
         src/netplay/NetplayProtocol.cpp
-        src/netplay/NetplaySession.cpp
         src/netplay/RollbackJournal.cpp
         src/netplay/NetplaySideEffects.cpp
         src/netplay/BrowserPeerTransport.cpp
-        src/netplay/WebSocketTransport.cpp
         src/netplay/Th07CanonicalHash.cpp
         src/netplay/Th07DeterminismProbe.cpp
         src/netplay/Th07LanCoreProbe.cpp
@@ -155,6 +165,9 @@ if(NOT EMSCRIPTEN AND NOT ANDROID AND NOT APPLE)
 endif()
 
 target_include_directories(${TH_EXEC_NAME} PRIVATE src src/pbg4)
+if(TH_ENABLE_NETPLAY)
+    eagler_common_link_netplay_base(${TH_EXEC_NAME})
+endif()
 if(TH_ENABLE_THPRAC)
     target_compile_definitions(${TH_EXEC_NAME} PRIVATE TH_ENABLE_THPRAC)
     target_compile_definitions(${TH_EXEC_NAME} PRIVATE IMGUI_DISABLE_WIN32_FUNCTIONS)

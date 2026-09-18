@@ -8,6 +8,7 @@ import subprocess
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+COMMON = ROOT / "third_party" / "eagler-common"
 CORE_H = (ROOT / "src/netplay/NetplayCore.hpp").read_text(encoding="utf-8")
 CORE = (ROOT / "src/netplay/NetplayCore.cpp").read_text(encoding="utf-8")
 PROTOCOL = (ROOT / "src/netplay/NetplayProtocol.hpp").read_text(encoding="utf-8")
@@ -19,7 +20,7 @@ JOURNAL = (ROOT / "src/netplay/RollbackJournal.cpp").read_text(encoding="utf-8")
 FRAME_BUDGET = (ROOT / "src/netplay/FrameBudget.hpp").read_text(encoding="utf-8")
 SIDE_EFFECTS = (ROOT / "src/netplay/NetplaySideEffects.cpp").read_text(encoding="utf-8")
 WINDOW = (ROOT / "src/GameWindow.cpp").read_text(encoding="utf-8")
-TRANSPORT = (ROOT / "src/netplay/WebSocketTransport.cpp").read_text(encoding="utf-8")
+TRANSPORT = (COMMON / "src/netplay/WebSocketTransport.cpp").read_text(encoding="utf-8")
 PEER_TRANSPORT = (ROOT / "src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
 BASE = "5b9ebe892914ff5666ef68c0cd02719dde7d4ee9"
 FINAL = "022c533"
