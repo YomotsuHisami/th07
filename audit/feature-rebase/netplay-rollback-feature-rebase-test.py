@@ -9,6 +9,7 @@ import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 COMMON = ROOT / "third_party" / "eagler-common"
+CMAKE = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
 CORE_H = (COMMON / "include/eagler/netplay/NetplayCore.hpp").read_text(encoding="utf-8")
 CORE = (COMMON / "src/netplay/NetplayCore.cpp").read_text(encoding="utf-8")
 PROTOCOL = (COMMON / "include/eagler/netplay/NetplayProtocol.hpp").read_text(encoding="utf-8")
@@ -38,6 +39,11 @@ def git(*args: str) -> str:
 
 
 def main() -> None:
+    require(
+        "ordinary and netplay builds consume separate common CMake surfaces",
+        "eagler_common_link_netplay_headers(${TH_EXEC_NAME})" in CMAKE
+        and "eagler_common_link_netplay_base(${TH_EXEC_NAME})" in CMAKE,
+    )
     frozen = git(
         "diff", "--unified=0", f"{BASE}..{FINAL}", "--", "src/th07/Netplay.cpp"
     )
