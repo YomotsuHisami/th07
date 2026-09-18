@@ -9,9 +9,9 @@ import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 COMMON = ROOT / "third_party" / "eagler-common"
-CORE_H = (ROOT / "src/netplay/NetplayCore.hpp").read_text(encoding="utf-8")
-CORE = (ROOT / "src/netplay/NetplayCore.cpp").read_text(encoding="utf-8")
-PROTOCOL = (ROOT / "src/netplay/NetplayProtocol.hpp").read_text(encoding="utf-8")
+CORE_H = (COMMON / "include/eagler/netplay/NetplayCore.hpp").read_text(encoding="utf-8")
+CORE = (COMMON / "src/netplay/NetplayCore.cpp").read_text(encoding="utf-8")
+PROTOCOL = (COMMON / "include/eagler/netplay/NetplayProtocol.hpp").read_text(encoding="utf-8")
 DRIVER = (ROOT / "src/netplay/Th07LanStageProbe.cpp").read_text(encoding="utf-8")
 PLAYER = (ROOT / "src/Player.cpp").read_text(encoding="utf-8")
 ROLLBACK = (ROOT / "src/netplay/Th07RollbackState.cpp").read_text(encoding="utf-8")
