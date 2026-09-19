@@ -9,19 +9,23 @@ import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMMON = ROOT / "third_party" / "eagler-common"
-CORE_H = (ROOT / "src/netplay/NetplayCore.hpp").read_text(encoding="utf-8")
-CORE = (ROOT / "src/netplay/NetplayCore.cpp").read_text(encoding="utf-8")
-PROTOCOL = (ROOT / "src/netplay/NetplayProtocol.hpp").read_text(encoding="utf-8")
+CORE_H = (COMMON / "include/eagler/netplay/NetplayCore.hpp").read_text(encoding="utf-8")
+CORE = (COMMON / "src/netplay/NetplayCore.cpp").read_text(encoding="utf-8")
+PROTOCOL = (COMMON / "include/eagler/netplay/NetplayProtocol.hpp").read_text(encoding="utf-8")
+PROTOCOL_CONFIG = (ROOT / "src/netplay/NetplayProtocolConfig.hpp").read_text(encoding="utf-8")
 DRIVER = (ROOT / "src/netplay/Th07LanStageProbe.cpp").read_text(encoding="utf-8")
 PLAYER = (ROOT / "src/Player.cpp").read_text(encoding="utf-8")
+ROLLBACK_H = (ROOT / "src/netplay/Th07RollbackState.hpp").read_text(encoding="utf-8")
 ROLLBACK = (ROOT / "src/netplay/Th07RollbackState.cpp").read_text(encoding="utf-8")
-JOURNAL_H = (ROOT / "src/netplay/RollbackJournal.hpp").read_text(encoding="utf-8")
-JOURNAL = (ROOT / "src/netplay/RollbackJournal.cpp").read_text(encoding="utf-8")
-FRAME_BUDGET = (ROOT / "src/netplay/FrameBudget.hpp").read_text(encoding="utf-8")
+JOURNAL_H = (COMMON / "include/eagler/netplay/RollbackJournal.hpp").read_text(encoding="utf-8")
+JOURNAL = (COMMON / "src/netplay/RollbackJournal.cpp").read_text(encoding="utf-8")
+FRAME_BUDGET = (COMMON / "include/eagler/netplay/FrameBudget.hpp").read_text(encoding="utf-8")
+INPUT_REPAIR = (COMMON / "include/eagler/netplay/InputRepairBudget.hpp").read_text(encoding="utf-8")
+RTC_IMPAIRMENT = (COMMON / "testkit/rtc-input-impairment.cjs").read_text(encoding="utf-8")
 SIDE_EFFECTS = (ROOT / "src/netplay/NetplaySideEffects.cpp").read_text(encoding="utf-8")
 WINDOW = (ROOT / "src/GameWindow.cpp").read_text(encoding="utf-8")
 TRANSPORT = (COMMON / "src/netplay/WebSocketTransport.cpp").read_text(encoding="utf-8")
-PEER_TRANSPORT = (ROOT / "src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
+PEER_TRANSPORT = (COMMON / "src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
 BASE = "5b9ebe892914ff5666ef68c0cd02719dde7d4ee9"
 FINAL = "022c533"
 
@@ -57,7 +61,7 @@ def main() -> None:
     shell = CORE + PROTOCOL + DRIVER + ROLLBACK
     require(
         "browser gameplay ABI rejects runtimes without shared difficulty and Ending semantics",
-        "constexpr std::uint32_t GAMEPLAY_ABI = TH07_MULTI_GAMEPLAY_ABI;" in DRIVER,
+        "constexpr std::uint32_t GAMEPLAY_ABI = TH07_MULTI_NETPLAY_ABI;" in DRIVER,
     )
     require(
         "portable rollback path excludes WinSock threads LowLatency and UDP",
@@ -67,6 +71,24 @@ def main() -> None:
         "input redundancy matches final upstream thirty-two-frame tail",
         "MAX_REDUNDANT_INPUTS = 32" in PROTOCOL
         and "packet.inputCount < MAX_REDUNDANT_INPUTS" in CORE,
+    )
+    require(
+        "reliable repair uses shared bounded primitives without a title-local compatibility shim",
+        '#include <eagler/netplay/InputRepairBudget.hpp>' in DRIVER
+        and "StalledMs = 80" in INPUT_REPAIR
+        and "RetryMs = 80" in INPUT_REPAIR
+        and "SendRepairTo" in PEER_TRANSPORT
+        and "inputRepairSent" in PEER_TRANSPORT,
+    )
+    require(
+        "RTC repair impairment is shared and title labels are injected by the harness",
+        'inputLabel = options.inputLabel ?? "eagler-input"' in RTC_IMPAIRMENT
+        and 'controlLabel = options.controlLabel ?? "eagler-control"' in RTC_IMPAIRMENT,
+    )
+    require(
+        "TH07 protocol capability remains title-owned while codec/core are shared",
+        "MagicGame = '7'" in PROTOCOL_CONFIG
+        and "MaxAnalogMode = 4" in PROTOCOL_CONFIG,
     )
     require(
         "prediction retains only TH07 held controls",
@@ -161,7 +183,8 @@ def main() -> None:
         "multi-peer time sync keeps per-endpoint windows and uses the largest lead",
         "g_PeerTimeSync[packet.senderPlayer]" in DRIVER
         and "g_PeerTimeSync[player].averageLead > recommendedLead" in DRIVER
-        and "return ProductionLanMode() ? g_SimulationIntervalScale : 1.0" in DRIVER,
+        and "return ProductionLanMode() && !g_DisableTimeSyncPacing" in DRIVER
+        and "? g_SimulationIntervalScale : 1.0;" in DRIVER,
     )
     require(
         "pause retry and transition UI wait for confirmed input",
@@ -281,8 +304,10 @@ def main() -> None:
         and "frames_.pop_front()" not in JOURNAL,
     )
     require(
-        "production rollback keeps first-write state across two logical frames and replays from checkpoint start",
-        "CHECKPOINT_LOGICAL_FRAMES = 2" in ROLLBACK
+        "default production rollback keeps first-write state across two logical frames and replays from checkpoint start",
+        "std::size_t checkpointLogicalFrames = 2;" in ROLLBACK_H
+        and "stateConfig.checkpointLogicalFrames = 2;" in DRIVER
+        and "(g_FramesInCheckpoint + 1) % g_Config.checkpointLogicalFrames" in ROLLBACK
         and "g_Journal.BeginFrame(frame, true)" in ROLLBACK
         and "Th07Rollback::RestoreTo(rollback, &replayFrom)" in DRIVER
         and "frame = replayFrom" in DRIVER

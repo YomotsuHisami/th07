@@ -281,6 +281,26 @@ static void TestArenaGrowthPreservesCapturedBytes()
     assert(journal.BeginFrame(0) && journal.EndFrame());
 }
 
+static void TestSnapshotFloatPairPatch()
+{
+    struct State { float x, y; int marker; } state{1.0f, 2.0f, 7};
+    auto journal = MakeJournal(4, 1024, 16);
+    for (std::uint32_t frame = 10; frame <= 12; ++frame)
+    {
+        assert(journal.BeginFrame(frame));
+        assert(journal.Touch(&state, sizeof(state)));
+        state.x += 1.0f;
+        state.y += 1.0f;
+        ++state.marker;
+        assert(journal.EndFrame());
+    }
+    assert(journal.AddFloatPairToSnapshots(10, 12, &state.x, 5.0f, -1.0f));
+    assert(journal.UndoTo(12));
+    assert(state.x == 8.0f && state.y == 3.0f && state.marker == 9);
+    assert(journal.UndoTo(10));
+    assert(state.x == 1.0f && state.y == 2.0f && state.marker == 7);
+}
+
 static void TestRandomizedHistoryAgainstFullCopyReference()
 {
     using World = std::array<std::uint32_t, 96>;
@@ -369,6 +389,7 @@ int main()
     TestAddressOverflowIsRejectedBeforeCopy();
     TestOrderedAndScatteredIndex();
     TestArenaGrowthPreservesCapturedBytes();
+    TestSnapshotFloatPairPatch();
     TestRandomizedHistoryAgainstFullCopyReference();
     std::puts("TH07 rollback journal: PASS");
 }

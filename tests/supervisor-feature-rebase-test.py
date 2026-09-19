@@ -6,7 +6,7 @@ import pathlib, re, subprocess
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "src" / "Supervisor.cpp").read_text(encoding="utf-8")
 HEADER = (ROOT / "src" / "Supervisor.hpp").read_text(encoding="utf-8")
-INPUT = (ROOT / "src" / "netplay" / "NetplayInput.cpp").read_text(encoding="utf-8")
+INPUT = (ROOT / "third_party" / "eagler-common" / "src" / "netplay" / "NetplayInput.cpp").read_text(encoding="utf-8")
 ROLLBACK = (ROOT / "src" / "netplay" / "Th07RollbackState.cpp").read_text(encoding="utf-8")
 GAME = (ROOT / "src" / "GameManager.cpp").read_text(encoding="utf-8")
 MAIN = (ROOT / "src" / "main.cpp").read_text(encoding="utf-8")

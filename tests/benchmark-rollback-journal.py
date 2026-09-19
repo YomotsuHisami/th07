@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+COMMON = ROOT / "third_party" / "eagler-common"
 
 
 def git(*args: str) -> str:
@@ -38,9 +39,15 @@ def main() -> int:
     for label in ("before", "after"):
         def read(name: str) -> str:
             path = f"src/netplay/RollbackJournal.{name}"
-            return git("show", f"{revision}:{path}") if label == "before" else (ROOT / path).read_text(encoding="utf-8")
+            if label == "before":
+                return git("show", f"{revision}:{path}")
+            common_path = COMMON / ("include/eagler/netplay/RollbackJournal.hpp" if name == "hpp"
+                                    else "src/netplay/RollbackJournal.cpp")
+            return common_path.read_text(encoding="utf-8")
+        journal_cpp = read("cpp").replace('#include "RollbackJournal.hpp"', '')
+        journal_cpp = journal_cpp.replace('#include <eagler/netplay/RollbackJournal.hpp>', '')
         sources[label] = (read("hpp").replace("#pragma once", "") + "\n" +
-                          read("cpp").replace('#include "RollbackJournal.hpp"', '') + "\n" + bench)
+                          journal_cpp + "\n" + bench)
 
     env = os.environ.copy()
     if args.toolchain == "wasm":

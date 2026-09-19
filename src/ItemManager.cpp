@@ -1,4 +1,5 @@
 #include "ItemManager.hpp"
+#include "graphics/ItemPresentation.hpp"
 
 #include "AnmManager.hpp"
 #include "AsciiManager.hpp"
@@ -898,6 +899,16 @@ void ItemManager::OnUpdate()
             {
                 g_AnmManager->ExecuteScript(&item->sprite);
             }
+            Graphics::UpdateItemPresentation(*item, [](AnmVm &vm, i32 sprite) {
+                g_AnmManager->SetActiveSprite(&vm, sprite);
+            });
+            // Leave the state that one authored 60 Hz draw would have left.
+            // Interpolated draws may temporarily replace this position, but
+            // the next ANM tick must never inherit a display-time midpoint.
+            item->sprite.pos.x = g_GameManager.arcadeRegionTopLeftPos.x + item->currentPosition.x;
+            item->sprite.pos.y = g_GameManager.arcadeRegionTopLeftPos.y +
+                (item->currentPosition.y < -8.0f ? 8.0f : item->currentPosition.y);
+            item->sprite.pos.z = 0.01f;
             this->listTail->next = item;
             item->next = NULL;
             this->listTail = item;
@@ -981,11 +992,11 @@ void ItemManager::ActivateAllItems()
 void ItemManager::OnDraw()
 {
     Item *item;
-    i32 local_8;
 
     item = this->listHead.next;
     while (item)
     {
+        const ZunVec3 authoredPos = item->sprite.pos;
         ZunVec3 drawPos = item->prevPosition.Lerp(item->currentPosition, g_RenderAlpha);
         item->sprite.pos.x = g_GameManager.arcadeRegionTopLeftPos.x + drawPos.x;
         item->sprite.pos.y = g_GameManager.arcadeRegionTopLeftPos.y + drawPos.y;
@@ -993,30 +1004,9 @@ void ItemManager::OnDraw()
         if (item->currentPosition.y < -8.0f)
         {
             item->sprite.pos.y = 8.0f + g_GameManager.arcadeRegionTopLeftPos.y;
-            if (item->isOnscreen)
-            {
-                g_AnmManager->SetActiveSprite(&item->sprite, item->itemType + 694);
-                item->isOnscreen = 0;
-                item->sprite.zWriteDisable = 1;
-            }
-            local_8 = 255 - (i32)((8.0f - item->currentPosition.y) * 255.0f / 128.0f);
-            if (local_8 < 64)
-            {
-                local_8 = 64;
-            }
-            item->sprite.color.color = (item->sprite.color.color & 0xffffff) | local_8 << 24;
-        }
-        else
-        {
-            if (!item->isOnscreen)
-            {
-                g_AnmManager->SetActiveSprite(&item->sprite, item->itemType + 684);
-                item->isOnscreen = 1;
-                item->sprite.color.color = 0xffffffff;
-                item->sprite.zWriteDisable = 1;
-            }
         }
         g_AnmManager->Draw(&item->sprite);
+        item->sprite.pos = authoredPos;
         item = item->next;
     }
 }

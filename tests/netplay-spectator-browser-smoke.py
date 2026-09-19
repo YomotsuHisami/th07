@@ -151,7 +151,7 @@ def snapshot(page, frame: int) -> dict:
 
 
 def run_game(game: str, force_relay: bool, spectator_delay_ms: int = 0,
-             retry_continue: bool = False) -> None:
+             retry_continue: bool = False, browser_channel: str | None = None) -> None:
     root = WORKSPACE / f"{game}-eagler"
     http_port = free_port()
     relay_port = free_port()
@@ -178,7 +178,7 @@ def run_game(game: str, force_relay: bool, spectator_delay_ms: int = 0,
         wait_http(host)
         wait_relay(relay)
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True, args=[
+            browser = pw.chromium.launch(headless=True, channel=browser_channel, args=[
                 "--autoplay-policy=no-user-gesture-required",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
@@ -282,10 +282,14 @@ def run_game(game: str, force_relay: bool, spectator_delay_ms: int = 0,
 
 def main() -> int:
     force_relay = "--rtc" not in sys.argv[1:]
+    browser_channel = None
     spectator_delay_ms = 0
     retry_continue = False
     games = []
     for value in sys.argv[1:]:
+        if value.startswith("--browser-channel="):
+            browser_channel = value.split("=", 1)[1]
+            continue
         if value == "--rtc":
             continue
         if value == "--retry":
@@ -299,7 +303,7 @@ def main() -> int:
     for game in games:
         if game not in {"th06", "th07"}:
             raise SystemExit(f"unknown game: {game}")
-        run_game(game, force_relay, spectator_delay_ms, retry_continue)
+        run_game(game, force_relay, spectator_delay_ms, retry_continue, browser_channel)
     return 0
 
 

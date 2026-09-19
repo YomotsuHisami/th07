@@ -49,6 +49,24 @@ struct BulletTypeInfo
 
 struct BulletTypeSprites
 {
+    void UpdateLivePrev(u16 state)
+    {
+        // Normal and despawn VMs can become visible later in this very tick
+        // (spawn completion / collision / Bomb), so always publish both.
+        // A spawn VM is selected only at SpawnSingleBullet, where UpdatePrev()
+        // initializes ALL five endpoints before any draw. Thereafter the two
+        // unselected spawn VMs cannot be read before the slot is reinitialized.
+        spriteBullet.UpdatePrev();
+        spriteSpawnEffectDonut.UpdatePrev();
+        switch (state)
+        {
+        case BULLET_SPAWNING_FAST: spriteSpawnEffectFast.UpdatePrev(); break;
+        case BULLET_SPAWNING_NORMAL: spriteSpawnEffectNormal.UpdatePrev(); break;
+        case BULLET_SPAWNING_SLOW: spriteSpawnEffectSlow.UpdatePrev(); break;
+        default: break;
+        }
+    }
+
     void UpdatePrev()
     {
         spriteBullet.UpdatePrev();

@@ -314,6 +314,34 @@ static void TestCorrectPredictionDoesNotRollback()
     assert(!core.HasRollbackRequest());
 }
 
+static void TestEquivalentPredictionConfirmationDoesNotRollback()
+{
+    RollbackCore core;
+    CoreConfig cfg;
+    cfg.sessionId = 20;
+    cfg.playerCount = 2;
+    cfg.localPlayer = 0;
+    cfg.maxRollbackFrames = 8;
+    assert(core.Reset(cfg));
+    assert(core.ScheduleLocalInput(0, 1));
+    assert(core.SubmitRemoteInput(1, 0, 2) == RemoteInputResult::Accepted);
+    auto f0 = core.PrepareFrame(0);
+    assert(f0.canAdvance && core.MarkSimulated(0, f0));
+
+    assert(core.ScheduleLocalInput(1, 1));
+    auto predicted = core.PrepareFrame(1);
+    assert(predicted.canAdvance && (predicted.predictedMask & (1u << 1)) != 0);
+    assert(core.MarkSimulated(1, predicted));
+
+    assert(core.SubmitEquivalentRemoteInput(1, 1, FrameInput(3)) ==
+           RemoteInputResult::PredictionCorrect);
+    assert(!core.HasRollbackRequest());
+    assert(core.ConfirmedThrough(1) == 1);
+    auto authoritative = core.PrepareFrame(1);
+    assert(authoritative.canAdvance && authoritative.predictedMask == 0 &&
+           authoritative.inputs[1].buttons == 3);
+}
+
 static void TestRollbackBudgetStalls()
 {
     RollbackCore core;
@@ -466,6 +494,7 @@ int main()
     TestPredictionFiltersEdgeInputs();
     TestDirectionPredictionHasIndependentHorizon();
     TestCorrectPredictionDoesNotRollback();
+    TestEquivalentPredictionConfirmationDoesNotRollback();
     TestRollbackBudgetStalls();
     TestInputDelayAndPacketRedundancy();
     TestThreePlayerIndependentPrediction();

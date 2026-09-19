@@ -1,4 +1,10 @@
 #include "BulletManager.hpp"
+#include "graphics/StableDrawOrder.hpp"
+#if defined(__EMSCRIPTEN__) && defined(TH_ENABLE_NETPLAY)
+#include "netplay/Th07LanStageProbe.hpp"
+#include <emscripten/emscripten.h>
+#include <SDL3/SDL_timer.h>
+#endif
 
 #include "AnmIdx.hpp"
 #include "AnmManager.hpp"
@@ -415,10 +421,16 @@ void BulletManager::RemoveAllBullets(i32 param_1)
             {
                 g_ItemManager.SpawnItem(&bullet->pos, ITEM_CHERRY_SMALL, 1);
             }
+#ifdef TH_ENABLE_NETPLAY
+            Netplay::Th07Rollback::TouchBullet(bullet);
+#endif
             memset(bullet, 0, sizeof(Bullet));
         }
         else
         {
+#ifdef TH_ENABLE_NETPLAY
+            Netplay::Th07Rollback::BeforeBulletDespawn(bullet);
+#endif
             bullet->state = BULLET_DESPAWN;
         }
     }
@@ -496,6 +508,9 @@ i32 BulletManager::DespawnBullets(i32 param_1, i32 turnIntoItem)
         {
             local_8 = param_1;
         }
+#ifdef TH_ENABLE_NETPLAY
+        Netplay::Th07Rollback::BeforeBulletDespawn(bullet);
+#endif
         bullet->state = BULLET_DESPAWN;
     }
     laser = this->lasers;
@@ -554,6 +569,9 @@ void BulletManager::RemoveBulletsInRadius(ZunVec3 *centerPos, f32 radius)
         }
 
         g_ItemManager.SpawnItem(&bullet->pos, ITEM_POINT_BULLET, 1);
+#ifdef TH_ENABLE_NETPLAY
+        Netplay::Th07Rollback::TouchBullet(bullet);
+#endif
         memset(bullet, 0, sizeof(Bullet));
     }
 }
@@ -863,7 +881,7 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
     {
         if (arg->bullets[i].state != BULLET_INACTIVE)
         {
-            arg->bullets[i].sprites.UpdatePrev();
+            arg->bullets[i].sprites.UpdateLivePrev(arg->bullets[i].state);
             arg->bullets[i].prevPos = arg->bullets[i].pos;
             arg->bullets[i].prevAngle = arg->bullets[i].angle;
         }
@@ -996,6 +1014,9 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
                 {
                     if ((bullet->moreFlags & 0x1000) == 0)
                     {
+#ifdef TH_ENABLE_NETPLAY
+                        Netplay::Th07Rollback::BeforeBulletDespawn(bullet);
+#endif
                         bullet->state = BULLET_DESPAWN;
 #ifdef TH_ENABLE_MULTIPLAYER_GAMEPLAY
                         g_ItemManager.SpawnItem(&bullet->pos, collisionPlayer->itemType, 1);
@@ -1028,6 +1049,9 @@ u32 BulletManager::OnUpdate(BulletManager *arg)
             {
                 if (collisionRes != 2 || (bullet->moreFlags & 0x1000) == 0)
                 {
+#ifdef TH_ENABLE_NETPLAY
+                    Netplay::Th07Rollback::BeforeBulletDespawn(bullet);
+#endif
                     bullet->state = BULLET_DESPAWN;
                     if (collisionRes == 2)
                     {
@@ -1328,6 +1352,11 @@ void Bullet::Draw()
 
 u32 BulletManager::OnDraw(BulletManager *arg)
 {
+#if defined(__EMSCRIPTEN__) && defined(TH_ENABLE_NETPLAY)
+    const bool observeDraw = Netplay::Th07LanStageProbe::PerformanceTelemetryEnabled();
+    const auto beforeNs = observeDraw ? SDL_GetTicksNS() : 0;
+    const auto beforeFlushes = g_AnmManager->flushesThisFrame;
+#endif
     Bullet *bullet;
     f32 local_18;
     f32 local_14;
@@ -1419,31 +1448,34 @@ u32 BulletManager::OnDraw(BulletManager *arg)
             activeBullets[activeCount++] = &arg->bullets[i];
         }
     }
-    std::stable_sort(activeBullets, activeBullets + activeCount, [](Bullet *a, Bullet *b) {
-        AnmVm *vmA = (a->state == BULLET_DESPAWN) ? &a->sprites.spriteSpawnEffectDonut
-                                                  : &a->sprites.spriteBullet;
-        AnmVm *vmB = (b->state == BULLET_DESPAWN) ? &b->sprites.spriteSpawnEffectDonut
-                                                  : &b->sprites.spriteBullet;
-
-        if (vmA->blendMode != vmB->blendMode)
-        {
-            return vmA->blendMode < vmB->blendMode;
-        }
-
-        if (a->sprites.collisionType != b->sprites.collisionType)
-        {
-            return a->sprites.collisionType < b->sprites.collisionType;
-        }
-
-        i32 texA = vmA->sprite ? vmA->sprite->sourceFileIndex : -1;
-        i32 texB = vmB->sprite ? vmB->sprite->sourceFileIndex : -1;
-        return texA < texB;
+    // Renderer-owned scratch, never part of rollback state. Equal keys retain
+    // the original pool order, including alpha-blended and despawning bullets.
+    static Graphics::StableDrawOrder<Bullet, 1024> drawOrder;
+    drawOrder.Sort(activeBullets, activeCount, [](Bullet *bullet) {
+        const AnmVm *vm = bullet->state == BULLET_DESPAWN
+            ? &bullet->sprites.spriteSpawnEffectDonut : &bullet->sprites.spriteBullet;
+        return Graphics::StableDrawOrder<Bullet, 1024>::BulletKey(
+            vm->blendMode, bullet->sprites.collisionType,
+            vm->sprite ? vm->sprite->sourceFileIndex : -1);
     });
 
     for (i = 0; i < activeCount; i++)
     {
         activeBullets[i]->Draw();
     }
+
+#if defined(__EMSCRIPTEN__) && defined(TH_ENABLE_NETPLAY)
+    if (observeDraw)
+        EM_ASM({
+            const p = globalThis.__eaglerNetplayPerf;
+            if (!p) return;
+            p.bulletDrawMs = (p.bulletDrawMs || 0) + $0;
+            p.bulletFlushes = (p.bulletFlushes || 0) + $1;
+            p.maxBulletFlushes = Math.max(p.maxBulletFlushes || 0, $1);
+            p.bulletDraws = (p.bulletDraws || 0) + 1;
+        }, (SDL_GetTicksNS() - beforeNs) / 1000000.0,
+           g_AnmManager->flushesThisFrame - beforeFlushes);
+#endif
 
     return CHAIN_CALLBACK_RESULT_CONTINUE;
 }

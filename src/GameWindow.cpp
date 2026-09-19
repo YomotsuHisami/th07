@@ -169,6 +169,18 @@ void GameWindow::Present()
 
 RenderResult GameWindow::Render()
 {
+#ifdef __EMSCRIPTEN__
+    static std::uint32_t s_DebugWebRenderCallbacks = 0;
+    ++s_DebugWebRenderCallbacks;
+    if ((s_DebugWebRenderCallbacks & 15u) == 0u)
+    {
+        EM_ASM({
+            globalThis.__eaglerDebugRenderCallbacks = $0;
+            globalThis.__eaglerDebugAppActive = !!$1;
+            globalThis.__eaglerDebugAccumulator = $2;
+        }, s_DebugWebRenderCallbacks, this->isAppActive ? 1 : 0, this->accumulator);
+    }
+#endif
 #if !defined(__EMSCRIPTEN__)
     const u64 nativePerfNowNs = SDL_GetTicksNS();
     ReportNativePerfTelemetry(nativePerfNowNs);
@@ -191,6 +203,10 @@ RenderResult GameWindow::Render()
     const f64 targetDt = baseTargetDt * Netplay::Th07LanStageProbe::SimulationIntervalScale();
 #else
     const f64 targetDt = baseTargetDt;
+#endif
+#ifdef __EMSCRIPTEN__
+    if ((s_DebugWebRenderCallbacks & 15u) == 0u)
+        EM_ASM({ globalThis.__eaglerDebugTargetDt = $0; }, targetDt);
 #endif
 
     u64 currentPerfCounter = SDL_GetPerformanceCounter();
@@ -362,6 +378,17 @@ RenderResult GameWindow::Render()
     {
         SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "th07: SDL audio pump failed: %s", SDL_GetError());
     }
+
+#ifdef TH_ENABLE_NETPLAY
+    // Incremental rollback can yield after RestoreTo() but before historical
+    // replay reaches the old live frontier. Keep the previous complete swap on
+    // screen instead of drawing this temporary historical state. The netplay
+    // driver temporarily switches Emscripten's main-loop timing to a short
+    // timer while reconciliation is active, so no visual swap is needed just
+    // to request the next historical replay slice.
+    if (Netplay::Th07LanStageProbe::ReconciliationInProgress())
+        return RENDER_RESULT_KEEP_RUNNING;
+#endif
 
     // Simulation stays fixed at 60 Hz, while Web presentation normally follows
     // requestAnimationFrame at the display refresh rate. The optional 60 FPS

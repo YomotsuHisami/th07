@@ -8,6 +8,7 @@
   "use strict";
   const protocol = "eagler-touhou/1";
   const game = "th07";
+  const epoch = 1;
   const params = new URLSearchParams(location.search);
   const player = Number(params.get("player") || 0);
   const playerCount = Number(params.get("players") || 2);
@@ -23,7 +24,7 @@
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       iframe.contentWindow.postMessage(
-        { protocol, game, command, request: id, ...body }, location.origin);
+        { protocol, game, epoch, command, request: id, ...body }, location.origin);
       setTimeout(() => {
         const waiter = pending.get(id);
         if (!waiter) return;
@@ -36,7 +37,7 @@
   window.addEventListener("message", async event => {
     if (event.source !== iframe.contentWindow || event.origin !== location.origin) return;
     const message = event.data || {};
-    if (message.protocol !== protocol || message.game !== game) return;
+    if (message.protocol !== protocol || message.game !== game || message.epoch !== epoch) return;
     if (message.request && pending.has(message.request)) {
       const waiter = pending.get(message.request);
       pending.delete(message.request);
@@ -54,6 +55,8 @@
         options: {
           debugHarness: "netplay-lan-stage1",
           netplayMode: "lan",
+          netplayInputDelayFrames: params.has("inputDelay") ? Number(params.get("inputDelay")) : undefined,
+          netplayBulletSnapshot: params.get("bulletSnapshot") || undefined,
           netplayUrl: relay,
           netplayPlayer: player,
           netplayPlayerCount: playerCount,
@@ -82,6 +85,8 @@
     }
   });
 
-  iframe.src = "/build-web-th07-netplay-replay-audit/th07.html?hosted=1&runtimeVariant=multiplayer";
+  const build = params.get("build") || "build-web-th07-netplay-replay-audit";
+  if (!/^[A-Za-z0-9_.-]+$/.test(build)) throw new Error("invalid Replay test build");
+  iframe.src = `/${build}/th07.html?hosted=1&runtimeVariant=multiplayer&runtimeEpoch=${epoch}`;
 })();
 </script>

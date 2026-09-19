@@ -256,6 +256,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char **argv)
     g_ReplayExtensionSelfTest = g_ReplayExtensionSelfTest || EM_ASM_INT({
         return Module.eaglerOptions?.debugHarness === 'replay-extension' ? 1 : 0;
     }) != 0;
+    const i32 webStageVisual = EM_ASM_INT({
+        const id = Module.eaglerOptions?.debugHarness;
+        return id === 'stage1-visual' ? 0 : id === 'stage4-visual' ? 3 : -1;
+    });
+    if (webStageVisual >= 0) g_StageVisualTestIndex = webStageVisual;
     g_EndingViewerSelection = EM_ASM_INT({
         const id = Module.eaglerOptions?.debugHarness;
         return id === 'ending-reimu-a' ? 0 :
@@ -536,6 +541,16 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         // registering the first stage. Preserve that original TH07 mapping.
         g_GameManager.currentStage = requestedDifficulty < DIFF_EXTRA
             ? 0 : requestedDifficulty + DIFF_HARD;
+#ifdef __EMSCRIPTEN__
+        // Test fixture only: exercise a real late-stage ECL/STD workload.
+        const int probeStage = EM_ASM_INT({
+            const o = Module.eaglerOptions;
+            return o?.debugHarness === 'netplay-lan-stage1' &&
+                Number.isInteger(o.netplayTestStage) && o.netplayTestStage >= 1 &&
+                o.netplayTestStage <= 6 ? o.netplayTestStage : 0;
+        });
+        if (probeStage) g_GameManager.currentStage = probeStage - 1;
+#endif
         g_GameManager.finished = 0;
         MainMenu *menu = g_MainMenuForDebug;
         g_Chain.Cut(menu->calcChain);
@@ -674,6 +689,12 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         g_GameManager.SetLivesRemaining(99);
         g_DevSpeedMultiplier = 8.0f;
         g_Stage1VisualTestPrepared = true;
+#ifdef __EMSCRIPTEN__
+        EM_ASM({
+            globalThis.__eaglerOrdinaryStageVisualPrepared = true;
+            globalThis.__eaglerOrdinaryStageVisualStage = $0;
+        }, g_StageVisualTestIndex + 1);
+#endif
         SDL_Log("th07 dev: Stage %d visual test prepared (99 lives, 8x logic)",
                 g_StageVisualTestIndex + 1);
     }

@@ -3,8 +3,7 @@ from pathlib import Path
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 RELAY = (WORKSPACE / "eagler-touhou/server/netplay-relay.mjs").read_text(encoding="utf-8")
-TH06 = (WORKSPACE / "th06-eagler/src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
-TH07 = (WORKSPACE / "th07-eagler/src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
+COMMON = (WORKSPACE / "eagler-common/src/netplay/BrowserPeerTransport.cpp").read_text(encoding="utf-8")
 
 
 def require(ok: bool, label: str) -> None:
@@ -23,15 +22,14 @@ require("if (run.spectatorAdmissionOpen)" in RELAY and "run.spectatorHistory.pus
 require("run.spectatorHistory.length = 0" in RELAY,
         "frame-zero history is released when the window closes")
 
-for name, source in (("TH06", TH06), ("TH07", TH07)):
-    require("maxReceivedPackets: 16384" in source, f"{name} spectator receive queue cap")
-    require("this.received.length - this.receivedHead >= this.maxReceivedPackets" in source,
-            f"{name} spectator queue checks unconsumed packets")
-    require("Spectator fell too far behind" in source and
-            "close(1008, 'spectator fell too far behind')" in source,
-            f"{name} slow spectator fails instead of accumulating forever")
-    send = source[source.index("peer_send_spectator"):source.index("peer_has_spectators")]
-    require("spectatorCount <= 0" not in send,
-            f"{name} P1 can publish frame-zero history before a late spectator volunteers")
+require("maxReceivedPackets: 16384" in COMMON, "common spectator receive queue cap")
+require("this.received.length - this.receivedHead >= this.maxReceivedPackets" in COMMON,
+        "common spectator queue checks unconsumed packets")
+require("Spectator fell too far behind" in COMMON and
+        "close(1008, 'spectator fell too far behind')" in COMMON,
+        "common slow spectator fails instead of accumulating forever")
+send = COMMON[COMMON.index("peer_send_spectator"):COMMON.index("peer_has_spectators")]
+require("spectatorCount <= 0" not in send,
+        "P1 can publish frame-zero history before a late spectator volunteers")
 
 print("Spectator backlog contract: PASS finite-late-join-window=1")

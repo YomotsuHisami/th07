@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import functools
+import argparse
+import re
+import urllib.parse
 import http.server
 import os
 import socket
@@ -71,15 +74,24 @@ def snapshot(page) -> dict[str, object]:
             comparedFrames: Number(runtime?.__eaglerNetplayReplayComparedFrames || 0),
             inputMismatch: !!runtime?.__eaglerNetplayReplayInputMismatch,
             inputCoverage: Number(runtime?.__eaglerNetplayReplayInputCoverage || 0),
+            snapshotBackend: String(runtime?.__eaglerNetplayBulletSnapshot || ''),
+            configuredDelay: Number(runtime?.Module?.eaglerOptions?.netplayInputDelayFrames),
           };
         }"""
     )
 
 
 def main() -> int:
-    player_count = int(sys.argv[1]) if len(sys.argv) > 1 else 2
-    if player_count not in (2, 3):
-        raise SystemExit("usage: netplay-replay-browser-smoke.py [2|3]")
+    parser = argparse.ArgumentParser(description="Verify MP Replay storage and exact input playback")
+    parser.add_argument("players", type=int, nargs="?", default=2, choices=(2,3))
+    parser.add_argument("--browser-channel", default=None)
+    parser.add_argument("--build", default="build-web-th07-netplay-replay-audit")
+    parser.add_argument("--input-delay", type=int, choices=range(13))
+    parser.add_argument("--bullet-snapshot", choices=("journal","live"))
+    args = parser.parse_args()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.build):
+        parser.error("invalid build directory")
+    player_count = args.players
     test_frames = 600 if player_count == 2 else 180
     playback_target = 300 if player_count == 2 else 60
     http_port = free_port()
@@ -94,7 +106,7 @@ def main() -> int:
         "TH07_STUN_URLS": "",
     })
     handler = functools.partial(QuietHandler, directory=str(ROOT))
-    with socketserver.TCPServer(("127.0.0.1", http_port), handler) as server:
+    with http.server.ThreadingHTTPServer(("127.0.0.1", http_port), handler) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         relay = subprocess.Popen(
@@ -115,6 +127,7 @@ def main() -> int:
                     for player in range(player_count):
                         browser = playwright.chromium.launch(
                             headless=True,
+                            channel=args.browser_channel,
                             args=[
                                 "--disable-background-timer-throttling",
                                 "--disable-backgrounding-occluded-windows",
@@ -133,7 +146,11 @@ def main() -> int:
                         page.goto(
                             f"http://127.0.0.1:{http_port}/tests/"
                             f"netplay-replay-browser-host.html?player={player}&players={player_count}"
-                            f"&frames={test_frames}&relay={relay_url}",
+                            f"&frames={test_frames}&relay={relay_url}&" + urllib.parse.urlencode({
+                                "build": args.build,
+                                **({"inputDelay":args.input_delay} if args.input_delay is not None else {}),
+                                **({"bulletSnapshot":args.bullet_snapshot} if args.bullet_snapshot else {}),
+                            }),
                             wait_until="load", timeout=30_000,
                         )
                         pages.append(page)
@@ -170,6 +187,11 @@ def main() -> int:
 
     if any(failures):
         raise RuntimeError(f"page errors: {failures}; tails={[values[-30:] for values in messages]}")
+    for state in states:
+        if args.input_delay is not None and state["configuredDelay"] != args.input_delay:
+            raise AssertionError(f"Replay test did not use requested input delay: {state}")
+        if args.bullet_snapshot and state["snapshotBackend"] != args.bullet_snapshot:
+            raise AssertionError(f"Replay test did not use requested snapshot backend: {state}")
     if not all(
         state["launched"] and not state["hostFailure"] and not state["failed"] and
         state["rollback"] > 0 and state["replaySaved"] and

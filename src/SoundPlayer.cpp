@@ -992,6 +992,8 @@ ZunResult SoundPlayer::OpenOggBGM(const char *name)
         SAFE_DELETE(this->bgmDataSource);
         return ZUN_ERROR;
     }
+    if (EM_ASM_INT({ return Module.eaglerOptions?.netplayPerfTelemetry ? 1 : 0; }))
+        std::printf("netplay audio: OGG STREAM %s\n", oggPath);
     return ZUN_SUCCESS;
 #else
     int channels = 0;

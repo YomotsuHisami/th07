@@ -8,6 +8,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(TH_EXTERNAL_ASSETS "Do not bundle assets (on platforms that bundle them) and use the user/executable directories instead" OFF)
 option(TH_WEB_SHARED_FONT "Let the Web host install runtime fonts instead of embedding them" OFF)
+option(TH_WEB_PROFILE_NAMES "Keep optimized Web function names for diagnostic CPU profiles" OFF)
+option(TH_WEB_SPEED_OPT "Use O3 and cross-file LTO for measured Web release builds (no fast-math)" OFF)
 option(TH_ENABLE_THPRAC "Build the archived thprac integration" OFF)
 option(TH_ENABLE_THCRAP "Build the archived thcrap localization integration" OFF)
 option(TH_ENABLE_NETPLAY "Build the isolated TH07 rollback-netplay core" OFF)
@@ -89,7 +91,17 @@ else()
     list(APPEND SOURCES src/LocalizationStub.cpp)
 endif()
 
+set(EAGLER_COMMON_ROOT "${CMAKE_SOURCE_DIR}/third_party/eagler-common"
+    CACHE PATH "Pinned eagler-common checkout; override explicitly for development only")
+if(NOT EXISTS "${EAGLER_COMMON_ROOT}/include/eagler/netplay/NetplayProtocol.hpp")
+    message(FATAL_ERROR "Replay extension requires the pinned eagler-common protocol headers at ${EAGLER_COMMON_ROOT}")
+endif()
+
 if(TH_ENABLE_NETPLAY OR TH_ENABLE_MULTIPLAYER_GAMEPLAY)
+    if(NOT EXISTS "${EAGLER_COMMON_ROOT}/cmake/EaglerCommon.cmake")
+        message(FATAL_ERROR "Multiplayer gameplay requires the pinned eagler-common checkout at ${EAGLER_COMMON_ROOT}")
+    endif()
+    include("${EAGLER_COMMON_ROOT}/cmake/EaglerCommon.cmake")
     list(APPEND SOURCES
         src/multiplayer/GameplaySession.cpp
         src/MultiplayerResources.cpp
@@ -97,19 +109,8 @@ if(TH_ENABLE_NETPLAY OR TH_ENABLE_MULTIPLAYER_GAMEPLAY)
 endif()
 
 if(TH_ENABLE_NETPLAY)
-    set(EAGLER_COMMON_ROOT "${CMAKE_SOURCE_DIR}/third_party/eagler-common"
-        CACHE PATH "Pinned eagler-common checkout; override explicitly for development only")
-    if(NOT EXISTS "${EAGLER_COMMON_ROOT}/cmake/EaglerCommon.cmake")
-        message(FATAL_ERROR "TH_ENABLE_NETPLAY requires the pinned eagler-common checkout at ${EAGLER_COMMON_ROOT}")
-    endif()
-    include("${EAGLER_COMMON_ROOT}/cmake/EaglerCommon.cmake")
     list(APPEND SOURCES
-        src/netplay/NetplayCore.cpp
-        src/netplay/NetplayInput.cpp
-        src/netplay/NetplayProtocol.cpp
-        src/netplay/RollbackJournal.cpp
         src/netplay/NetplaySideEffects.cpp
-        src/netplay/BrowserPeerTransport.cpp
         src/netplay/Th07CanonicalHash.cpp
         src/netplay/Th07DeterminismProbe.cpp
         src/netplay/Th07LanCoreProbe.cpp
@@ -158,7 +159,13 @@ if(NOT EMSCRIPTEN AND NOT ANDROID AND NOT APPLE)
     endif()
 endif()
 
-target_include_directories(${TH_EXEC_NAME} PRIVATE src src/pbg4)
+target_include_directories(${TH_EXEC_NAME} PRIVATE
+    src
+    src/pbg4
+    "${EAGLER_COMMON_ROOT}/include")
+if(TH_ENABLE_NETPLAY OR TH_ENABLE_MULTIPLAYER_GAMEPLAY)
+    eagler_common_link_netplay_input(${TH_EXEC_NAME})
+endif()
 if(TH_ENABLE_NETPLAY)
     eagler_common_link_netplay_base(${TH_EXEC_NAME})
 endif()
@@ -196,15 +203,20 @@ if(EMSCRIPTEN)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIGURATION>")
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIGURATION>")
 
-    target_compile_options(th07 PRIVATE
-        "-O2"
-    )
+    if(TH_WEB_SPEED_OPT)
+        set(TH_WEB_OPT_LEVEL "-O3")
+        target_compile_options(th07 PRIVATE "-flto")
+        target_link_options(th07 PRIVATE "-flto")
+    else()
+        set(TH_WEB_OPT_LEVEL "-O2")
+    endif()
+    target_compile_options(th07 PRIVATE "${TH_WEB_OPT_LEVEL}")
     target_link_options(th07 PRIVATE
         "-sALLOW_MEMORY_GROWTH"
         "-sMAX_WEBGL_VERSION=2"
         "-sMIN_SAFARI_VERSION=140100"
         "-sENVIRONMENT=web"
-        "-O2"
+        "${TH_WEB_OPT_LEVEL}"
         "-sINVOKE_RUN=0"
         "-sEXPORTED_RUNTIME_METHODS=['callMain']"
         "-lidbfs.js"
@@ -213,6 +225,9 @@ if(EMSCRIPTEN)
     )
     if(TH_ENABLE_NETPLAY)
         target_link_options(th07 PRIVATE "-lwebsocket")
+    endif()
+    if(TH_WEB_PROFILE_NAMES)
+        target_link_options(th07 PRIVATE "--profiling-funcs")
     endif()
     set_property(TARGET th07 APPEND PROPERTY LINK_DEPENDS "${CMAKE_SOURCE_DIR}/resources/shell.html")
     if(NOT TH_EXTERNAL_ASSETS)

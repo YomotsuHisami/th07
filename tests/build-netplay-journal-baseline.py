@@ -52,6 +52,27 @@ def main() -> int:
         return subprocess.check_output(["git", "show", f"{revision}:src/netplay/{name}"], cwd=ROOT, text=True, encoding="utf-8")
 
     old_header = old("RollbackJournal.hpp").replace("#pragma once", "")
+    # Current Th07RollbackState consumes a few Journal API additions that were
+    # introduced after the historical storage implementation. Keep the old
+    # storage/index/restore algorithm intact, but add a compile-only capability
+    # surface so this controlled A/B can still replace ONLY the Journal object.
+    # The equivalent-touch snapshot patch experiment is not part of this
+    # baseline lane, so its legacy compatibility stub deliberately reports that
+    # the operation is unsupported.
+    old_header = old_header.replace(
+        "    std::size_t maxBlocksPerFrame = 4096;\n",
+        "    std::size_t maxBlocksPerFrame = 4096;\n"
+        "    bool fastBulkCopy = false;\n"
+        "    bool coalesceRestore = false;\n",
+    )
+    old_header = old_header.replace(
+        "    std::size_t BlocksForFrame(std::uint32_t frame) const;\n",
+        "    std::size_t BlocksForFrame(std::uint32_t frame) const;\n"
+        "    bool AddFloatPairToSnapshots(std::uint32_t, std::uint32_t, void *, float, float) { return false; }\n"
+        "    std::uint64_t RestoreCopiedBytes() const { return 0; }\n"
+        "    std::uint64_t RestoreSkippedBytes() const { return 0; }\n"
+        "    std::uint64_t ArenaGrowths() const { return 0; }\n",
+    )
     env = os.environ.copy()
     emsdk = ROOT.parent / "toolchains/emsdk"
     env["EM_CONFIG"] = str(emsdk / ".emscripten")
@@ -62,7 +83,9 @@ def main() -> int:
         source = old(name) if name == "RollbackJournal.cpp" else (ROOT / "src/netplay" / name).read_text(encoding="utf-8")
         source = source.replace('#include "RollbackJournal.hpp"', old_header)
         source_hashes[name] = hashlib.sha256(source.encode()).hexdigest()
-        target = f"CMakeFiles/th07.dir/src/netplay/{name}.o"
+        target = (f"CMakeFiles/th07.dir/third_party/eagler-common/src/netplay/{name}.o"
+                  if name == "RollbackJournal.cpp"
+                  else f"CMakeFiles/th07.dir/src/netplay/{name}.o")
         _, properties = rule(target)
         output = destination / f"{name}.o"
         command = [compiler, *tokens(properties.get("DEFINES", "")),
@@ -77,7 +100,8 @@ def main() -> int:
     subprocess.run(command, cwd=build, env=env, check=True, timeout=180)
     metadata = {"journal_revision": revision, "candidate_build": args.build,
                 "dev_tools": False, "source_hashes": source_hashes,
-                "scope": "Only journal storage replaced; other candidate code, scheduler and libraries retained."}
+                "scope": "Only journal storage replaced; other candidate code, scheduler and libraries retained.",
+                "legacy_api_compat": "bulk/coalesced fields ignored; telemetry=0; equivalent-touch snapshot patch unsupported"}
     (destination / "netplay-benchmark-build.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(metadata, indent=2))
     return 0

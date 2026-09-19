@@ -321,13 +321,53 @@
         await runMusicQueue(resources);
         if (!failedMusicResources.size) emit("music-complete", { loaded: transfer?.loaded || 0, total: transfer?.total || 0 });
       };
+      // BEGIN NETPLAY PERFORMANCE PROFILE (pure function; unit tested)
+      function resolveNetplayPerformanceProfile(options, coarsePointer = false) {
+        const multiplayer = options.netplayMode === "lan";
+        const profile = options.netplayPerformanceProfile || "balanced";
+        const balanced = multiplayer && profile === "balanced";
+        const mobile = !!options.touchEnabled || !!coarsePointer;
+        // The room's explicit 0/full mode selects the tested responsive backend.
+        // Legacy rooms and the optional buffered mode retain their old defaults.
+        const responsive = balanced && options.netplayInputDelayFrames === 0 &&
+          (options.netplayRollbackPolicy || "full") === "full" && !options.netplaySpectator && !options.replayViewer;
+        return {
+          netplayPerformanceProfile: profile,
+          netplayInputDelayFrames: options.netplayInputDelayFrames ??
+            (multiplayer ? (balanced && mobile ? 6 : 3) : 0),
+          netplayRollbackPolicy: options.netplayRollbackPolicy || "full",
+          netplayTouchDeltaPredictionFrames: options.netplayTouchDeltaPredictionFrames ?? 0,
+          netplayTouchQuantization: options.netplayTouchQuantization ?? 0,
+          netplayTouchEquivalentAbsorb: !!options.netplayTouchEquivalentAbsorb,
+          netplayIncrementalReconcile: !!options.netplayIncrementalReconcile,
+          netplayReliableInputRepair: options.netplayReliableInputRepair ?? responsive,
+          netplayDormantBulletElision: options.netplayDormantBulletElision === true,
+          netplayInitialFrameLag: options.netplayInitialFrameLag ?? 0,
+          netplayDisableTimeSyncPacing: !!options.netplayDisableTimeSyncPacing,
+          netplaySnapshotPolicy: options.netplaySnapshotPolicy || (balanced ? "frontier" : "always"),
+          netplaySnapshotLayout: options.netplaySnapshotLayout || (balanced ? "runs" : "objects"),
+          netplaySnapshotCopy: options.netplaySnapshotCopy || (balanced ? "bulk" : "wasm"),
+          netplaySnapshotRestore: options.netplaySnapshotRestore || (balanced ? "coalesced" : "sequential"),
+          // Checkpoint spacing is undo storage, NOT input buffering. The
+          // repeated zero-delay 3P tests favor three ticks per checkpoint.
+          netplaySnapshotCheckpointFrames: options.netplaySnapshotCheckpointFrames ?? (responsive ? 3 : 2),
+          netplayBulletSnapshot: options.netplayBulletSnapshot || (responsive ? "live" : "journal"),
+          // Presentation cadence is a player preference, not a netplay safety
+          // mechanism. The 60 Hz simulation remains authoritative either way;
+          // high-refresh displays may present interpolated frames unless the
+          // shared Launcher "Lock to 60 FPS" option is explicitly enabled.
+          limitPresentationTo60: !!options.limitPresentationTo60
+        };
+      }
+      // END NETPLAY PERFORMANCE PROFILE
       const installMusic = async message => {
         if (launched) throw new Error("music cannot be changed after launch");
         const options = message.options || {};
+        if (options.netplayPerformanceProfile != null && !["balanced", "manual"].includes(options.netplayPerformanceProfile)) throw new Error("invalid netplay performance profile");
         if (!Array.isArray(message.thpracCatalog ?? []) || (message.thpracCatalog?.length || 0) > 256) throw new Error("invalid thprac catalog");
         thpracCatalog = message.thpracCatalog ?? [];
         Module.eaglerThpracCatalog = thpracCatalog;
-        for (const key of ["thpracEnabled", "limitPresentationTo60", "touchEnabled", "unlimitedTouch", "touchBombZoneEnabled", "doubleTapBombEnabled", "alwaysHitbox", "enhanceLocalPlayerVisibility", "focusHitboxEnabled", "th06FocusHitbox", "replayViewer", "netplayRollbackProbe", "netplayScriptedInput", "netplayReplayPlaybackCycle", "netplayPauseCycle", "netplayRestartCycle", "netplayStageTransition", "netplayStage4BossChain", "netplaySpectator", "netplayTestNoRollback"]) {
+        for (const key of ["thpracEnabled", "limitPresentationTo60", "touchEnabled", "unlimitedTouch", "touchBombZoneEnabled", "doubleTapBombEnabled", "alwaysHitbox", "enhanceLocalPlayerVisibility", "focusHitboxEnabled", "th06FocusHitbox", "replayViewer", "netplayRollbackProbe", "netplayScriptedInput", "netplayReplayPlaybackCycle", "netplayPauseCycle", "netplayRestartCycle", "netplayStageTransition", "netplayStage4BossChain", "netplaySpectator", "netplayTestNoRollback", "netplayTestKeepRollbackSnapshots", "netplayIncrementalReconcile", "netplayDisableTimeSyncPacing"]) {
           if (options[key] != null && typeof options[key] !== "boolean") throw new Error("invalid eagler-touhou option");
         }
         if (options.touchSensitivity != null && (!Number.isFinite(options.touchSensitivity) || options.touchSensitivity < 100 || options.touchSensitivity > 300)) throw new Error("invalid touch sensitivity");
@@ -341,13 +381,30 @@
         if (options.netplaySpectatorId != null && (typeof options.netplaySpectatorId !== "string" || !/^[A-Za-z0-9_-]{0,64}$/.test(options.netplaySpectatorId))) throw new Error("invalid spectator id");
         if (options.netplaySpectatorCount != null && (!Number.isInteger(options.netplaySpectatorCount) || options.netplaySpectatorCount < 0 || options.netplaySpectatorCount > 64)) throw new Error("invalid spectator count");
         if (options.netplayMode != null && options.netplayMode !== "lan") throw new Error("invalid netplay mode");
-        if (options.netplayInputDelayFrames != null && (!Number.isInteger(options.netplayInputDelayFrames) || options.netplayInputDelayFrames < 0 || options.netplayInputDelayFrames > 6)) throw new Error("invalid netplay input delay");
+        if (options.netplayInputDelayFrames != null && (!Number.isInteger(options.netplayInputDelayFrames) || options.netplayInputDelayFrames < 0 || options.netplayInputDelayFrames > 12)) throw new Error("invalid netplay input delay");
+        if (options.netplayRollbackPolicy != null && !["full", "buffered"].includes(options.netplayRollbackPolicy)) throw new Error("invalid netplay rollback policy");
         if (options.netplayMaxPredictionFrames != null && (!Number.isInteger(options.netplayMaxPredictionFrames) || options.netplayMaxPredictionFrames < 1 || options.netplayMaxPredictionFrames > 12)) throw new Error("invalid netplay prediction window");
         if (options.netplayTouchPrediction != null && !["legacy", "stable"].includes(options.netplayTouchPrediction)) throw new Error("invalid netplay touch prediction");
+        if (options.netplayTouchDeltaPredictionFrames != null && (!Number.isInteger(options.netplayTouchDeltaPredictionFrames) || options.netplayTouchDeltaPredictionFrames < 0 || options.netplayTouchDeltaPredictionFrames > 6)) throw new Error("invalid netplay touch delta prediction window");
+        if (options.netplayTouchQuantization != null && (!Number.isFinite(options.netplayTouchQuantization) || options.netplayTouchQuantization < 0 || options.netplayTouchQuantization > 2)) throw new Error("invalid netplay touch quantization");
+        if (options.netplayTouchEquivalentAbsorb != null && typeof options.netplayTouchEquivalentAbsorb !== "boolean") throw new Error("invalid netplay touch equivalence flag");
+        if (options.netplayInitialFrameLag != null && (!Number.isInteger(options.netplayInitialFrameLag) || options.netplayInitialFrameLag < 0 || options.netplayInitialFrameLag > 8)) throw new Error("invalid initial frame lag");
+        if (options.netplaySnapshotPolicy != null && !["always", "demand", "frontier"].includes(options.netplaySnapshotPolicy)) throw new Error("invalid netplay snapshot policy");
+        if (options.netplaySnapshotRestore != null && !["sequential", "coalesced"].includes(options.netplaySnapshotRestore)) throw new Error("invalid netplay restore policy");
+        if (options.netplaySnapshotCheckpointFrames != null && (!Number.isInteger(options.netplaySnapshotCheckpointFrames) || options.netplaySnapshotCheckpointFrames < 1 || options.netplaySnapshotCheckpointFrames > 8)) throw new Error("invalid netplay checkpoint span");
+        if (options.netplayBulletSnapshot != null && !["journal", "compact", "live"].includes(options.netplayBulletSnapshot)) throw new Error("invalid netplay bullet snapshot mode");
+        if (options.netplaySnapshotLayout != null && !["objects", "runs"].includes(options.netplaySnapshotLayout)) throw new Error("invalid snapshot layout");
+        if (options.netplaySnapshotCopy != null && !["wasm", "bulk"].includes(options.netplaySnapshotCopy)) throw new Error("invalid snapshot copy");
         if (options.netplayPerfTelemetry != null && typeof options.netplayPerfTelemetry !== "boolean") throw new Error("invalid netplay telemetry");
+        if (options.netplayReliableInputRepair != null && typeof options.netplayReliableInputRepair !== "boolean") throw new Error("invalid reliable input repair");
+        if (options.netplayDormantBulletElision != null && typeof options.netplayDormantBulletElision !== "boolean") throw new Error("invalid dormant bullet elision");
         if (options.netplayTestIncrementalTouch != null && typeof options.netplayTestIncrementalTouch !== "boolean") throw new Error("invalid touch test stream");
         if (options.netplayTestDenseBullets != null && (!Number.isInteger(options.netplayTestDenseBullets) || options.netplayTestDenseBullets < 0 || options.netplayTestDenseBullets > 960)) throw new Error("invalid dense bullet test load");
-        if ((options.netplayTestNoRollback || options.netplayTestDenseBullets) && options.debugHarness !== "netplay-lan-stage1") throw new Error("netplay performance experiments require the test harness");
+        if (options.netplayTestDenseCurved != null && typeof options.netplayTestDenseCurved !== "boolean") throw new Error("invalid curved bullet fixture");
+        if (options.netplayTestStage != null && (!Number.isInteger(options.netplayTestStage) || options.netplayTestStage < 1 || options.netplayTestStage > 6 || options.debugHarness !== "netplay-lan-stage1")) throw new Error("invalid real-stage fixture");
+        if (options.netplayTestDenseCurved && (options.debugHarness !== "netplay-lan-stage1" || !options.netplayTestDenseBullets)) throw new Error("curved bullets require the dense test harness");
+        if ((options.netplayTestNoRollback || options.netplayTestKeepRollbackSnapshots || options.netplayTestDenseBullets) && options.debugHarness !== "netplay-lan-stage1") throw new Error("netplay performance experiments require the test harness");
+        if (options.netplayTestKeepRollbackSnapshots && !options.netplayTestNoRollback) throw new Error("snapshot-only experiment requires no-rollback lockstep");
         if (options.netplayTouchWorkload != null && !["default", "steady", "variable", "stop", "reverse", "burst"].includes(options.netplayTouchWorkload)) throw new Error("invalid netplay touch workload");
         if (options.netplayTouchWorkload && options.netplayTouchWorkload !== "default" && options.debugHarness !== "netplay-lan-stage1") throw new Error("touch workloads require the test harness");
         if (options.netplaySeed != null && (!Number.isInteger(options.netplaySeed) || options.netplaySeed < 0 || options.netplaySeed > 65535)) throw new Error("invalid netplay seed");
@@ -383,7 +440,7 @@
         const session = options.thpracSession;
         if (options.debugHarness != null && ![
           "thprac-menu", "music-room", "netplay-stage1", "netplay-dual-stage1", "netplay-lan-core", "netplay-lan-stage1",
-          "replay-extension", "result-stats-phantasm",
+          "replay-extension", "result-stats-phantasm", "stage1-visual", "stage4-visual",
           "ending-reimu-a", "ending-reimu-b", "ending-marisa-a", "ending-marisa-b",
           "ending-sakuya-a", "ending-sakuya-b",
           "ending-reimu-bad", "ending-marisa-bad", "ending-sakuya-bad"
@@ -391,7 +448,8 @@
         if (session != null && (session.schema !== "eagler-touhou/thprac-session/1" || session.game !== "th07" || typeof session.params !== "object" || !session.params)) throw new Error("invalid thprac session");
         Module.eaglerOptions = {
           thpracEnabled: !!options.thpracEnabled,
-          limitPresentationTo60: !!options.limitPresentationTo60,
+          ...resolveNetplayPerformanceProfile(options,
+            typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches),
           touchEnabled: !!options.touchEnabled,
           touchMovementMode: options.touchMovementMode || "touch",
           touchSensitivity: options.touchSensitivity ?? 100,
@@ -411,13 +469,16 @@
           oggDecodeMode: options.oggDecodeMode || "stream",
           debugHarness: options.debugHarness || null,
           netplayMode: options.netplayMode || null,
-          netplayInputDelayFrames: options.netplayInputDelayFrames ?? (options.netplayMode === "lan" ? 3 : 0),
           netplayMaxPredictionFrames: options.netplayMaxPredictionFrames ?? 12,
           netplayTouchPrediction: options.netplayTouchPrediction || "legacy",
           netplayPerfTelemetry: !!options.netplayPerfTelemetry,
           netplayTestIncrementalTouch: options.debugHarness === "netplay-lan-stage1" && !!options.netplayTestIncrementalTouch,
           netplayTestNoRollback: options.debugHarness === "netplay-lan-stage1" && !!options.netplayTestNoRollback,
+          netplayTestKeepRollbackSnapshots: options.debugHarness === "netplay-lan-stage1" && !!options.netplayTestKeepRollbackSnapshots,
           netplayTestDenseBullets: options.debugHarness === "netplay-lan-stage1" ? (options.netplayTestDenseBullets ?? 0) : 0,
+          netplayTestDenseCurved: options.debugHarness === "netplay-lan-stage1" && !!options.netplayTestDenseCurved,
+          netplayTestStage: options.debugHarness === "netplay-lan-stage1" ? options.netplayTestStage : undefined,
+          netplayLiveBulletAudit: options.debugHarness === "netplay-lan-stage1" && options.netplayLiveBulletAudit === true,
           netplayTouchWorkload: options.netplayTouchWorkload || "default",
           netplayUrl: options.netplayUrl || "",
           netplayPlayer: options.netplayPlayer ?? -1,
@@ -627,6 +688,58 @@
         if (event.metaKey || event.altKey) return;
         if (applyBrowserKeyboardEvent(event, false)) event.preventDefault();
       }, true);
+      // BEGIN IMMEDIATE INPUT BRIDGE (same validator as queued input)
+      function applyRuntimeInputEvent(message) {
+        switch (message.command) {
+        case "touch-controls":
+          if (typeof message.fireEnabled !== "boolean" || typeof message.focusEnabled !== "boolean" || !Number.isInteger(message.bombSerial) || !Number.isInteger(message.escapeSerial) ||
+              !Number.isInteger(message.joystickX) || !Number.isInteger(message.joystickY) || message.joystickX < -32768 || message.joystickX > 32767 || message.joystickY < -32768 || message.joystickY > 32767 ||
+              !Number.isFinite(message.touchSensitivity) || message.touchSensitivity < 100 || message.touchSensitivity > 300) throw new Error("invalid touch controls");
+          Module.eaglerControls.fireEnabled = message.fireEnabled; Module.eaglerControls.focusEnabled = message.focusEnabled;
+          Module.eaglerControls.bombSerial = message.bombSerial; Module.eaglerControls.escapeSerial = message.escapeSerial;
+          Module.eaglerControls.joystickX = message.joystickX; Module.eaglerControls.joystickY = message.joystickY;
+          Module.eaglerOptions.touchSensitivity = message.touchSensitivity;
+          break;
+        case "keyboard":
+          if (typeof message.down !== "boolean" || typeof message.code !== "string" || typeof message.key !== "string" || !Number.isInteger(message.keyCode) || !Number.isInteger(message.location)) throw new Error("invalid keyboard bridge event");
+          applyBrowserKeyboardEvent(message, message.down);
+          break;
+        case "keyboard-clear": clearBrowserKeyboard(); break;
+        case "touch-cancel": cancelAllTouches(); break;
+        case "direct-touch": {
+          if (!["down", "move", "up"].includes(message.type) || !Number.isInteger(message.id) ||
+              !Number.isFinite(message.x) || !Number.isFinite(message.y))
+            throw new Error("invalid direct touch bridge event");
+          const rect = Module.canvas.getBoundingClientRect();
+          if (!(rect.width > 0) || !(rect.height > 0)) break;
+          const x = (message.x * window.innerWidth - rect.left) / rect.width;
+          const y = (message.y * window.innerHeight - rect.top) / rect.height;
+          if (message.type === "down") Module.canvas.focus({ preventScroll: true });
+          if (message.type === "down" && typeof Module._TouhouAuxTouchDown === "function") Module._TouhouAuxTouchDown(message.id, x, y);
+          else if (message.type === "move" && typeof Module._TouhouAuxTouchMotion === "function") Module._TouhouAuxTouchMotion(message.id, x, y);
+          else if (message.type === "up" && typeof Module._TouhouAuxTouchUp === "function") Module._TouhouAuxTouchUp(message.id, x, y);
+          if (Module.eaglerOptions.netplayPerfTelemetry) globalThis.__th07InputLatencyProbe?.receive(message);
+          break;
+        }
+        }
+      }
+      const immediateInputCommands = new Set(["direct-touch", "touch-controls", "touch-cancel", "keyboard", "keyboard-clear"]);
+      // Same-origin Window access is enforced by the browser. No raw game-state
+      // changes here: feed the existing once-only physical-input capture lane.
+      globalThis.__eaglerDirectInputBridge = Object.freeze({
+        schema: "eagler-touhou/direct-input/1", protocol, game, epoch, origin: location.origin,
+        submit(message) {
+          if (!hosted || !launched || !message || typeof message !== "object" ||
+              Module.eaglerOptions.netplayMode !== "lan" || Module.eaglerOptions.netplayInputDelayFrames !== 0 ||
+              Module.eaglerOptions.netplayRollbackPolicy !== "full" || Module.eaglerOptions.replayViewer ||
+              Module.eaglerOptions.netplaySpectator ||
+              !validEpoch || message.protocol !== protocol || message.game !== game || message.epoch !== epoch || message.request != null ||
+              !immediateInputCommands.has(message.command)) return false;
+          applyRuntimeInputEvent(message);
+          return true;
+        }
+      });
+      // END IMMEDIATE INPUT BRIDGE
       window.addEventListener("message", async event => {
         if (!hosted || event.source !== window.parent || event.origin !== location.origin) return;
         const message = event.data || {};
@@ -637,30 +750,13 @@
           case "resources": await installPackageResources(message.resources ?? []); reply(message.request, true); break;
           case "launch": await launch(); reply(message.request, true); break;
           case "touch-controls":
-            if (typeof message.fireEnabled !== "boolean" || typeof message.focusEnabled !== "boolean" || !Number.isInteger(message.bombSerial) || !Number.isInteger(message.escapeSerial) ||
-                !Number.isInteger(message.joystickX) || !Number.isInteger(message.joystickY) || message.joystickX < -32768 || message.joystickX > 32767 || message.joystickY < -32768 || message.joystickY > 32767 ||
-                !Number.isFinite(message.touchSensitivity) || message.touchSensitivity < 100 || message.touchSensitivity > 300) throw new Error("invalid touch controls");
-            Module.eaglerControls.fireEnabled = message.fireEnabled; Module.eaglerControls.focusEnabled = message.focusEnabled; Module.eaglerControls.bombSerial = message.bombSerial; Module.eaglerControls.escapeSerial = message.escapeSerial; Module.eaglerControls.joystickX = message.joystickX; Module.eaglerControls.joystickY = message.joystickY; Module.eaglerOptions.touchSensitivity = message.touchSensitivity;
+            applyRuntimeInputEvent(message);
             if (message.request) reply(message.request, true); break;
           case "keyboard":
-            if (typeof message.down !== "boolean" || typeof message.code !== "string" || typeof message.key !== "string" || !Number.isInteger(message.keyCode) || !Number.isInteger(message.location)) throw new Error("invalid keyboard bridge event");
-            applyBrowserKeyboardEvent(message, message.down); break;
-          case "keyboard-clear": clearBrowserKeyboard(); break;
-          case "touch-cancel": cancelAllTouches(); reply(message.request, true); break;
+          case "keyboard-clear": applyRuntimeInputEvent(message); break;
+          case "touch-cancel": applyRuntimeInputEvent(message); reply(message.request, true); break;
           case "direct-touch": {
-            if (!["down", "move", "up"].includes(message.type) || !Number.isInteger(message.id) ||
-                !Number.isFinite(message.x) || !Number.isFinite(message.y))
-              throw new Error("invalid direct touch bridge event");
-            const touchRect = Module.canvas.getBoundingClientRect();
-            if (!(touchRect.width > 0) || !(touchRect.height > 0)) break;
-            const viewportX = message.x * window.innerWidth;
-            const viewportY = message.y * window.innerHeight;
-            const touchX = (viewportX - touchRect.left) / touchRect.width;
-            const touchY = (viewportY - touchRect.top) / touchRect.height;
-            if (message.type === "down") Module.canvas.focus({ preventScroll: true });
-            if (message.type === "down" && typeof Module._TouhouAuxTouchDown === "function") Module._TouhouAuxTouchDown(message.id, touchX, touchY);
-            else if (message.type === "move" && typeof Module._TouhouAuxTouchMotion === "function") Module._TouhouAuxTouchMotion(message.id, touchX, touchY);
-            else if (message.type === "up" && typeof Module._TouhouAuxTouchUp === "function") Module._TouhouAuxTouchUp(message.id, touchX, touchY);
+            applyRuntimeInputEvent(message);
             break;
           }
           case "thprac-mouse":
@@ -726,6 +822,7 @@
           });
         }],
         onRuntimeInitialized: () => {
+          setWebAudioActive(document.visibilityState !== "hidden");
           if (hosted) { status.textContent = "Ready"; emit("ready", { saveRoot }); }
           else launch();
         },
