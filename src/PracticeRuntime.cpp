@@ -1938,6 +1938,7 @@ void DrawOverlay()
                 ImGui::TextUnformatted("thprac v2.3.0.3");
                 ImGui::TextUnformatted("github.com/touhouworldcup/thprac");
                 ImGui::TextUnformatted("Thanks: You!");
+#if defined(THPRAC_PORTABLE_ENABLED)
                 if (ImGui::Button(g_AdvancedOptions.showLicense ? hideLicense[locale] : showLicense[locale]))
                     g_AdvancedOptions.showLicense = !g_AdvancedOptions.showLicense;
                 if (g_AdvancedOptions.showLicense)
@@ -1946,6 +1947,7 @@ void DrawOverlay()
                     THPrac::Gui::ShowLicenceInfo();
                     ImGui::EndChild();
                 }
+#endif
                 ImGui::Unindent();
             }
             ImGui::SetWindowFocus();

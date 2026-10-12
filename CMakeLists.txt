@@ -15,14 +15,14 @@ option(TH_ENABLE_THCRAP "Build the archived thcrap localization integration" OFF
 option(TH_ENABLE_NETPLAY "Build the isolated TH07 rollback-netplay core" OFF)
 option(TH_ENABLE_MULTIPLAYER_GAMEPLAY "Build TH07 multiplayer gameplay without requiring a transport" OFF)
 option(TH_DEV_TOOLS "Enable developer-only tools such as F5 fast-forward" OFF)
-set(THPRAC_IMGUI_ROOT "${CMAKE_SOURCE_DIR}/../thprac-reallyportable/thprac/src/3rdParties/ImGui" CACHE PATH "Dear ImGui 1.82 source used by the desktop thprac integration")
+set(THPRAC_IMGUI_ROOT "" CACHE PATH "Dear ImGui 1.82 source used by the desktop thprac integration")
 set(TH_WEB_MUSIC "BASE" CACHE STRING "Bundled Web music payload: BASE, MIDI, WAV, or OGG")
 set_property(CACHE TH_WEB_MUSIC PROPERTY STRINGS BASE MIDI WAV OGG)
 set(TH07_ASSET_ROOT "${CMAKE_SOURCE_DIR}/assets" CACHE PATH "TH07 original asset directory")
 set(TH07_OGG_ROOT "${CMAKE_SOURCE_DIR}/assets-ogg" CACHE PATH "TH07 generated OGG asset directory")
-set(TH_UNIFONT_FILE "${CMAKE_SOURCE_DIR}/../dependencies/unifont-15.1.05/unifont-15.1.05.otf" CACHE FILEPATH "GNU Unifont OTF used by localized text and thprac")
-if((TH_ENABLE_THCRAP OR TH_ENABLE_THPRAC) AND NOT EXISTS "${TH_UNIFONT_FILE}")
-    message(FATAL_ERROR "GNU Unifont is required: ${TH_UNIFONT_FILE}")
+set(TH_UNIFONT_FILE "" CACHE FILEPATH "GNU Unifont OTF used by localized text and thprac")
+if((TH_ENABLE_THCRAP OR TH_ENABLE_THPRAC) AND NOT (EMSCRIPTEN AND TH_WEB_SHARED_FONT) AND NOT EXISTS "${TH_UNIFONT_FILE}")
+    message(FATAL_ERROR "Set TH_UNIFONT_FILE to a GNU Unifont OTF; this build embeds or copies the font.")
 endif()
 
 set(SOURCES

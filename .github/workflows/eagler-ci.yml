@@ -25,13 +25,16 @@ jobs:
       - name: Check Python and integration script syntax
         shell: bash
         run: |
-          python3 -m py_compile tests/*.py audit/source-contracts/*.py scripts/convert_bgm_ogg.py
+          python3 -m py_compile tests/*.py scripts/convert_bgm_ogg.py
           for file in tests/*.cjs; do
             node --check "$file"
           done
 
       - name: Compile and run core behavior tests
-        run: bash scripts/run-core-tests.sh
+        run: |
+          cmake -S tests -B build/core-tests -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/core-tests --config Release --parallel 4
+          ctest --test-dir build/core-tests -C Release --output-on-failure
 
   web-build:
     name: Web ${{ matrix.variant }}
