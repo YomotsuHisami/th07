@@ -1,6 +1,7 @@
 #include "Lzss.hpp"
 
 #include <cstdlib>
+#include <cstring>
 
 #define LZSS_LOOKAHEAD_SIZE ((1 << LZSS_LENGTH_BITS) + 2)
 #define LZSS_DICTSIZE_MASK (LZSS_DICTSIZE - 1)
@@ -160,6 +161,7 @@ u8 *Lzss::Compress(u8 *src, i32 dstLen, i32 *srcLen)
     }
 
 #define DEC_WRITE_BYTE(data)                                                                       \
+    if (static_cast<u32>(dstCursor - dst) >= decompressedSize) goto malformed;              \
     *dstCursor++ = data;                                                                           \
     g_LzssDictionary[dictHead] = data;                                                             \
     dictHead = LZSS_DICTPOS_MOD(dictHead, 1);
@@ -213,6 +215,9 @@ u8 *Lzss::Decompress(u8 *src, i32 srcLen, u8 *dst, u32 decompressedSize)
     u32 checksum = 0;
     (void)checksum;
     i32 size = srcLen;
+    const bool ownsDestination = dst == NULL;
+    if (src == NULL || srcLen < 0) return NULL;
+    std::memset(g_LzssDictionary, 0, sizeof(g_LzssDictionary));
 
     if (dst == NULL)
     {
@@ -266,7 +271,12 @@ u8 *Lzss::Decompress(u8 *src, i32 srcLen, u8 *dst, u32 decompressedSize)
         DEC_READ_FLAG_BIT();
     }
 
+    if (static_cast<u32>(dstCursor - dst) != decompressedSize) goto malformed;
     return dst;
+
+malformed:
+    if (ownsDestination) std::free(dst);
+    return NULL;
 }
 
 void Lzss::InitializeTree(i32 root)
