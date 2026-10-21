@@ -1,3 +1,9 @@
+> **已归档 | Archived**
+>
+> 本 `eagler` 分支已归档。后续开发与维护请前往 [eagler-touhou/th07](https://github.com/YomotsuHisami/eagler-touhou/tree/launcher-refactor/th07)。
+
+---
+
 # TH07 Eagler Runtime
 
 This document is the Eagler-specific engineering guide for the `eagler` branch.
